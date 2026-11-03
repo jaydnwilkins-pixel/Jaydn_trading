@@ -6,6 +6,7 @@ authorization happened upstream (dashboards) and validation happens in the
 API layer; the Desk just keeps graph and desk.db in step.
 """
 import json
+import re
 import secrets
 import threading
 import time
@@ -17,6 +18,26 @@ from .. import sessions
 from ..graph.pipeline import (build_override_pipeline, build_pipeline,
                               build_sell_review_pipeline)
 from ..graph.state import Instrument, PipelineState, Thesis
+
+# The ticker is baked into the work-item id, and that id is rendered into
+# pages, handler attributes and narrative paths. Every run starter (the HTTP
+# route, the schedules, Claire's run_pipeline tool, the watcher) funnels
+# through start_run, so this is the one place a ticker carrying markup or a
+# path can be refused. Real symbols only need letters, digits, '.', '-' (BRK.B,
+# RDS-A, 0700, C07) and '&' (NSE's M&M) — none of which can open a tag, break
+# out of a quoted attribute or climb a directory ('..' is refused below).
+TICKER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.&-]{0,19}")
+EXCHANGE_RE = re.compile(r"[A-Z][A-Z0-9]{1,9}")
+
+
+def validate_symbol(ticker, exchange):
+    """Raise ValueError unless ticker/exchange look like real venue codes.
+    Importable by the API layer so RunBody can 422 before a run exists."""
+    if not isinstance(ticker, str) or not TICKER_RE.fullmatch(ticker) \
+            or ".." in ticker:
+        raise ValueError(f"invalid ticker {str(ticker)[:40]!r}")
+    if not isinstance(exchange, str) or not EXCHANGE_RE.fullmatch(exchange):
+        raise ValueError(f"invalid exchange {str(exchange)[:40]!r}")
 
 
 class Desk:
@@ -35,6 +56,9 @@ class Desk:
     # ── starting runs ────────────────────────────────────────────────────
     def start_run(self, instrument, kind="pipeline", *, background=True,
                   trigger=None):
+        # before create_work_item: a failed run still leaves its row behind,
+        # so a bad ticker must never get as far as an id
+        validate_symbol(instrument.ticker, instrument.exchange)
         ts = int(self.clock())
         day = time.strftime("%Y-%m-%d", time.gmtime(ts))
         wi = f"wi_{day}_{instrument.ticker}_{secrets.token_hex(2)}"

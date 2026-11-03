@@ -3,6 +3,7 @@ escalating re-alerts, own health tile. On breach it LAUNCHES a sell_review —
 selling still requires the same human approval as buying.
 """
 import json
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -28,7 +29,9 @@ class Watcher:
         report = {"checked": 0, "fired": [], "closed": [], "unpriced": []}
         now = datetime.fromtimestamp(int(self.clock()), tz=timezone.utc)
         today = now.date().isoformat()
-        for pos in self._positions():
+        positions = self._positions()
+        self._reset_flat_rules(positions)
+        for pos in positions:
             inst = pos["instrument"]
             if not self._in_session_or_grace(inst["exchange"], now):
                 report["closed"].append(inst["id"])
@@ -40,9 +43,15 @@ class Watcher:
             except Exception as e:              # noqa: BLE001
                 report["unpriced"].append(f"{inst['id']}: {e}")
                 continue
+            # this position's rules only: a trailing rule belongs to one
+            # (instrument, account, side) — a long and a short in the same
+            # name, or two accounts, used to share one rule and one peak.
+            # Price-level rules (below/above) with no account stay global.
             for rule in self.conn.execute(
                     "SELECT * FROM price_alerts WHERE instrument_id=?"
-                    " AND armed=1", (inst["id"],)).fetchall():
+                    " AND armed=1 AND (account_id IS NULL OR account_id=?)"
+                    " AND (side IS NULL OR side=?)",
+                    (inst["id"], pos["account_id"], pos["side"])).fetchall():
                 peak = (self._track_peak(rule, price_base, pos)
                         if rule["rule"] == "trail_pct" else None)
                 if self._breached(rule, price_base, pos, today, peak):
@@ -90,15 +99,52 @@ class Watcher:
             return True                          # unknown venue: watch anyway
 
     def _ensure_auto_rule(self, pos):
-        """Seed the peak at entry so a rule behaves sensibly from its first
-        tick, before the price has moved anywhere."""
-        self.conn.execute(
-            "INSERT INTO price_alerts (instrument_id, rule, threshold, armed,"
-            " peak_base) SELECT ?, 'trail_pct', ?, 1, ? WHERE NOT EXISTS"
-            " (SELECT 1 FROM price_alerts WHERE instrument_id=?"
-            "  AND rule='trail_pct')",
-            (pos["instrument"]["id"], AUTO_DROP_PCT,
-             float(pos["avg_cost_base"]), pos["instrument"]["id"]))
+        """One trailing rule per position. A legacy row (no account/side,
+        from before rules were keyed) is adopted rather than duplicated;
+        otherwise the default is seeded with the peak at entry, so it behaves
+        sensibly from its first tick, before the price has moved."""
+        iid, acct, side = (pos["instrument"]["id"], pos["account_id"],
+                           pos["side"])
+        if self.conn.execute(
+                "SELECT 1 FROM price_alerts WHERE rule='trail_pct'"
+                " AND instrument_id=? AND account_id=? AND side=?",
+                (iid, acct, side)).fetchone():
+            return
+        legacy = self.conn.execute(
+            "SELECT id FROM price_alerts WHERE rule='trail_pct'"
+            " AND instrument_id=? AND account_id IS NULL"
+            " ORDER BY id DESC LIMIT 1", (iid,)).fetchone()
+        try:
+            if legacy:
+                self.conn.execute(
+                    "UPDATE price_alerts SET account_id=?, side=? WHERE id=?",
+                    (acct, side, legacy["id"]))
+            else:
+                self.conn.execute(
+                    "INSERT INTO price_alerts (instrument_id, account_id,"
+                    " side, rule, threshold, armed, peak_base)"
+                    " VALUES (?,?,?,'trail_pct',?,1,?)",
+                    (iid, acct, side, AUTO_DROP_PCT,
+                     float(pos["avg_cost_base"])))
+        except sqlite3.IntegrityError:       # execute seeded it meanwhile
+            pass
+
+    def _reset_flat_rules(self, positions):
+        """A position that has gone flat forgets its high-water mark. A
+        re-bought stock used to inherit the old peak — possibly far above
+        the new entry — and alert on its first tick. Execute clears it too
+        when it opens from flat; this covers fills that arrive between."""
+        live = {(p["instrument"]["id"], p["account_id"], p["side"])
+                for p in positions}
+        for r in self.conn.execute(
+                "SELECT id, instrument_id, account_id, side FROM price_alerts"
+                " WHERE rule='trail_pct' AND account_id IS NOT NULL"
+                " AND (peak_base IS NOT NULL OR fire_count_today > 0)"
+                ).fetchall():
+            if (r["instrument_id"], r["account_id"], r["side"]) not in live:
+                self.conn.execute(
+                    "UPDATE price_alerts SET peak_base=NULL,"
+                    " fire_count_today=0 WHERE id=?", (r["id"],))
 
     def _track_peak(self, rule, price_base, pos) -> Decimal:
         """Ratchet the high-water mark — the whole point of a TRAILING stop.
@@ -107,11 +153,13 @@ class Watcher:
         position could round-trip a 30% gain without ever alerting.
         For a short the best price is the LOWEST one."""
         peak = rule["peak_base"]
+        seeded = peak is None           # new (or re-opened) position: start
         peak = Decimal(str(peak)) if peak is not None \
-            else Decimal(pos["avg_cost_base"])
+            else Decimal(pos["avg_cost_base"])         # from its own entry
         better = price_base > peak if pos["side"] > 0 else price_base < peak
         if better:
             peak = price_base
+        if better or seeded:
             self.conn.execute(
                 "UPDATE price_alerts SET peak_base=? WHERE id=?",
                 (float(peak), rule["id"]))

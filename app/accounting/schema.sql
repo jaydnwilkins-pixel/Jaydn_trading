@@ -64,7 +64,14 @@ CREATE TABLE IF NOT EXISTS orders (        -- broker order lifecycle; FILLS ARE 
     'filled','cancelled','expired','rejected')),
   broker_order_id TEXT UNIQUE,
   expires_at INTEGER NOT NULL,             -- order TTL: cancel at broker if unfilled
-  placed_at INTEGER, updated_at INTEGER NOT NULL
+  placed_at INTEGER, updated_at INTEGER NOT NULL,
+  -- the row is written BEFORE the venue sees the order (so a crash can never
+  -- leave an untracked live order); client_order_id is what the venue is
+  -- given, submitted_at is the single-placer claim (NULL = not yet sent)
+  client_order_id TEXT, submitted_at INTEGER,
+  created_at INTEGER,                      -- decision time → max_trades_per_day
+  reserved_base INTEGER                    -- cash held back for an open buy, so
+                                           -- two approvals can't spend it twice
 );
 CREATE TABLE IF NOT EXISTS executions (    -- IMMUTABLE; ONE ROW PER FILL —
                                            -- partial fills are multiple rows;
@@ -139,6 +146,9 @@ CREATE TABLE IF NOT EXISTS price_alerts (
   threshold REAL NOT NULL, armed INTEGER NOT NULL DEFAULT 1,
   peak_base REAL,                          -- best price since entry:
                                            -- HIGHEST for a long, LOWEST for a short
+  account_id TEXT, side INTEGER,           -- trail_pct rules are per position:
+                                           -- (instrument, account, +1 long/-1 short);
+                                           -- NULL = legacy / applies to any
   last_fired_at INTEGER, fire_count_today INTEGER DEFAULT 0,
   fire_count_date TEXT                     -- YYYY-MM-DD the counter belongs to
 );
@@ -239,7 +249,7 @@ FROM work_items w WHERE w.thesis_json IS NOT NULL;
 CREATE TABLE IF NOT EXISTS providers (
   id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('anthropic','openai_compatible','custom')),
+  kind TEXT NOT NULL CHECK(kind IN ('anthropic','claude_sdk','openai_compatible','custom')),
   base_url TEXT,
   api_key_ref TEXT,                        -- env var NAME — never the secret itself
   capabilities TEXT NOT NULL,              -- JSON: tool_calling, structured_output, …

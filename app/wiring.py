@@ -79,7 +79,20 @@ def build_deps(conn, repo, narratives, market, *, brokers=None,
         record=build_record(repo, narratives, clock=clock,
                             prose_fn=_recorder_prose(conn, env)),
         prepare=prepare,
+        last_price=_last_price(market),
     )
+
+
+def _last_price(market):
+    """The gate's price-band check (review H5): an arbiter's entry far from
+    where the stock actually trades never reaches the approval card. A
+    failing lookup raises, which the gate treats as "skip here" — execute
+    re-checks against the live quote and fails closed."""
+    from .tools.market import yahoo_symbol
+
+    def last_price(inst):
+        return market.quote(yahoo_symbol(inst.ticker, inst.exchange))["price"]
+    return last_price
 
 
 def _recorder_prose(conn, env):

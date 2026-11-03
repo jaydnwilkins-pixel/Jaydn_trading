@@ -27,7 +27,11 @@ def open_positions(conn) -> list[dict]:
             " i.currency, a.broker, a.base_currency,"
             " SUM(CASE WHEN l.qty_opened<0 THEN -l.qty_remaining"
             "     ELSE l.qty_remaining END) AS qty,"
-            " SUM(l.qty_remaining*l.cost_per_share_base) AS cost_num,"
+            # SIGNED cost: a short's entry is money received, so it is
+            # negative here; value (price × negative qty) minus this signed
+            # cost is then the right P&L for either side (M8)
+            " SUM(CASE WHEN l.qty_opened<0 THEN -1 ELSE 1 END"
+            "     * l.qty_remaining*l.cost_per_share_base) AS cost_num,"
             " SUM(l.commission_allocated) AS commissions,"
             " MIN(l.opened_at) AS opened_at"
             " FROM lots l"
@@ -46,6 +50,7 @@ def open_positions(conn) -> list[dict]:
             "exchange": p["exchange"], "currency": p["currency"],
             "symbol": yahoo_symbol(p["ticker"], p["exchange"]),
             "qty": float(qty),
+            "side": "short" if qty < 0 else "long",
             "cost_base": float(cost_base),
             "avg_cost_base": float(cost_base / qty) if qty else None,
             "commissions": float(_d(p["commissions"])),
@@ -73,13 +78,15 @@ def levels_for(conn, position, fills) -> dict:
     out = {"avg_cost_native": None, "stop_loss": None, "take_profit": None,
            "entry_low": None, "entry_high": None, "alert": None,
            "work_item_id": None}
-    buys = [f for f in fills if f["side"] == "buy"]
-    if buys:
-        qty = sum(f["qty"] for f in buys)
+    short = (position or {}).get("qty", 0) < 0
+    # the fills that OPENED this position: buys for a long, sells for a short
+    opens = [f for f in fills if f["side"] == ("sell" if short else "buy")]
+    if opens:
+        qty = sum(f["qty"] for f in opens)
         if qty:
             out["avg_cost_native"] = sum(
-                f["price_native"] * f["qty"] for f in buys) / qty
-    wi_id = next((f["work_item_id"] for f in reversed(buys)
+                f["price_native"] * f["qty"] for f in opens) / qty
+    wi_id = next((f["work_item_id"] for f in reversed(opens)
                   if f["work_item_id"]), None)
     if wi_id:
         row = conn.execute("SELECT thesis_json FROM work_items WHERE id=?",
@@ -94,19 +101,26 @@ def levels_for(conn, position, fills) -> dict:
                             "work_item_id": wi_id})
             except ValueError:
                 pass
+    # this position's own rule (instrument, account, side); a legacy row
+    # with no account/side applies to any position in the name
     alert = conn.execute(
         "SELECT rule, threshold, peak_base FROM price_alerts"
-        " WHERE instrument_id=? AND armed=1 AND rule='trail_pct' LIMIT 1",
-        (position["instrument_id"],)).fetchone()
+        " WHERE instrument_id=? AND armed=1 AND rule='trail_pct'"
+        " AND (account_id IS NULL OR account_id=?)"
+        " AND (side IS NULL OR side=?)"
+        " ORDER BY account_id IS NULL, id DESC LIMIT 1",
+        (position["instrument_id"], position.get("account_id"),
+         -1 if short else 1)).fetchone()
     if alert:
-        # draw the floor where it ACTUALLY sits — trailed up from the best
+        # draw the floor where it ACTUALLY sits — trailed from the best
         # price seen, not pinned to entry. Falls back to average cost until
-        # the watcher's first tick has set a peak.
+        # the watcher's first tick has set a peak. A short's stop is ABOVE.
         ref = alert["peak_base"] or out["avg_cost_native"]
         if ref:
-            out["alert"] = ref * (1 - alert["threshold"] / 100)
-            out["alert_rule"] = (f"trailing −{alert['threshold']:.0f}% "
-                                 f"of {ref:.2f}")
+            sign = 1 if short else -1
+            out["alert"] = ref * (1 + sign * alert["threshold"] / 100)
+            out["alert_rule"] = (f"trailing {'+' if short else '−'}"
+                                 f"{alert['threshold']:.0f}% of {ref:.2f}")
             out["alert_peak"] = alert["peak_base"]
     return out
 
@@ -139,21 +153,24 @@ def build(conn, market, *, clock, cal=None) -> dict:
                         "day_high", "day_low", "volume", "avg_volume",
                         "week52_high", "week52_low", "rsi", "mcap", "src")}
         p["price_unavailable"] = price is None
+        p["fx_unavailable"] = False
         fx = Decimal(1)
         if price is not None and q.get("currency") and \
                 q["currency"] != p["base_currency"]:
             try:
-                fx = market.fx(q["currency"], p["base_currency"])
+                fx = Decimal(str(market.fx(q["currency"], p["base_currency"])))
             except Exception:                   # noqa: BLE001
-                fx = Decimal(1)
-        if price is not None:
+                # no rate → no value. Pricing a ¥ position at 1.0 showed it
+                # ~150× too large (H6); "unavailable" is honest, wrong isn't
+                fx = None
+                p["fx_unavailable"] = True
+        if price is not None and fx is not None:
             value = Decimal(str(price)) * fx * Decimal(str(p["qty"]))
+            cost = Decimal(str(p["cost_base"]))     # signed: short < 0
             p["value_base"] = float(value)
-            p["unrealized_base"] = float(value - Decimal(str(p["cost_base"])))
-            p["unrealized_pct"] = (float(
-                (value - Decimal(str(p["cost_base"]))) /
-                Decimal(str(p["cost_base"])) * 100)
-                if p["cost_base"] else None)
+            p["unrealized_base"] = float(value - cost)
+            p["unrealized_pct"] = (float((value - cost) / abs(cost) * 100)
+                                   if cost else None)
             total_value += value
         else:
             p["value_base"] = None
@@ -172,16 +189,20 @@ def build(conn, market, *, clock, cal=None) -> dict:
         except KeyError:
             p["is_open"], p["next_open"] = None, None
 
+    # weights are of GROSS exposure: a short's value is negative, and a
+    # net denominator would let longs and shorts cancel into nonsense %
+    gross = sum(abs(Decimal(str(p["value_base"]))) for p in positions
+                if p.get("value_base") is not None)
     for p in positions:
-        p["weight_pct"] = (float(Decimal(str(p["value_base"])) /
-                                 total_value * 100)
-                           if p.get("value_base") and total_value else None)
+        p["weight_pct"] = (float(abs(Decimal(str(p["value_base"]))) /
+                                 gross * 100)
+                           if p.get("value_base") and gross else None)
 
     exchanges = {}
     for p in positions:
         exchanges.setdefault(p["exchange"], []).append(p)
     for ex, items in exchanges.items():
-        items.sort(key=lambda x: -(x.get("value_base") or 0))
+        items.sort(key=lambda x: -abs(x.get("value_base") or 0))
 
     closed = [dict(r) for r in conn.execute(
         "SELECT i.ticker, i.exchange, c.qty/1e6 AS qty,"

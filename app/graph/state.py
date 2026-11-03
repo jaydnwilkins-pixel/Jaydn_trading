@@ -95,12 +95,27 @@ class Thesis(BaseModel):
 
     @model_validator(mode="after")
     def _guards(self):
+        # A thesis is the literal order the human approves, so its levels
+        # must be coherent for its direction (H5). The buy limit is
+        # entry_high; a range the wrong way round, or a target on the losing
+        # side, would be approved as shown and executed as nonsense.
+        if self.entry_low and self.entry_high:
+            assert self.entry_low <= self.entry_high, \
+                "entry_low must not exceed entry_high"
         if self.direction == "buy":
             assert self.entry_low and self.stop_loss, "buy thesis needs entry+stop"
             assert self.stop_loss < self.entry_low, "stop must be below entry"
-        if self.direction == "sell" and self.entry_high and self.stop_loss:
-            assert self.stop_loss > self.entry_high, \
-                "sell/short stop must be ABOVE entry"
+            if self.take_profit is not None:
+                assert self.take_profit > (self.entry_high or self.entry_low), \
+                    "buy take-profit must be ABOVE entry"
+        if self.direction == "sell":
+            if self.entry_high and self.stop_loss:
+                assert self.stop_loss > self.entry_high, \
+                    "sell/short stop must be ABOVE entry"
+            if self.take_profit is not None and \
+                    (self.entry_low or self.entry_high):
+                assert self.take_profit < (self.entry_low or self.entry_high), \
+                    "sell/short take-profit must be BELOW entry"
         return self
 
 

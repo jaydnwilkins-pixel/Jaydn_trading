@@ -57,8 +57,19 @@ function ago(t) {
   if (s < 172800) return Math.round(s / 3600) + 'h ago';
   return Math.round(s / 86400) + 'd ago';
 }
-const esc = s => { const d = document.createElement('span');
-  d.textContent = s ?? ''; return d.innerHTML; };
+/* HTML-escape for BOTH text and attribute context. The old textContent →
+   innerHTML trick left quotes alone, so title="${esc(x)}" could still be
+   broken out of. Everything server-sent (provider names, models, tickers,
+   work-item ids) goes through this before it touches innerHTML. */
+const esc = s => String(s ?? '').replace(/[&<>"'`]/g, c => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  '`': '&#96;'})[c]);
+/* a value as a JS string literal inside an inline handler attribute:
+   onclick="f(${jsArg(id)})". JSON.stringify makes it a safe JS literal and
+   esc keeps it inside the attribute; the browser decodes the entities back
+   before the JS runs. Plain esc is NOT enough there — &#39; decodes to '
+   before the handler is parsed. */
+const jsArg = s => esc(JSON.stringify(String(s ?? '')));
 function sparkline(series, w = 70, h = 22) {
   if (!series || series.length < 2) return '';
   const lo = Math.min(...series), hi = Math.max(...series);

@@ -128,9 +128,18 @@ def build_tools(conn, repo, desk, market):
                            (work_item_id,)).fetchone()
         return json.dumps({"thesis": row and row["thesis_json"]}, default=str)
 
+    @tool
+    def saxo_live_positions() -> str:
+        """Richard's REAL Saxo account (read-only): cash, total value and open
+        positions with P/L. This is his actual money, separate from the
+        desk's paper book — never mix the two up, and there is no way to
+        trade it from here."""
+        from ..tools import saxo_live
+        return json.dumps(saxo_live.summary(), default=str)
+
     return [run_pipeline, pipeline_status, list_pending_approvals,
             portfolio_summary, share_pl, broker_metrics, market_quote,
-            market_chart, market_search, explain_thesis]
+            market_chart, market_search, explain_thesis, saxo_live_positions]
 
 
 class Claire:
@@ -139,6 +148,7 @@ class Claire:
         self.env = env
         self._histories = {}                    # cache over chat_threads table
         self._agent = None
+        self._sdk_chat = None                   # (model, system, tools) on SDK
 
     def _load(self, thread):
         if thread not in self._histories:
@@ -159,13 +169,43 @@ class Claire:
     def _ensure_agent(self):
         if self._agent is None:
             from langchain.agents import create_agent
+
+            from ..providers import claude_sdk
             row = registry.agent_row(self.conn, "claire_chat")
             model = registry.model_for(self.conn, "claire_chat", env=self.env)
-            self._agent = create_agent(
-                model=model,
-                tools=build_tools(self.conn, self.repo, self.desk, self.market),
-                system_prompt=row["system_prompt"])
+            tools = build_tools(self.conn, self.repo, self.desk, self.market)
+            if claude_sdk.is_sdk(model):
+                # Max subscription: the SDK owns the tool loop
+                self._sdk_chat = (model, row["system_prompt"], tools)
+                self._agent = model
+            else:
+                self._agent = create_agent(model=model, tools=tools,
+                                           system_prompt=row["system_prompt"])
         return self._agent
+
+    def _ask_stream_sdk(self, history, thread):
+        from ..providers import claude_sdk
+        chat, system, tools = self._sdk_chat
+        msgs = [(m["role"], m["content"]) for m in history]
+        _, prompt = claude_sdk.split_messages(msgs)
+        final = ""
+        try:
+            for kind, payload in claude_sdk.stream_chat(chat, system, prompt,
+                                                        tools):
+                if kind == "tool":
+                    yield json.dumps({"kind": "tool", **payload},
+                                     default=str) + "\n"
+                elif kind == "text":
+                    yield json.dumps({"kind": "text", "text": payload}) + "\n"
+                elif kind == "done":
+                    final = payload or final
+            history.append({"role": "assistant", "content": final})
+            self._save(thread)
+            yield json.dumps({"kind": "done"}) + "\n"
+        except Exception as e:                  # noqa: BLE001
+            history.pop()                       # don't keep an unanswered turn
+            yield json.dumps({"kind": "error", "text": str(e)[:400]}) + "\n"
+            yield json.dumps({"kind": "done"}) + "\n"
 
     def ask_stream(self, text: str, thread: str = "main"):
         """NDJSON generator: {kind: text|tool|done|error}."""
@@ -179,6 +219,9 @@ class Claire:
         if len(history) > MAX_TURNS_PER_THREAD * 2:
             history.clear()                     # §17 auto-reset
         history.append({"role": "user", "content": text})
+        if self._sdk_chat is not None:
+            yield from self._ask_stream_sdk(history, thread)
+            return
         final = ""
         try:
             for update in agent.stream({"messages": list(history)},

@@ -116,17 +116,28 @@ class Repo:
     def create_order(self, *, id, account_id, instrument_id, side, qty,
                      expires_at, ts, status="placed", work_item_id=None,
                      limit_price=None, stop_loss=None, take_profit=None,
-                     broker_order_id=None):
+                     broker_order_id=None, fx_rate=None, ref_price=None,
+                     client_order_id=None, submitted_at=None,
+                     reserved_base=None):
+        """`fx_rate` (instrument ccy → account base, ×1e6) and `ref_price`
+        (native, the live quote) feed the notional risk caps — see
+        check_risk. `client_order_id` defaults to the row id: it is what the
+        venue is told, so a re-placement can be recognised as the same
+        order."""
         if qty <= 0:
             raise LedgerError("order qty must be positive")
-        self.check_risk(account_id, instrument_id, side, qty, limit_price, ts)
+        self.check_risk(account_id, instrument_id, side, qty, limit_price, ts,
+                        fx_rate=fx_rate, ref_price=ref_price)
         self.conn.execute(
             "INSERT INTO orders (id, work_item_id, account_id, instrument_id, side,"
             " qty, limit_price, stop_loss, take_profit, status, broker_order_id,"
-            " expires_at, placed_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " expires_at, placed_at, updated_at, client_order_id, submitted_at,"
+            " created_at, reserved_base)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (id, work_item_id, account_id, instrument_id, side, qty, limit_price,
              stop_loss, take_profit, status, broker_order_id,
-             expires_at, ts if status == "placed" else None, ts))
+             expires_at, ts if status == "placed" else None, ts,
+             client_order_id or id, submitted_at, ts, reserved_base))
         return id
 
     def mark_order(self, order_id, status, *, ts, broker_order_id=None):
@@ -152,18 +163,65 @@ class Repo:
             "SELECT * FROM orders WHERE status IN"
             " ('pending_session','placed','partially_filled')").fetchall()
 
-    def check_risk(self, account_id, instrument_id, side, qty, limit_price, ts):
+    def reserved_cash(self, account_id) -> int:
+        """Cash already promised to open buy orders and not yet debited by a
+        fill. The cash check must subtract it: fills are recorded at poll
+        time, so two approvals in one poll interval each saw the full balance
+        and the second fill was refused (H8)."""
+        (r,) = self.conn.execute(
+            "SELECT COALESCE(SUM(MAX(0, o.reserved_base - COALESCE("
+            "  (SELECT SUM(e.net_base) FROM executions e"
+            "   WHERE e.order_id = o.id), 0))), 0)"
+            " FROM orders o WHERE o.account_id=? AND o.side='buy'"
+            " AND o.reserved_base IS NOT NULL AND o.status IN"
+            " ('pending_session','placed','partially_filled')",
+            (account_id,)).fetchone()
+        return int(r)
+
+    def available_cash(self, account_id) -> int:
+        return self.cash_balance(account_id) - self.reserved_cash(account_id)
+
+    def check_risk(self, account_id, instrument_id, side, qty, limit_price,
+                   ts, *, fx_rate=None, ref_price=None):
         """Public so the executor can validate BEFORE the venue sees the
-        order; create_order runs it again (idempotent, cheap)."""
+        order; create_order runs it again (idempotent, cheap).
+
+        Every cap is in the ACCOUNT'S BASE currency, so the notional is
+        converted before it is compared: a ¥300,000 Toyota order used to be
+        measured against a $25k cap as if it were $300k, while HKD and SGD
+        orders got caps 7.8× and 1.35× looser than intended (H7). A market
+        order (no limit) is measured at `ref_price` — it used to skip both
+        notional caps entirely. With caps configured and no price or no FX
+        rate, the order is refused: an unmeasurable order is not a small
+        one."""
         acct = self.account(account_id)
         limits = json.loads(acct["risk_limits"])
         if not limits:
             return
-        notional = mul_micro(qty, limit_price) if limit_price else None
+        notional_caps = (limits.get("max_order_base") is not None or
+                         (side == "buy" and
+                          limits.get("max_position_pct") is not None))
+        notional = None
+        if notional_caps:
+            price = limit_price or ref_price
+            if not price:
+                raise RiskLimitExceeded(
+                    "no limit and no reference price — the order's notional "
+                    "cannot be checked against the risk caps")
+            if fx_rate is None:
+                inst = self.instrument(instrument_id)
+                if inst["currency"] != acct["base_currency"]:
+                    raise RiskLimitExceeded(
+                        f"no {inst['currency']}→{acct['base_currency']} FX rate"
+                        " — the order cannot be measured against base-currency"
+                        " caps")
+                fx_rate = MICRO
+            notional = mul_micro(mul_micro(qty, price), fx_rate)
         cap = limits.get("max_order_base")
-        if cap is not None and notional is not None and notional > to_micro(str(cap)):
+        if cap is not None and notional > to_micro(str(cap)):
             raise RiskLimitExceeded(
-                f"order notional {notional} exceeds max_order_base {cap}")
+                f"order notional {notional / MICRO:.2f} "
+                f"{acct['base_currency']} exceeds max_order_base {cap}")
         cap = limits.get("max_open_positions")
         if cap is not None and side == "buy":
             (n,) = self.conn.execute(
@@ -173,7 +231,7 @@ class Repo:
             if n + 1 > cap:
                 raise RiskLimitExceeded(f"would exceed max_open_positions {cap}")
         cap = limits.get("max_position_pct")
-        if cap is not None and side == "buy" and notional is not None:
+        if cap is not None and side == "buy":
             (open_cost,) = self.conn.execute(
                 "SELECT COALESCE(SUM(qty_remaining*cost_per_share_base/1e6),0)"
                 " FROM lots WHERE account_id=? AND qty_remaining>0"
@@ -190,13 +248,45 @@ class Repo:
                     f"position would exceed max_position_pct {cap}% of equity")
         cap = limits.get("max_trades_per_day")
         if cap is not None:
-            day = ts - (ts % 86400)
+            # the trading day is the VENUE'S local day, not UTC's — an SGX
+            # morning straddles two UTC dates — and an order counts from the
+            # moment it is decided, so queued pending_session orders count
+            # too (they used to be invisible until placed)
+            start, end = self._local_day(instrument_id, ts)
             (n,) = self.conn.execute(
                 "SELECT COUNT(*) FROM orders WHERE account_id=?"
-                " AND placed_at IS NOT NULL AND placed_at >= ? AND placed_at < ?",
-                (account_id, day, day + 86400)).fetchone()
+                " AND status != 'rejected'"
+                " AND COALESCE(created_at, placed_at, updated_at) >= ?"
+                " AND COALESCE(created_at, placed_at, updated_at) < ?",
+                (account_id, start, end)).fetchone()
             if n + 1 > cap:
                 raise RiskLimitExceeded(f"would exceed max_trades_per_day {cap}")
+
+    def _local_day(self, instrument_id, ts) -> tuple[int, int]:
+        """[start, end) unix seconds of the exchange-local calendar day that
+        contains `ts`. Unknown venue → UTC day (the old behaviour)."""
+        from datetime import datetime, timedelta, timezone
+        from zoneinfo import ZoneInfo
+        tz = None
+        row = self.conn.execute(
+            "SELECT exchange FROM instruments WHERE id=?",
+            (instrument_id,)).fetchone()
+        if row is not None:
+            s = self.conn.execute(
+                "SELECT tz FROM exchange_sessions WHERE exchange=?",
+                (row["exchange"],)).fetchone()
+            if s is not None:
+                tz = s["tz"]
+            else:
+                from .. import sessions
+                d = sessions.DEFAULTS.get(row["exchange"])
+                tz = d.tz if d else None
+        zone = ZoneInfo(tz) if tz else timezone.utc
+        local = datetime.fromtimestamp(ts, tz=zone)
+        start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)    # aware arithmetic is wall-clock:
+                                           # next local midnight, DST-safe
+        return int(start.timestamp()), int(end.timestamp())
 
     # ── fills: the money path ────────────────────────────────────────────
     def record_fill(self, order_id, *, broker_fill_id, qty, price_native,
@@ -219,22 +309,31 @@ class Repo:
         acct = self.account(o["account_id"])
         broker_order_id = o["broker_order_id"] or order_id
 
-        existing = self.conn.execute(
-            "SELECT id FROM executions WHERE broker_order_id=? AND broker_fill_id=?",
-            (broker_order_id, broker_fill_id)).fetchone()
-        if existing:
-            return existing["id"]
-
         gross_base = mul_micro(mul_micro(qty, price_native), fx_rate)
         price_base = mul_micro(price_native, fx_rate)
-        if commission is None:
-            commission = self._fee_increment(o, acct, gross_base)
-        fees = commission + other_fees
         ex_id = f"ex_{uuid.uuid4().hex[:12]}"
 
         cur = self.conn
         cur.execute("BEGIN IMMEDIATE")
         try:
+            # idempotency and the cumulative fee are read INSIDE the write
+            # lock: checked outside it, two pollers could both see "not yet
+            # recorded" (the UNIQUE constraint would then fail one loudly) or
+            # both bill a flat fee as the order's first fill
+            existing = cur.execute(
+                "SELECT id FROM executions WHERE broker_order_id=?"
+                " AND broker_fill_id=?",
+                (broker_order_id, broker_fill_id)).fetchone()
+            if existing:
+                cur.execute("COMMIT")
+                return existing["id"]
+            o = self.order(order_id)        # status as of the lock, not before
+            if o["status"] in TERMINAL_ORDER and o["status"] != "filled":
+                raise LedgerError(
+                    f"order {order_id} is {o['status']}; fill refused")
+            if commission is None:
+                commission = self._fee_increment(o, acct, gross_base)
+            fees = commission + other_fees
             (filled,) = cur.execute(
                 "SELECT COALESCE(SUM(qty),0) FROM executions WHERE order_id=?",
                 (order_id,)).fetchone()
@@ -362,8 +461,23 @@ class Repo:
                     " AND qty_remaining > 0", (instrument_id,)).fetchall():
                 new_rem = int((Decimal(lot["qty_remaining"]) * r)
                               .quantize(Decimal(1)))
-                new_opened = int((Decimal(lot["qty_opened"]) * r)
-                                 .quantize(Decimal(1)))
+                # A lot's opened qty must equal remaining + closed (the
+                # invariant). Scaling qty_opened but not the closures broke
+                # it for any partly-sold lot (buy 100, sell 40, split 2:1 →
+                # 200 ≠ 120 + 40). Closures are restated in post-split
+                # shares — proceeds, cost and P&L are money and don't move —
+                # and qty_opened is DERIVED from the scaled parts, so
+                # rounding can never open a gap.
+                closed = 0
+                for c in cur.execute(
+                        "SELECT id, qty FROM lot_closures WHERE lot_id=?",
+                        (lot["id"],)).fetchall():
+                    cq = int((Decimal(c["qty"]) * r).quantize(Decimal(1)))
+                    cur.execute("UPDATE lot_closures SET qty=? WHERE id=?",
+                                (cq, c["id"]))
+                    closed += cq
+                sign = -1 if lot["qty_opened"] < 0 else 1
+                new_opened = sign * (new_rem + closed)
                 # conserve basis exactly: recompute per-share from the total
                 total_cost = lot["qty_remaining"] * lot["cost_per_share_base"]
                 new_cps = int(Decimal(total_cost) / new_rem) if new_rem else 0

@@ -22,7 +22,7 @@ def test_capability_gate_rejects_with_reason(conn):
     with pytest.raises(registry.CapabilityError, match="structured_output"):
         registry.assign(conn, "arbiter", "dumb", "some-model")
     # the failed assignment must not have changed the row
-    assert registry.agent_row(conn, "arbiter")["provider_id"] == "anthropic"
+    assert registry.agent_row(conn, "arbiter")["provider_id"] == "claude_max"
 
 
 def test_assign_updates_row(conn):
@@ -51,7 +51,8 @@ def test_fallback_fires_on_provider_failure(conn):
         return FakeListChatModel(responses=["from fallback"])
 
     registry.assign(conn, "news", "anthropic", "claude-haiku-4-5",
-                    fallback_provider_id="deepseek", fallback_model="deepseek-chat")
+                    fallback_provider_id="deepseek", fallback_model="deepseek-chat",
+                    require_health=False)     # gate has its own test
     llm = registry.model_for(conn, "news", _build=fake_build, env={})
     out = llm.invoke("hi")
     assert out.content == "from fallback"
@@ -69,7 +70,7 @@ def test_meter_records_run(conn):
     assert row["agent_id"] == "news"
     assert row["work_item_id"] == "wi_x"
     assert row["status"] == "ok"
-    assert row["provider_id"] == "anthropic"
+    assert row["provider_id"] == "claude_max"
 
 
 def test_health_probe_records_failure_and_success(conn):
@@ -89,3 +90,15 @@ def test_disabled_agent_refused(conn):
     conn.execute("UPDATE agents SET enabled=0 WHERE id='news'")
     with pytest.raises(registry.ProviderError, match="disabled"):
         registry.model_for(conn, "news", env={})
+
+
+def test_provider_row_cannot_name_a_non_llm_secret(conn):
+    """Review C1: a row naming CLAIRE_INTERNAL_SECRET would send it as the
+    bearer token to the row's base_url. build_llm refuses whatever wrote it."""
+    conn.execute(
+        "INSERT INTO providers (id, display_name, kind, base_url, api_key_ref,"
+        " capabilities) VALUES ('evil','x','openai_compatible',"
+        " 'http://attacker/v1','CLAIRE_INTERNAL_SECRET','{}')")
+    with pytest.raises(registry.ProviderError, match="not an LLM provider key"):
+        registry.build_llm(conn, "evil", "m",
+                           env={"CLAIRE_INTERNAL_SECRET": "s3cret"})

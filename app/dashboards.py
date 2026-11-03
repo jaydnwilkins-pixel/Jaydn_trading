@@ -4,9 +4,20 @@ is the ONLY component that converts a human click into a resume (§10).
 
 Pairing: approval tokens are released only to a browser that presents the
 dashboard key (X-Dash-Key, pasted once from etc/claire.env) — closing the
-"any localhost curl can read the card API" hole.
+"any localhost curl can read the card API" hole. EVERY POST needs the key
+too (review 2026-11-03 C1/H1): starting paid runs, repointing agents and
+editing providers are as dangerous as approving.
+
+Request hygiene (H2): the Host header must name this machine (stops DNS
+rebinding from reading GET routes), a present Origin must match the Host, and
+POST bodies must be application/json — a text/plain no-cors form post from
+another website is exactly what CORS does not preflight.
 """
+import hmac
 import json
+import re
+import select
+import socket
 import threading
 import time
 import traceback
@@ -18,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from . import approvals, scheduler, sessions
+from .tools.files import JailError
 from .providers import health as provider_health
 from .providers import registry
 from .tools import tradingview
@@ -40,18 +52,138 @@ PIPELINE_EDGES = [("prepare", "fundamental"), ("prepare", "technical"),
                   ("bear", "arbiter"), ("arbiter", "gate"),
                   ("gate", "execute"), ("execute", "record")]
 
+# The only env var NAMES a provider row may point at. build_llm sends
+# env[api_key_ref] as a bearer token to the row's base_url, so a free-form
+# name let anyone who could write a provider exfiltrate CLAIRE_DASHBOARD_KEY,
+# CLAIRE_INTERNAL_SECRET or a broker secret to a URL of their choosing (C1).
+# claude_sdk needs no key at all; None/"" means "no key".
+from .providers.registry import PROVIDER_KEY_REFS  # noqa: E402 — one list
+PROVIDER_KINDS = ("anthropic", "claude_sdk", "openai_compatible", "custom")
+
+MAX_BODY = 256 * 1024          # largest real body is a chat message; 256 KiB
+SSE_MAX_AGE = 15 * 60          # EventSource reconnects by itself, so a stream
+SSE_MAX_CLIENTS = 32           # costs nothing to recycle — a thread per tab
+                               # held forever does
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_ID_RE = re.compile(r"[a-z0-9_-]{2,30}")
+_MODEL_RE = re.compile(r"[A-Za-z0-9._:/@\[\]-]{1,120}")
+_CCY_RE = re.compile(r"[A-Z]{3}")
+
+
+class HTTPError(Exception):
+    """Raised by request plumbing; do_GET/do_POST turn it into a response."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code, self.message = code, message
+
+
+def default_allowed_hosts(bind):
+    """Host names this server answers to. Loopback always; when bound beyond
+    loopback, also this machine's hostname and LAN addresses — the names a
+    browser on the network would actually type. Anything else (an attacker's
+    domain rebound to our IP) is refused, GETs included."""
+    hosts = set(LOOPBACK_HOSTS)
+    if bind in LOOPBACK_HOSTS:
+        return hosts
+    if bind not in ("0.0.0.0", "::", ""):
+        hosts.add(bind.lower())
+    try:
+        name = socket.gethostname().lower()
+        hosts |= {name, f"{name}.local", socket.getfqdn().lower()}
+        hosts |= set(socket.gethostbyname_ex(name)[2])
+    except OSError:
+        pass
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))              # no packet sent; reads the route
+        hosts.add(s.getsockname()[0])
+        s.close()
+    except OSError:
+        pass
+    return hosts
+
+
+def host_only(value):
+    """'127.0.0.1:7787' → '127.0.0.1', '[::1]:7787' → '::1'."""
+    h = (value or "").strip().lower()
+    if h.startswith("["):
+        end = h.find("]")
+        return h[1:end] if end > 0 else ""
+    if h.count(":") == 1:
+        h = h.split(":", 1)[0]
+    return h.rstrip(".")
+
+
+def _validate_schedule_patch(current: dict, patch) -> dict:
+    """Only the knobs the UI exposes, with sane bounds. scheduler.validate_spec
+    checks the shape of a schedule; this checks that a patch cannot smuggle in
+    a new type, unknown keys, or e.g. max_runs=10_000 (one tick of event_scan
+    would then start that many paid pipelines)."""
+    if patch is None:
+        return {}
+    if not isinstance(patch, dict):
+        raise ValueError("spec must be an object")
+
+    def is_int(v):
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    checks = {
+        "minutes": lambda v: is_int(v) and 1 <= v <= 1440,
+        "time": lambda v: isinstance(v, str) and
+        re.fullmatch(r"\d{1,2}:\d{2}", v) is not None,
+        "tz": lambda v: isinstance(v, str) and
+        re.fullmatch(r"[A-Za-z0-9_+/-]{1,64}", v) is not None,
+        "days": lambda v: isinstance(v, list) and 1 <= len(v) <= 7 and
+        len(set(v)) == len(v) and all(is_int(d) and 1 <= d <= 7 for d in v),
+        "require_open": lambda v: isinstance(v, bool),
+        "threshold": lambda v: isinstance(v, (int, float)) and
+        not isinstance(v, bool) and 1.0 <= v <= 50.0,
+        "max_runs": lambda v: is_int(v) and 0 <= v <= 5,
+    }
+    out = {}
+    for k, v in patch.items():
+        if v is None:
+            continue
+        if k not in checks or k not in current:
+            raise ValueError(f"spec key {k!r} is not editable for this job")
+        if not checks[k](v):
+            raise ValueError(f"spec {k}={v!r} is out of range")
+        out[k] = v
+    return out
+
 
 def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                   secret="", dash_key="", narratives=None, clock=time.time,
                   port=7787, env=None, cal=None, sse_interval=2.0,
-                  bind="127.0.0.1"):
+                  bind="127.0.0.1", allowed_hosts=None,
+                  sse_max_age=SSE_MAX_AGE):
     """`bind` is the dashboards' listen address. 0.0.0.0 puts the desk on the
     LAN so another machine can use it; the approval key still gates every
     action, but READ routes are open to anyone who can reach the port — see
     CLAIRE_DASHBOARD_BIND in etc/claire.env. claire-api stays on loopback
-    regardless: it holds /internal/resume, and nothing off-box may call it."""
+    regardless: it holds /internal/resume, and nothing off-box may call it.
+
+    `allowed_hosts`: Host-header names to answer to; None derives them from
+    `bind` (loopback, plus hostname/LAN IPs when bound wider). A derived set
+    is re-read at most once a minute on a miss, so a DHCP address change does
+    not lock the owner out until a restart."""
     resume_post = approvals.default_resume_post(api_base, secret)
     env = env or {}
+    hosts = {"set": set(allowed_hosts) if allowed_hosts is not None
+             else default_allowed_hosts(bind), "t": time.monotonic(),
+             "fixed": allowed_hosts is not None}
+    hosts_lock = threading.Lock()
+
+    def host_allowed(name):
+        if name in hosts["set"]:
+            return True
+        with hosts_lock:
+            if hosts["fixed"] or time.monotonic() - hosts["t"] < 60:
+                return False
+            hosts["set"], hosts["t"] = default_allowed_hosts(bind), \
+                time.monotonic()
+            return name in hosts["set"]
     status_cache = {"t": 0.0, "ok": False}
     status_lock = threading.Lock()
 
@@ -113,6 +245,10 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             return status_cache["ok"]
 
     class Handler(BaseHTTPRequestHandler):
+        # a socket timeout so a client that announces a body and never sends
+        # it (or stalls mid-headers) cannot pin a thread indefinitely
+        timeout = 60
+
         def log_message(self, *a):
             pass
 
@@ -126,16 +262,59 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             self.end_headers()
             self.wfile.write(data)
 
+        def _check_request(self):
+            """Host allowlist + Origin match, for every method. Without the
+            Host check a DNS-rebinding page (evil.example → our IP) is
+            'same-origin' to the browser and can read every GET route."""
+            host_hdr = self.headers.get("Host")
+            if not host_hdr or not host_allowed(host_only(host_hdr)):
+                raise HTTPError(421, "unrecognised Host header")
+            origin = self.headers.get("Origin")
+            if origin is not None:
+                o = urlparse(origin)
+                if origin == "null" or o.scheme not in ("http", "https") or \
+                        o.netloc.lower() != host_hdr.strip().lower():
+                    raise HTTPError(403, "cross-origin request refused")
+
         def _json_body(self):
-            n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n) or b"{}")
+            """application/json only, bounded, and an object. The old version
+            parsed any Content-Type (CSRF via text/plain) and trusted
+            Content-Length (a negative one made rfile.read block forever)."""
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0]
+            if ctype.strip().lower() != "application/json":
+                raise HTTPError(415, "Content-Type must be application/json")
+            if self.headers.get("Transfer-Encoding"):
+                raise HTTPError(411, "Content-Length required")
+            raw = (self.headers.get("Content-Length") or "0").strip()
+            if not re.fullmatch(r"[0-9]{1,12}", raw):
+                raise HTTPError(400, "invalid Content-Length")
+            n = int(raw)
+            if n > MAX_BODY:
+                raise HTTPError(413, "request body too large")
+            data = self.rfile.read(n) if n else b""
+            if len(data) != n:
+                raise HTTPError(400, "truncated request body")
+            try:
+                body = json.loads(data or b"{}")
+            except ValueError:
+                raise HTTPError(400, "body is not valid JSON") from None
+            if not isinstance(body, dict):
+                raise HTTPError(400, "body must be a JSON object")
+            return body
 
         def _paired(self):
-            return bool(dash_key) and \
-                self.headers.get("X-Dash-Key") == dash_key
+            # constant-time: a == compare leaks how many leading characters
+            # matched, which over a LAN is enough to walk the key out
+            given = self.headers.get("X-Dash-Key") or ""
+            return bool(dash_key) and hmac.compare_digest(
+                given.encode("utf-8", "replace"), dash_key.encode())
 
         # ── GET ──────────────────────────────────────────────────────────
         def do_GET(self):                        # noqa: N802
+            try:
+                self._check_request()
+            except HTTPError as e:
+                return self._send(e.code, {"error": e.message})
             try:
                 u = urlparse(self.path)
                 q = {k: v[0] for k, v in parse_qs(u.query).items()}
@@ -225,17 +404,27 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
         # ── POST ─────────────────────────────────────────────────────────
         def do_POST(self):                       # noqa: N802
             try:
+                self._check_request()
+                # Every POST changes state or spends money (runs, chat, agent
+                # and provider edits, schedules, MCP, watchlist, approvals),
+                # so all of them need the paired key — checked once, here,
+                # BEFORE the body is read, rather than route by route where
+                # one forgotten check was the whole of C1/H1. No key
+                # configured means nobody is paired: fail closed.
+                if not self._paired():
+                    raise HTTPError(403, "dashboard not paired — enter the "
+                                    "dashboard key first")
                 u = urlparse(self.path)
-                if u.path == "/api/ask":
-                    return self._ask_proxy(self._json_body(), "/ask")
-                if u.path == "/api/agent-ask":
-                    return self._ask_proxy(self._json_body(), "/agent/ask")
                 body = self._json_body()
+                if u.path == "/api/ask":
+                    return self._ask_proxy(body, "/ask")
+                if u.path == "/api/agent-ask":
+                    return self._ask_proxy(body, "/agent/ask")
                 if u.path == "/api/thesis-action":
-                    if dash_key and not self._paired():
-                        return self._send(403, {"error":
-                                                "dashboard not paired — enter "
-                                                "the dashboard key first"})
+                    # money path: re-checked locally on purpose, so moving or
+                    # refactoring the global gate above can never open it
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
                     try:
                         out = approvals.thesis_action(conn, body, resume_post,
                                                       clock=clock)
@@ -243,12 +432,10 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     except approvals.AuthError as e:
                         return self._send(e.code, {"error": e.message})
                 if u.path == "/api/override":
-                    # overturning the desk is a money-path action, so it needs
-                    # the same paired browser an approval does
-                    if dash_key and not self._paired():
-                        return self._send(403, {"error":
-                                                "dashboard not paired — enter "
-                                                "the dashboard key first"})
+                    # overturning the desk is a money-path action: same local
+                    # re-check as thesis-action, on top of the global gate
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
                     try:
                         r = httpx.post(f"{api_base}/internal/override",
                                        json={**body, "actor": "human"},
@@ -265,22 +452,42 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                                                             "override failed")})
                     return self._send(200, out)
                 if u.path == "/api/run":
-                    r = httpx.post(f"{api_base}/api/run", json=body,
-                                   timeout=10)
-                    return self._send(r.status_code, r.json())
+                    return self._start_run(body)
                 if u.path == "/api/agent":
                     return self._assign_agent(body)
                 if u.path == "/api/provider-test":
-                    ok = provider_health.probe(conn, body["provider_id"])
-                    latest = provider_health.latest(conn).get(
-                        body["provider_id"])
+                    pid = body.get("provider_id")
+                    if not isinstance(pid, str) or conn.execute(
+                            "SELECT 1 FROM providers WHERE id=?",
+                            (pid,)).fetchone() is None:
+                        raise HTTPError(400, "unknown provider_id")
+                    # a row written before the allowlist existed must not get
+                    # its (possibly secret) key sent anywhere by a probe
+                    ref = conn.execute("SELECT api_key_ref FROM providers"
+                                       " WHERE id=?", (pid,)).fetchone()[0]
+                    if ref and ref not in PROVIDER_KEY_REFS:
+                        raise HTTPError(400, f"provider {pid} has a key ref "
+                                        "outside the allowlist — re-save it")
+                    ok = provider_health.probe(conn, pid)
+                    latest = provider_health.latest(conn).get(pid)
                     return self._send(200, dict(latest) if latest else
                                       {"ok": ok})
                 if u.path == "/api/schedule":
                     try:
-                        scheduler.update(conn, body["job"],
-                                         enabled=body.get("enabled"),
-                                         spec_patch=body.get("spec"))
+                        job = body.get("job")
+                        row = conn.execute(
+                            "SELECT spec FROM schedules WHERE job=?",
+                            (job if isinstance(job, str) else "",)).fetchone()
+                        if row is None:
+                            raise KeyError(f"unknown job {job!r}")
+                        enabled = body.get("enabled")
+                        if enabled is not None and not isinstance(enabled,
+                                                                  bool):
+                            raise ValueError("enabled must be true/false")
+                        patch = _validate_schedule_patch(
+                            json.loads(row["spec"]), body.get("spec"))
+                        scheduler.update(conn, job, enabled=enabled,
+                                         spec_patch=patch or None)
                         return self._send(200, {"ok": True})
                     except (KeyError, ValueError) as e:
                         return self._send(400, {"error": str(e)})
@@ -296,6 +503,13 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     if not t or not ex:
                         return self._send(400, {"error":
                                                 "ticker and exchange required"})
+                    # watchlisted names feed the screener and so become run
+                    # tickers: same strict shape the Desk enforces
+                    self._check_symbol(t, ex)
+                    note = body.get("note")
+                    if note is not None and (not isinstance(note, str) or
+                                             len(note) > 200):
+                        raise HTTPError(400, "note must be text ≤200 chars")
                     if body.get("action") == "remove":
                         conn.execute("DELETE FROM watchlist WHERE ticker=?"
                                      " AND exchange=?", (t, ex))
@@ -303,11 +517,16 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                         conn.execute(
                             "INSERT OR REPLACE INTO watchlist (ticker,"
                             " exchange, note, added_at) VALUES (?,?,?,?)",
-                            (t, ex, body.get("note"), int(clock())))
+                            (t, ex, note, int(clock())))
                     return self._send(200, {"ok": True})
                 self._send(404, {"error": "not found"})
             except (BrokenPipeError, ConnectionResetError):
                 return                           # client went away; not news
+            except HTTPError as e:
+                try:
+                    self._send(e.code, {"error": e.message})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             except Exception as e:               # noqa: BLE001
                 traceback.print_exc()
                 try:
@@ -345,24 +564,49 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 except Exception:                # noqa: BLE001
                     pass
 
+        def _client_gone(self):
+            """True once the browser has closed its end. An SSE client never
+            sends anything after its request, so a readable socket that
+            yields no bytes is EOF — noticed within one wait instead of only
+            when a write finally fails (which a half-open TCP can delay)."""
+            try:
+                r, _, _ = select.select([self.connection], [], [], 0)
+                if not r:
+                    return False
+                return self.connection.recv(1, socket.MSG_PEEK) == b""
+            except (OSError, ValueError):
+                return True
+
         def _sse(self):
             q = _queue.Queue(maxsize=500)
             with sse_lock:
+                if len(sse_clients) >= SSE_MAX_CLIENTS:
+                    return self._send(503, {"error": "too many live streams"})
                 sse_clients.append(q)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
+            # each stream is a thread: bound its life. EventSource reconnects
+            # on its own, so recycling it is invisible to the page.
+            deadline = time.monotonic() + sse_max_age
             try:
-                while True:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                last_write = time.monotonic()
+                while time.monotonic() < deadline and not self._client_gone():
+                    # short waits so a disconnect is noticed within seconds
+                    wait = max(0.05, min(5.0, deadline - time.monotonic()))
                     try:
-                        ev = q.get(timeout=20)
+                        ev = q.get(timeout=wait)
                         self.wfile.write(
                             f"data: {json.dumps(ev, default=str)}\n\n".encode())
                     except _queue.Empty:
+                        if time.monotonic() - last_write < 20:
+                            continue
                         self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+                    last_write = time.monotonic()
+                self.close_connection = True
+            except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
             finally:
                 with sse_lock:
@@ -380,7 +624,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             def read(name):
                 try:
                     return narratives.read(work_item, name)
-                except OSError:
+                except (OSError, JailError):    # bad id/name → not found
                     return None
 
             report, transcript = read(f"{agent_id}.report"), \
@@ -480,9 +724,17 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             flags = []
             if not up:
                 flags.append("claire-api :7788 is down")
-            if not env.get("ANTHROPIC_API_KEY"):
+            kinds = {r[0] for r in conn.execute(
+                "SELECT p.kind FROM agents a JOIN providers p"
+                " ON p.id=a.provider_id WHERE a.enabled=1")}
+            if "anthropic" in kinds and not env.get("ANTHROPIC_API_KEY"):
                 flags.append("ANTHROPIC_API_KEY missing — LLM runs will fail"
                              " (add to etc/claire.env, restart claire-api)")
+            if "claude_sdk" in kinds:
+                from .providers import claude_sdk
+                why = claude_sdk.not_ready()
+                if why:
+                    flags.append(f"Claude (Max subscription): {why}")
             for pid, h in provider_health.latest(conn).items():
                 if h and not h["ok"]:
                     flags.append(f"provider {pid} failing its health probe")
@@ -643,7 +895,10 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             d["orders"] = [dict(o) for o in conn.execute(
                 "SELECT id, side, qty/1e6 qty, status, broker_order_id,"
                 " expires_at FROM orders WHERE work_item_id=?", (wi,))]
-            d["narratives"] = narratives.list(wi) if narratives else []
+            try:
+                d["narratives"] = narratives.list(wi) if narratives else []
+            except JailError:                   # malformed id → no files
+                d["narratives"] = []
             if narratives and "summary.md" in d["narratives"]:
                 d["summary"] = narratives.read(wi, "summary")
             return d
@@ -673,6 +928,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             never run) · disabled."""
             now = int(clock())
             provs = {p["id"]: p for p in self._providers()}
+            from .providers import claude_sdk
+            sdk_why = claude_sdk.not_ready()
             agents = {}
             for a in self._agents():
                 lr = a["last_run"] or {}
@@ -686,6 +943,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 elif p.get("key_ref") and not p.get("key_present"):
                     # configured on paper but cannot actually run
                     state, detail = "error", f"{p['key_ref']} not set"
+                elif p.get("kind") == "claude_sdk" and sdk_why:
+                    state, detail = "error", sdk_why
                 elif not p.get("enabled", 1):
                     state, detail = "error", f"provider {a['provider_id']} off"
                 elif lr.get("status") == "error":
@@ -707,10 +966,16 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     (acct["broker"],)).fetchone()
                 refs = json.loads(mcp["env_refs"]) if mcp else []
                 creds = bool(refs) and all(env.get(r) for r in refs)
+                # Execution ALWAYS goes to the in-process PaperSimBroker
+                # (wiring.build_brokers builds nothing else, and no MCP server
+                # is ever launched), so the map must not claim "MCP live" just
+                # because credentials exist. An MCP row is configuration only.
                 if mcp and refs and not creds:
-                    bstate, bdetail = "warn", "MCP configured, creds missing"
-                elif creds:
-                    bstate, bdetail = "ok", "MCP live"
+                    bstate, bdetail = "warn", ("paper sim · MCP configured, "
+                                               "creds missing (unused)")
+                elif mcp:
+                    bstate, bdetail = "ok", ("paper sim · MCP configured but "
+                                             "not wired to execution")
                 else:
                     bstate, bdetail = "idle", "paper sim (by design)"
                 brokers.append({
@@ -720,10 +985,11 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     "ccy": acct["base_currency"],
                     "open_orders": open_orders,
                     "state": bstate, "detail": bdetail,
-                    "adapter": "mcp" if creds else "paper-sim",
+                    "adapter": "paper-sim",
                     "mcp": {"command": " ".join(json.loads(mcp["command"])),
                             "env_refs": refs,
                             "creds_present": creds,
+                            "used_for_execution": False,
                             "note": mcp["note"]} if mcp else None})
             # a guard that stopped reporting is an ERROR, not a shrug: a dead
             # safety net is worse than no safety net (v1 lesson §19.10)
@@ -851,17 +1117,44 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             return out
 
         def _upsert_provider(self, body):
-            import re
             pid = str(body.get("id", "")).strip()
-            if not re.fullmatch(r"[a-z0-9_-]{2,30}", pid):
+            if not _ID_RE.fullmatch(pid):
                 return self._send(400, {"error":
                                         "id must be 2-30 chars [a-z0-9_-]"})
             kind = body.get("kind")
-            if kind not in ("anthropic", "openai_compatible", "custom"):
+            if kind not in PROVIDER_KINDS:
                 return self._send(400, {"error": "kind must be anthropic |"
-                                        " openai_compatible | custom"})
+                                        " claude_sdk | openai_compatible |"
+                                        " custom"})
+            # C1: the key ref is a NAME from a fixed list, never free-form —
+            # otherwise base_url=attacker + api_key_ref=CLAIRE_DASHBOARD_KEY
+            # turns one probe into a key-exfiltration
+            key_ref = body.get("api_key_ref") or None
+            if key_ref is not None and key_ref not in PROVIDER_KEY_REFS:
+                return self._send(400, {"error": "api_key_ref must be one of "
+                                        + ", ".join(sorted(PROVIDER_KEY_REFS))
+                                        + " (or empty)"})
+            if kind == "claude_sdk":
+                key_ref = None              # the SDK uses the CLI's login
+            base_url = body.get("base_url") or None
+            if base_url is not None and (
+                    not isinstance(base_url, str) or len(base_url) > 300 or
+                    urlparse(base_url).scheme not in ("http", "https") or
+                    not urlparse(base_url).netloc):
+                return self._send(400, {"error":
+                                        "base_url must be an http(s) URL"})
+            name = body.get("display_name") or pid
+            if not isinstance(name, str) or len(name) > 60:
+                return self._send(400, {"error":
+                                        "display_name must be ≤60 chars"})
+            for k in ("cost_per_1k_in", "cost_per_1k_out"):
+                v = body.get(k)
+                if v is not None and (isinstance(v, bool) or not isinstance(
+                        v, (int, float)) or not 0 <= v <= 10):
+                    return self._send(400, {"error": f"{k} must be 0..10"})
             caps = body.get("capabilities") or {}
-            if not isinstance(caps, dict):
+            if not isinstance(caps, dict) or not all(
+                    isinstance(v, bool) for v in caps.values()):
                 return self._send(400, {"error": "capabilities must be an"
                                         " object of booleans"})
             conn.execute(
@@ -874,8 +1167,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 ".capabilities, cost_per_1k_in=excluded.cost_per_1k_in,"
                 " cost_per_1k_out=excluded.cost_per_1k_out,"
                 " enabled=excluded.enabled",
-                (pid, body.get("display_name") or pid, kind,
-                 body.get("base_url"), body.get("api_key_ref"),
+                (pid, name, kind, base_url, key_ref,
                  json.dumps(caps), body.get("cost_per_1k_in"),
                  body.get("cost_per_1k_out"),
                  1 if body.get("enabled", True) else 0))
@@ -894,22 +1186,36 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             command = body.get("command")
             if isinstance(command, str):
                 command = shlex.split(command)
-            if not command:
+            if not command or not isinstance(command, list) or not all(
+                    isinstance(c, str) and c for c in command) or \
+                    len(command) > 32:
                 return self._send(400, {"error": "command required"})
             refs = body.get("env_refs") or []
             if isinstance(refs, str):
                 refs = [r.strip() for r in refs.split(",") if r.strip()]
-            if any(not re.fullmatch(r"[A-Z][A-Z0-9_]*", r) for r in refs):
+            if not isinstance(refs, list) or any(
+                    not isinstance(r, str) or
+                    not re.fullmatch(r"[A-Z][A-Z0-9_]*", r) for r in refs):
                 return self._send(400, {"error": "env_refs must be UPPER_CASE"
                                         " env var NAMES (values stay in"
                                         " claire.env)"})
+            # the desk's own secrets must never be handed to a third-party
+            # process, whenever MCP launching lands (same lesson as C1)
+            if any(r.startswith("CLAIRE_") or r in PROVIDER_KEY_REFS
+                   for r in refs):
+                return self._send(400, {"error": "env_refs may not name "
+                                        "CLAIRE_* or LLM provider keys"})
+            broker = body.get("broker") or None
+            if broker is not None and (not isinstance(broker, str) or
+                                       not _ID_RE.fullmatch(broker)):
+                return self._send(400, {"error": "broker must be an id"})
             conn.execute(
                 "INSERT INTO mcp_servers (id, broker, command, env_refs,"
                 " note, enabled) VALUES (?,?,?,?,?,?)"
                 " ON CONFLICT(id) DO UPDATE SET broker=excluded.broker,"
                 " command=excluded.command, env_refs=excluded.env_refs,"
                 " note=excluded.note, enabled=excluded.enabled",
-                (mid, body.get("broker"), json.dumps(command),
+                (mid, broker, json.dumps(command),
                  json.dumps(refs), body.get("note"),
                  1 if body.get("enabled", True) else 0))
             return self._send(200, {"ok": True, "id": mid})
@@ -946,7 +1252,61 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             return self._send(200, {"ok": True,
                                     "balance": repo.cash_balance(account) / 1e6})
 
+        def _check_symbol(self, ticker, exchange):
+            # the Desk's own validator, so the dashboards refuse exactly what
+            # start_run would (imported lazily: it pulls in the graph)
+            from .api.desk import validate_symbol
+            try:
+                validate_symbol(ticker, exchange)
+            except ValueError as e:
+                raise HTTPError(400, str(e)) from None
+
+        def _start_run(self, body):
+            """Validated before it leaves for claire-api: the ticker becomes
+            part of the work-item id, which every page renders."""
+            ticker = body.get("ticker")
+            exchange = body.get("exchange")
+            self._check_symbol(ticker, exchange)
+            if not isinstance(body.get("currency"), str) or \
+                    not _CCY_RE.fullmatch(body["currency"]):
+                raise HTTPError(400, "currency must be a 3-letter code")
+            if body.get("kind", "pipeline") not in ("pipeline",
+                                                    "sell_review"):
+                raise HTTPError(400, "kind must be pipeline|sell_review")
+            lot = body.get("lot_size", 1)
+            if not isinstance(lot, int) or isinstance(lot, bool) or \
+                    not 1 <= lot <= 10000:
+                raise HTTPError(400, "lot_size must be an integer 1..10000")
+            fwd = {k: body[k] for k in ("ticker", "exchange", "currency",
+                                        "kind", "lot_size", "instrument_id",
+                                        "trigger") if k in body}
+            try:
+                r = httpx.post(f"{api_base}/api/run", json=fwd, timeout=10)
+            except Exception as e:              # noqa: BLE001
+                return self._send(502, {"error":
+                                        f"claire-api unreachable ({e})"})
+            try:
+                out = r.json()
+            except ValueError:
+                out = {"error": f"claire-api {r.status_code}"}
+            return self._send(r.status_code, out)
+
         def _assign_agent(self, body):
+            # model / provider ids end up in pages and in provider API calls:
+            # plain identifiers only
+            for k in ("id", "provider_id", "fallback_provider_id"):
+                v = body.get(k)
+                if (v is not None or k != "fallback_provider_id") and (
+                        not isinstance(v, str) or not _ID_RE.fullmatch(v)):
+                    raise HTTPError(400, f"{k} must be 2-30 chars [a-z0-9_-]")
+            for k in ("model", "fallback_model"):
+                v = body.get(k)
+                if (v is not None or k == "model") and (
+                        not isinstance(v, str) or not _MODEL_RE.fullmatch(v)):
+                    raise HTTPError(400, f"{k} must be a plain model name")
+            if conn.execute("SELECT 1 FROM agents WHERE id=?",
+                            (body["id"],)).fetchone() is None:
+                raise HTTPError(400, f"unknown agent {body['id']!r}")
             try:
                 registry.assign(conn, body["id"], body["provider_id"],
                                 body["model"],
@@ -1058,9 +1418,15 @@ def main():
     start_watcher_thread(conn, repo, market,
                          api_base="http://127.0.0.1:7788", cal=cal)
     bind = os.environ.get("CLAIRE_DASHBOARD_BIND", "127.0.0.1")
+    # optional extra Host names (e.g. a DNS alias for this box); the
+    # loopback + hostname + LAN-IP set is always derived from `bind`
+    extra = [h.strip().lower() for h in os.environ.get(
+        "CLAIRE_DASHBOARD_HOSTS", "").split(",") if h.strip()]
+    allowed = (default_allowed_hosts(bind) | set(extra)) if extra else None
     srv = create_server(conn, repo, market, secret=secret, dash_key=dash_key,
                         narratives=Narratives(var / "narratives"),
-                        env=os.environ, cal=cal, bind=bind)
+                        env=os.environ, cal=cal, bind=bind,
+                        allowed_hosts=allowed)
     print(f"dashboards on http://{bind}:7787")
     if bind not in ("127.0.0.1", "localhost"):
         import socket
@@ -1072,8 +1438,8 @@ def main():
             print(f"  reachable on your network at http://{lan}:7787")
         except OSError:
             pass
-        print("  anyone on this network can READ the desk; approving, "
-              "overriding and moving cash still need the dashboard key")
+        print("  anyone on this network can READ the desk; every POST "
+              "(runs, approvals, edits, cash) needs the dashboard key")
     srv.serve_forever()
 
 

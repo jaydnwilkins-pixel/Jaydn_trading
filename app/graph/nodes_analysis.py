@@ -143,8 +143,8 @@ def default_structured_factory(conn, env=None):
 
         llm = structured(a["provider_id"], a["model"])
         if a["fallback_provider_id"] and a["fallback_model"]:
-            llm = llm.with_fallbacks([structured(a["fallback_provider_id"],
-                                                 a["fallback_model"])])
+            llm = registry.with_fallback(
+                llm, structured(a["fallback_provider_id"], a["fallback_model"]))
         meter = registry.MeterCallback(conn, agent_id, work_item_id)
         return llm.with_config(callbacks=[meter]), a["system_prompt"]
     return factory
@@ -262,9 +262,19 @@ def _run_agent(conn, agent_id, state, system, task, tools, agent_factory, env):
             f"search.")
     if agent_factory is not None:
         return agent_factory(agent_id, state, system, task, tools)
-    from langchain.agents import create_agent
     model = registry.model_for(conn, agent_id, work_item_id=state.work_item_id,
                                env=env or __import__("os").environ)
+    from ..providers import claude_sdk
+    if claude_sdk.is_sdk(model):
+        # Max subscription: the SDK runs its own tool loop over the same
+        # LangChain tools; metering and the partial-report behaviour match.
+        lines, truncated = claude_sdk.run_tool_loop(model, system, task, tools)
+        if truncated:
+            lines.append(f"[system] RESEARCH CUT SHORT: {truncated}. Report "
+                         f"on what was gathered above and say plainly what "
+                         f"is missing.")
+        return "\n".join(lines[-60:])
+    from langchain.agents import create_agent
     meter = registry.MeterCallback(conn, agent_id, state.work_item_id)
     agent = create_agent(model=model, tools=tools, system_prompt=system)
     messages, truncated = [], None

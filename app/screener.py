@@ -10,8 +10,10 @@ own track record (which of its past picks actually made money).
 
 Two hard rules survive from v1 of this module: the agent may only pick from
 candidates it was shown (hallucinated tickers are dropped at validation), and
-any failure raises — the caller falls back to a deterministic picker, so a
-missing API key or provider outage never kills a scheduled run.
+any real failure raises ScreenerError — the caller falls back to a
+deterministic picker, so a missing API key or provider outage never kills a
+scheduled run. Choosing NONE is not a failure: an empty shortlist returns []
+and the caller must start nothing (see screener_pick).
 """
 import time
 
@@ -184,7 +186,17 @@ def screener_pick(conn, market, exchanges, held, *, limit=2, env=None,
                   structured_factory=None, clock=time.time,
                   with_catalysts=True, _gather=None) -> list[ScreenerPick]:
     """One metered structured call on the screener agent's own model+prompt.
-    Raises ScreenerError on any failure — callers MUST fall back."""
+
+    Contract (callers rely on it):
+      * returns ``[]`` when no markets are open (``exchanges`` empty), or when
+        the agent deliberately returned zero picks — "nothing worth a run
+        today" is a legitimate answer and the caller must NOT fall back;
+      * returns 1..``limit`` validated picks otherwise (picks that are not in
+        the candidate set are silently dropped);
+      * raises ``ScreenerError`` only for real failures, where the caller
+        SHOULD fall back to the deterministic picker: no candidate data, any
+        LLM/provider error, output that fails schema validation, or picks
+        returned but every one of them hallucinated (none in the universe)."""
     if not exchanges:
         return []
     gather = _gather or gather_candidates
@@ -224,20 +236,26 @@ def screener_pick(conn, market, exchanges, held, *, limit=2, env=None,
             obj = Shortlist.model_validate(obj)
     except Exception as e:
         raise ScreenerError(str(e)[:200]) from e
+    if not isinstance(obj, Shortlist):
+        raise ScreenerError(f"screener returned {type(obj).__name__}, "
+                            "not a Shortlist")
+    if not obj.picks:                           # a deliberate "none today"
+        return []
     valid = {(c["ticker"], c["exchange"]) for c in cands}
     picks = [p for p in obj.picks if (p.ticker, p.exchange) in valid][:limit]
-    if not picks:
+    if not picks:                               # picked, but all invented
         raise ScreenerError("screener returned no valid picks")
     return picks
 
 
 # ── intraday event scan (phase 3) ────────────────────────────────────────
-def event_scan(conn, exchanges, held, *, threshold=3.0, _factor_scan=None):
+def event_scan(conn, exchanges, held, *, threshold=3.0, clock=time.time,
+               _factor_scan=None):
     """Cheap hourly sweep: only unusual volume, no LLM. Returns names whose
     relative volume crossed the threshold and that we haven't just analysed —
     the caller decides whether to wake the full pipeline."""
     factor_scan = _factor_scan or tradingview.factor_scan
-    recent = recent_tickers(conn)
+    recent = recent_tickers(conn, clock=clock)
     hits = []
     for ex in exchanges:
         try:

@@ -5,8 +5,14 @@ import time
 
 CAPS_FULL = json.dumps({"tool_calling": True, "structured_output": True})
 
+DEFAULT_PROVIDER = "claude_max"
+
 PROVIDERS = [
     # id, display, kind, base_url, api_key_ref, capabilities, cost_in, cost_out
+    # The desk's default: Claude Agent SDK on the claude.ai login, so model
+    # use counts against the Max subscription instead of API credit.
+    ("claude_max", "Claude (Max subscription)", "claude_sdk", None, None,
+     CAPS_FULL, 0.0, 0.0),
     ("anthropic", "Anthropic", "anthropic", None, "ANTHROPIC_API_KEY",
      CAPS_FULL, 0.003, 0.015),
     ("openai", "OpenAI", "openai_compatible", "https://api.openai.com/v1",
@@ -90,14 +96,16 @@ def seed(conn, *, ts=None):
             " fallback_provider_id, fallback_model, updated_at)"
             " VALUES (?,?,?,1,?,?,?,?,?,?,?,?)",
             (aid, role.title(), _P.format(role=role, brief=brief),
-             json.dumps(tools), json.dumps(requires), "anthropic", model,
+             json.dumps(tools), json.dumps(requires), DEFAULT_PROVIDER, model,
              temp if supports_temperature(model) else None,
-             "anthropic" if fb else None, fb, ts))
-        # existing installs: adopt the fallback and drop rejected temperatures
+             DEFAULT_PROVIDER if fb else None, fb, ts))
+        # existing installs: adopt the fallback (on the agent's OWN provider,
+        # so a subscription agent never falls back onto the metered API) and
+        # drop rejected temperatures
         conn.execute(
-            "UPDATE agents SET fallback_provider_id=?, fallback_model=?"
-            " WHERE id=? AND fallback_model IS NULL",
-            ("anthropic" if fb else None, fb, aid))
+            "UPDATE agents SET fallback_provider_id=CASE WHEN ? IS NULL"
+            " THEN NULL ELSE provider_id END, fallback_model=?"
+            " WHERE id=? AND fallback_model IS NULL", (fb, fb, aid))
         if not supports_temperature(model):
             conn.execute("UPDATE agents SET temperature=NULL WHERE id=?"
                          " AND model=?", (aid, model))

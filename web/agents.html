@@ -40,27 +40,29 @@ async function refreshAgents() {
   document.getElementById('agents').innerHTML = agents.map(a => {
     const opts = provs.map(p => {
       const compatible = a.requires.every(c => p.capabilities[c]);
-      return `<option value="${p.id}" ${p.id === a.provider_id ? 'selected' : ''}
+      // display_name / model are user-set via /api/provider and /api/agent,
+      // so every server string is escaped here, ids included
+      return `<option value="${esc(p.id)}" ${p.id === a.provider_id ? 'selected' : ''}
         ${compatible ? '' : 'disabled'}>
-        ${p.display_name}${compatible ? '' : ' (missing ' +
-        a.requires.filter(c => !p.capabilities[c]).join(',') + ')'}</option>`;
+        ${esc(p.display_name)}${compatible ? '' : ' (missing ' +
+        esc(a.requires.filter(c => !p.capabilities[c]).join(',')) + ')'}</option>`;
     }).join('');
     const lr = a.last_run;
-    return `<div class="card"><h3>${a.display_name || a.id}
-      <span class="pill">${a.id}</span>
+    return `<div class="card"><h3>${esc(a.display_name || a.id)}
+      <span class="pill">${esc(a.id)}</span>
       ${a.enabled ? '' : '<span class="pill bad">disabled</span>'}</h3>
-      <p class="muted">${a.tools.length ? 'tools: ' + a.tools.join(', ')
+      <p class="muted">${a.tools.length ? 'tools: ' + esc(a.tools.join(', '))
         : 'single structured call'}
-      ${lr ? `· last run: ${lr.status} $${fmt(lr.cost_usd, 4)}
+      ${lr ? `· last run: ${esc(lr.status)} $${fmt(lr.cost_usd, 4)}
         (${lr.tokens_in || 0}/${lr.tokens_out || 0} tok, ${ago(lr.started_at)})`
         : '· never run'}</p>
       <div class="row">
-        <select id="prov-${a.id}">${opts}</select>
-        <input id="model-${a.id}" value="${a.model}" style="width:220px">
-        <button onclick="saveAgent('${a.id}')">Save</button>
-        <button class="ghost" onclick="testProv('${a.id}')">Test provider</button>
+        <select id="prov-${esc(a.id)}">${opts}</select>
+        <input id="model-${esc(a.id)}" value="${esc(a.model)}" style="width:220px">
+        <button onclick="saveAgent(${jsArg(a.id)})">Save</button>
+        <button class="ghost" onclick="testProv(${jsArg(a.id)})">Test provider</button>
         <a class="pill" href="/" onclick="localStorage.setItem('openDrawer',
-          '${a.id}')" title="activity & direct Q&A live in the Mission
+          ${jsArg(a.id)})" title="activity & direct Q&A live in the Mission
           Control drawer">activity ↗</a>
       </div></div>`;
   }).join('');
@@ -98,30 +100,30 @@ async function refreshJobs() {
 function jobCard(j) {
   const s = j.spec;
   const editor = s.type === 'interval'
-    ? `every <input id="min-${j.job}" type="number" min="1" max="1440"
-        value="${s.minutes}" style="width:70px"> minutes`
-    : `at <input id="time-${j.job}" value="${s.time}" style="width:70px">
-       <select id="tz-${j.job}">${TZS.map(z => `<option ${z === s.tz ?
+    ? `every <input id="min-${esc(j.job)}" type="number" min="1" max="1440"
+        value="${esc(s.minutes)}" style="width:70px"> minutes`
+    : `at <input id="time-${esc(j.job)}" value="${esc(s.time)}" style="width:70px">
+       <select id="tz-${esc(j.job)}">${TZS.map(z => `<option ${z === s.tz ?
          'selected' : ''}>${z}</option>`).join('')}</select>
        <span style="display:inline-flex;gap:.3rem">${DAYS.map((d, i) =>
          `<label class="pill" style="cursor:pointer"><input type="checkbox"
-           id="day-${j.job}-${i + 1}" ${s.days.includes(i + 1) ?
+           id="day-${esc(j.job)}-${i + 1}" ${s.days.includes(i + 1) ?
            'checked' : ''} style="margin-right:.2rem">${d}</label>`)
          .join('')}</span>`;
   const openToggle = 'require_open' in s
     ? `<label class="pill" style="cursor:pointer"><input type="checkbox"
-        id="open-${j.job}" ${s.require_open ? 'checked' : ''}
+        id="open-${esc(j.job)}" ${s.require_open ? 'checked' : ''}
         style="margin-right:.2rem">only when market open</label>` : '';
   const last = j.last_run_at
     ? `${ago(j.last_run_at)} — ${lastSummary(j.last_result)}` : 'never';
   const agent = j.agent
     ? `<a class="pill warn" href="/" style="text-decoration:none"
-        onclick="localStorage.setItem('openDrawer','${j.agent}')"
-        title="opens this agent's activity drawer">🤖 invokes ${j.agent}</a>`
+        onclick="localStorage.setItem('openDrawer',${jsArg(j.agent)})"
+        title="opens this agent's activity drawer">🤖 invokes ${esc(j.agent)}</a>`
     : '<span class="pill">no LLM — deterministic</span>';
   return `<div class="card">
     <h3 style="display:flex;align-items:center;gap:.5rem">
-      ${j.job.replace(/_/g, ' ')} <span class="pill">${j.runs_in}</span>
+      ${esc(j.job.replace(/_/g, ' '))} <span class="pill">${esc(j.runs_in)}</span>
       ${j.enabled ? '' : '<span class="pill bad">disabled</span>'}
       <span style="margin-left:auto;display:flex;gap:.4rem;align-items:center">
         ${agent}${j.then ? `<span class="muted" style="font-size:.68rem">
@@ -129,10 +131,10 @@ function jobCard(j) {
     <p class="muted">${esc(j.description)}</p>
     <div class="row">
       <label class="pill" style="cursor:pointer"><input type="checkbox"
-        id="en-${j.job}" ${j.enabled ? 'checked' : ''}
+        id="en-${esc(j.job)}" ${j.enabled ? 'checked' : ''}
         style="margin-right:.2rem">enabled</label>
       ${editor} ${openToggle}
-      <button onclick="saveJob('${j.job}')">Save</button>
+      <button onclick="saveJob(${jsArg(j.job)})">Save</button>
     </div>
     <p class="muted" style="font-family:var(--mono);font-size:.78rem">
       next: <b class="${j.enabled ? 'ok' : 'muted'}">${j.next_run_at ?
@@ -150,14 +152,14 @@ function lastSummary(r) {
   if (!r) return 'ok';
   if (r.error) return '✖ ' + esc(r.error);
   if (r.started) {
-    const picks = r.started.map(s => typeof s === 'string' ? s
-      : `${s.ticker} (${esc(s.reason || '')})`).join(' · ');
+    const picks = r.started.map(s => typeof s === 'string' ? esc(s)
+      : `${esc(s.ticker)} (${esc(s.reason || '')})`).join(' · ');
     return (r.started.length + ' run(s)' + (picks ? ': ' + picks : '')) +
       (r.picker ? ` · picked by ${esc(r.picker)}` : '') +
       (r.skipped_closed && r.skipped_closed.length
-        ? ' · skipped closed: ' + r.skipped_closed.join(' ') : '');
+        ? ' · skipped closed: ' + esc(r.skipped_closed.join(' ')) : '');
   }
-  if ('fills' in r) return `${r.fills} fill(s), ${(r.flags || []).length}
+  if ('fills' in r) return `${esc(r.fills)} fill(s), ${(r.flags || []).length}
     flag(s)`;
   return 'ok';
 }

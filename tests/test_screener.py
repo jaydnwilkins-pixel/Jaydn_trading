@@ -174,8 +174,53 @@ def test_event_scan_threshold_and_dedupe(conn):
         cand("SPIKE", rel_volume=4.5), cand("MILD", rel_volume=1.2),
         cand("SEEN", rel_volume=9.9), cand("HELD", rel_volume=8.0)]})
     hits = event_scan(conn, ["SGX"], held={"HELD"}, threshold=3.0,
-                      _factor_scan=scans)
+                      clock=lambda: T0, _factor_scan=scans)
     assert [h["ticker"] for h in hits] == ["SPIKE"]
+    # the dedupe window is measured on the injected clock, not wall time:
+    # ten days later SEEN is fair game again
+    later = event_scan(conn, ["SGX"], held={"HELD"}, threshold=3.0,
+                       clock=lambda: T0 + 10 * 86400, _factor_scan=scans)
+    assert [h["ticker"] for h in later] == ["SEEN", "SPIKE"]
+
+
+def test_screener_may_legitimately_pick_none(conn):
+    """Zero picks is an answer, not a failure: [] comes back (the caller
+    starts nothing) instead of ScreenerError (which triggers the fallback
+    picker and starts paid runs anyway)."""
+    scans = fake_scans({"momentum": [cand("D05")]})
+    gather = lambda *a, **k: gather_candidates(  # noqa: E731
+        None, ["SGX"], set(), conn=conn, _factor_scan=scans, _recs=NO_RECS)
+    assert screener_pick(conn, None, ["SGX"], set(), with_catalysts=False,
+                         structured_factory=fake_factory(
+                             Shortlist(picks=[]), []),
+                         _gather=gather) == []
+    # a dict payload with no picks is the same answer
+    assert screener_pick(conn, None, ["SGX"], set(), with_catalysts=False,
+                         structured_factory=fake_factory({"picks": []}, []),
+                         _gather=gather) == []
+
+
+def test_screener_real_failures_still_raise(conn):
+    scans = fake_scans({"momentum": [cand("D05")]})
+    gather = lambda *a, **k: gather_candidates(  # noqa: E731
+        None, ["SGX"], set(), conn=conn, _factor_scan=scans, _recs=NO_RECS)
+
+    def boom_factory(agent_id, schema, wi):
+        class LLM:
+            def invoke(self, messages):
+                raise RuntimeError("credit balance is too low")
+        return LLM(), "sys"
+    with pytest.raises(ScreenerError, match="credit balance"):
+        screener_pick(conn, None, ["SGX"], set(), with_catalysts=False,
+                      structured_factory=boom_factory, _gather=gather)
+    with pytest.raises(ScreenerError):                  # schema-invalid output
+        screener_pick(conn, None, ["SGX"], set(), with_catalysts=False,
+                      structured_factory=fake_factory({"nope": 1}, []),
+                      _gather=gather)
+    with pytest.raises(ScreenerError):                  # not a Shortlist at all
+        screener_pick(conn, None, ["SGX"], set(), with_catalysts=False,
+                      structured_factory=fake_factory("D05 please", []),
+                      _gather=gather)
 
 
 def test_factor_scan_parses_and_drops_preferred_lines():

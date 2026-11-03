@@ -93,7 +93,7 @@ function posCard(p) {
       <span>${fmt(m.week52_high)} high</span></div>`;
   }
   const volRatio = m.volume && m.avg_volume ? m.volume / m.avg_volume : null;
-  return `<div class="poscard ${p.is_open ? '' : 'closedmkt'}" id="pc-${id}">
+  return `<div class="poscard ${p.is_open ? '' : 'closedmkt'}" id="pc-${esc(id)}">
     <div class="poshead">
       <div><span class="tk">${esc(p.ticker)}</span>
         <span class="nm">${esc(m.name || p.instrument_id)}</span><br>
@@ -135,10 +135,10 @@ function posCard(p) {
     <div class="row" style="justify-content:space-between;margin-bottom:.3rem">
       <div class="tabs" style="margin:0">${RANGES.map(([r, lbl]) =>
         `<button class="${rng === r ? 'on' : ''}"
-          onclick="setRange('${id}','${r}')">${lbl}</button>`).join('')}</div>
-      <span class="muted" style="font-size:.68rem" id="src-${id}"></span>
+          onclick="setRange(${jsArg(id)},${jsArg(r)})">${lbl}</button>`).join('')}</div>
+      <span class="muted" style="font-size:.68rem" id="src-${esc(id)}"></span>
     </div>
-    <div id="ch-${id}" style="min-height:150px"><p class="muted">loading
+    <div id="ch-${esc(id)}" style="min-height:150px"><p class="muted">loading
       chart…</p></div>
   </div>`;
 }
@@ -214,13 +214,13 @@ function renderRest() {
     '<table><tr><th>account</th><th>cash</th><th>positions</th>' +
     '<th>equity</th><th>realized P&amp;L</th><th></th></tr>' +
     d.accounts.map(a => `<tr><td><b>${esc(a.id)}</b></td>
-      <td>${fmt(a.cash)} ${a.ccy}</td><td>${fmt(a.positions_value)}</td>
+      <td>${fmt(a.cash)} ${esc(a.ccy)}</td><td>${fmt(a.positions_value)}</td>
       <td><b>${fmt(a.equity)}</b></td>
       <td class="${a.realized_pl >= 0 ? 'ok' : 'bad'}">${fmt(a.realized_pl)}</td>
-      <td class="row"><input id="amt-${a.id}" type="number" placeholder="amount"
+      <td class="row"><input id="amt-${esc(a.id)}" type="number" placeholder="amount"
         style="width:100px">
-        <button class="ghost" onclick="acct('${a.id}','deposit')">top up</button>
-        <button class="ghost" onclick="acct('${a.id}','withdraw')">withdraw
+        <button class="ghost" onclick="acct(${jsArg(a.id)},'deposit')">top up</button>
+        <button class="ghost" onclick="acct(${jsArg(a.id)},'withdraw')">withdraw
         </button></td></tr>`).join('') + '</table>';
 
   document.getElementById('closed').innerHTML = d.closed.length === 0
@@ -239,7 +239,7 @@ function renderRest() {
     : '<table><tr><th>instrument</th><th>rule</th><th>threshold</th>' +
       '<th>fires today</th><th>last fired</th></tr>' +
       d.alerts.map(a => `<tr><td>${esc(a.instrument_id)}</td>
-        <td>${esc(a.rule)}</td><td>${a.threshold}</td>
+        <td>${esc(a.rule)}</td><td>${fmt(a.threshold)}</td>
         <td>${a.fire_count_today || 0}</td>
         <td class="muted">${ts(a.last_fired_at)}</td></tr>`).join('') +
       '</table>';

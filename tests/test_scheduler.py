@@ -116,3 +116,105 @@ def test_analysis_requires_open_markets_at_fire_time():
             if sessions.is_open(ex, now)] == []          # Asia asleep
     assert [ex for ex in REGIONS["us"]
             if sessions.is_open(ex, now)] == ["NASDAQ", "NYSE"]
+
+
+# ── H4 / M10: daily firing rule ─────────────────────────────────────────────
+DAILY_UTC = {"type": "daily", "time": "15:00", "tz": "UTC",
+             "days": [1, 2, 3, 4, 5, 6, 7]}
+SLOT = T0 + 3600            # Tue 2026-08-11 15:00 UTC
+
+
+def _sim(conn, job, spec, start, end, step=20):
+    """Drive Scheduler.tick() on a fake clock; return the fire timestamps."""
+    scheduler.update(conn, job, enabled=True, spec_patch=spec)
+    now = [start]
+    fires = []
+    sched = scheduler.Scheduler(
+        conn, {job: lambda spec: fires.append(now[0]) or {}},
+        clock=lambda: now[0])
+    while now[0] < end:
+        sched.tick()
+        now[0] += step
+    return fires
+
+
+def test_never_run_daily_job_fires_at_its_next_slot(conn):
+    """H4: last_run_at NULL used to mean 'next slot after now' on every tick,
+    so the job never fired. Over a simulated week it must fire once a day."""
+    fires = _sim(conn, "reconcile", DAILY_UTC, T0, T0 + 7 * 86400)
+    assert len(fires) == 7
+    assert fires[0] - SLOT < 60                       # on time, not late
+    assert all(b - a == 86400 for a, b in zip(fires, fires[1:]))
+
+
+def test_never_run_daily_job_at_exact_slot():
+    assert scheduler.next_run_ts(DAILY_UTC, None, SLOT) == SLOT
+    assert scheduler.next_run_ts(DAILY_UTC, None, SLOT + 30) == SLOT
+    # already ran this slot → tomorrow
+    assert scheduler.next_run_ts(DAILY_UTC, SLOT + 5, SLOT + 30) == \
+        SLOT + 86400
+
+
+def test_missed_daily_slot_is_skipped_not_backfired():
+    """M10: process down over the slot. Boot 2h later: the stale slot is NOT
+    fired; the job waits for tomorrow's."""
+    yesterday = SLOT - 86400
+    late = SLOT + 2 * 3600
+    assert scheduler.next_run_ts(DAILY_UTC, yesterday, late) == SLOT + 86400
+    assert scheduler.next_run_ts(DAILY_UTC, None, late) == SLOT + 86400
+
+
+def test_missed_slot_inside_grace_window_still_fires():
+    g = scheduler.DAILY_GRACE_SECONDS
+    yesterday = SLOT - 86400
+    assert scheduler.next_run_ts(DAILY_UTC, yesterday, SLOT + g) == SLOT
+    assert scheduler.next_run_ts(DAILY_UTC, yesterday, SLOT + g + 1) == \
+        SLOT + 86400
+
+
+def test_downtime_does_not_fire_late_in_tick(conn):
+    # last ran yesterday; the desk boots 3h after today's slot
+    scheduler.update(conn, "reconcile", enabled=True, spec_patch=DAILY_UTC)
+    conn.execute("UPDATE schedules SET last_run_at=? WHERE job='reconcile'",
+                 (SLOT - 86400,))
+    sched = scheduler.Scheduler(conn, {"reconcile": lambda s: {}},
+                                clock=lambda: SLOT + 3 * 3600)
+    assert sched.tick() == []
+
+
+def test_weekday_only_daily_never_run_skips_weekend(conn):
+    spec = {"type": "daily", "time": "02:00", "tz": "Asia/Singapore",
+            "days": [1, 2, 3, 4, 5]}
+    fires = _sim(conn, "analysis_asia", spec, T0, T0 + 7 * 86400, step=60)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    days = [datetime.fromtimestamp(f, ZoneInfo("Asia/Singapore")).isoweekday()
+            for f in fires]
+    assert days == [3, 4, 5, 1, 2]                    # Wed..Fri, Mon, Tue
+
+
+# ── "local" timezone is the host's real zone, DST-aware ─────────────────────
+def test_local_tz_honours_dst(monkeypatch):
+    monkeypatch.setenv("TZ", "Europe/London")
+    tz = scheduler._tz("local")
+    assert getattr(tz, "key", None) == "Europe/London"
+    spec = {"type": "daily", "time": "09:00", "tz": "local",
+            "days": [1, 2, 3, 4, 5, 6, 7]}
+    # Sat 2026-10-24 12:00 UTC (BST); clocks go back Sun 25 Oct. The slot on
+    # Mon 26 Oct 09:00 is GMT = 09:00 UTC, not 08:00 UTC as a fixed +1h
+    # offset taken on the Saturday would give.
+    from datetime import datetime, timezone
+    sat = int(datetime(2026, 10, 24, 12, tzinfo=timezone.utc).timestamp())
+    sun_slot = scheduler.next_run_ts(spec, sat, sat)
+    mon_slot = scheduler._next_slot_after(spec, sun_slot)
+    assert datetime.fromtimestamp(sun_slot, timezone.utc).hour == 9   # GMT
+    assert datetime.fromtimestamp(mon_slot, timezone.utc).hour == 9
+
+
+def test_local_tz_falls_back_to_etc_localtime(monkeypatch):
+    monkeypatch.delenv("TZ", raising=False)
+    tz = scheduler._tz("local")
+    # whatever the host is, it must be a real zone that knows about DST
+    # transitions, not a frozen datetime.timezone offset
+    from datetime import timezone
+    assert not isinstance(tz, timezone)

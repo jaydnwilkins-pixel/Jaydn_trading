@@ -82,3 +82,97 @@ def test_db_roundtrip():
     loaded = sessions.load(conn)
     assert is_open("SGX", at(SGT, 2026, 8, 11, 10), loaded)
     assert loaded["HKEX"].lunch_break == "12:00-13:00"
+
+
+# ── M11: calendar completeness ─────────────────────────────────────────────
+TK = ZoneInfo("Asia/Tokyo")
+IST = ZoneInfo("Asia/Kolkata")
+LDN = ZoneInfo("Europe/London")
+SYD = ZoneInfo("Australia/Sydney")
+PAR = ZoneInfo("Europe/Paris")
+
+
+@pytest.mark.parametrize("exchange,tz,day", [
+    ("SGX", SGT, (2026, 5, 27)),    # Hari Raya Haji
+    ("SGX", SGT, (2026, 6, 1)),     # Vesak observed
+    ("SGX", SGT, (2026, 11, 9)),    # Deepavali observed
+    ("HKEX", HK, (2026, 4, 7)), ("HKEX", HK, (2026, 5, 1)),
+    ("HKEX", HK, (2026, 5, 25)), ("HKEX", HK, (2026, 6, 19)),
+    ("HKEX", HK, (2026, 10, 19)),
+    ("TSE", TK, (2026, 1, 12)), ("TSE", TK, (2026, 3, 20)),
+    ("TSE", TK, (2026, 7, 20)), ("TSE", TK, (2026, 9, 21)),
+    ("TSE", TK, (2026, 9, 22)), ("TSE", TK, (2026, 9, 23)),
+    ("TSE", TK, (2026, 10, 12)),
+    ("NSE", IST, (2026, 11, 10)), ("NSE", IST, (2026, 11, 24)),
+    ("NSE", IST, (2026, 12, 25)),
+])
+def test_missing_holidays_now_closed(exchange, tz, day):
+    assert not is_open(exchange, at(tz, *day, 10, 30))
+
+
+def test_every_default_holiday_is_a_weekday():
+    """A weekend date in a holiday list is dead weight and usually means the
+    observed (substitute) weekday was forgotten."""
+    from datetime import date
+    for s in sessions.DEFAULTS.values():
+        for iso in s.holidays:
+            assert date.fromisoformat(iso).weekday() < 5, (s.exchange, iso)
+        for iso, _ in s.early_closes:
+            assert date.fromisoformat(iso).weekday() < 5, (s.exchange, iso)
+            assert iso not in s.holidays, (s.exchange, iso)
+
+
+def test_deepavali_pushes_next_open_and_close():
+    fri = at(SGT, 2026, 11, 6, 18)
+    assert next_open("SGX", fri) == at(SGT, 2026, 11, 10, 9)
+    assert close_of("SGX", fri) == at(SGT, 2026, 11, 10, 17)
+
+
+@pytest.mark.parametrize("exchange,tz,day,close", [
+    ("NYSE", NY, (2026, 11, 27), (13, 0)),
+    ("NASDAQ", NY, (2026, 12, 24), (13, 0)),
+    ("LSE", LDN, (2026, 12, 24), (12, 30)),
+    ("LSE", LDN, (2026, 12, 31), (12, 30)),
+    ("ASX", SYD, (2026, 12, 24), (14, 10)),
+    ("ASX", SYD, (2026, 12, 31), (14, 10)),
+    ("PARIS", PAR, (2026, 12, 24), (14, 5)),
+    ("PARIS", PAR, (2026, 12, 31), (14, 5)),
+])
+def test_half_days_close_early(exchange, tz, day, close):
+    h, m = close
+    before = at(tz, *day, h - 1, m)
+    assert is_open(exchange, before)
+    assert not is_open(exchange, at(tz, *day, h, m))
+    assert close_of(exchange, before) == at(tz, *day, h, m)
+    # a normal day keeps its normal close
+    assert close_of(exchange, at(tz, 2026, 12, 22, 11)) == \
+        datetime.combine(datetime(2026, 12, 22).date(),
+                         sessions._t(sessions.DEFAULTS[exchange].close_time),
+                         tzinfo=tz)
+
+
+def test_hkex_half_day_has_no_afternoon_session():
+    # after the 12:00 early close the next open is the following session,
+    # not 13:00 the same day
+    assert not is_open("HKEX", at(HK, 2026, 12, 24, 13, 30))
+    assert next_open("HKEX", at(HK, 2026, 12, 24, 12, 5)) == \
+        at(HK, 2026, 12, 28, 9, 30)
+
+
+def test_half_days_survive_the_db_roundtrip_and_new_dates_reach_old_dbs():
+    import json as _json
+    from app.accounting import db
+    conn = db.connect(":memory:")
+    db.init(conn)
+    # a DB seeded by the old code: SGX without the new dates, plus an
+    # operator-added closure that must be kept
+    conn.execute("INSERT INTO exchange_sessions (exchange, tz, open_time,"
+                 " close_time, holidays) VALUES ('SGX', 'Asia/Singapore',"
+                 " '09:00', '17:00', ?)",
+                 (_json.dumps(["2026-01-01", "2026-03-04"]),))
+    sessions.seed_db(conn)
+    loaded = sessions.load(conn)
+    assert "2026-11-09" in loaded["SGX"].holidays          # merged in
+    assert "2026-03-04" in loaded["SGX"].holidays          # operator kept
+    assert loaded["NYSE"].early_closes == sessions.DEFAULTS["NYSE"].early_closes
+    assert not is_open("NYSE", at(NY, 2026, 11, 27, 14), loaded)

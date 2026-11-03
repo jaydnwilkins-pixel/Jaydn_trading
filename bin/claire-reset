@@ -12,9 +12,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_REAL="$(cd "$ROOT" && pwd -P)"
 PY="$ROOT/venv/bin/python3"
-API_PAT='app\.api\.server'
-DASH_PAT='app\.dashboards'
+API_PAT='-m app\.api\.server( |$)'
+DASH_PAT='-m app\.dashboards( |$)'
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'
 c_off=$'\033[0m'
@@ -23,7 +24,15 @@ ok()   { printf '%s✔%s %s\n' "$c_grn" "$c_off" "$*"; }
 die()  { printf '%s✘%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 dim()  { printf '%s%s%s\n' "$c_dim" "$*" "$c_off"; }
 
-pids_for() { pgrep -f "$1" 2>/dev/null || true; }
+# this user's processes running from this checkout only (see bin/claire)
+pids_for() {
+  local p cwd
+  for p in $(pgrep -u "$(id -u)" -f -- "$1" 2>/dev/null || true); do
+    cwd="$(readlink -f "/proc/$p/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$ROOT_REAL" ] && printf '%s\n' "$p"
+  done
+  return 0
+}
 
 ASSUME_YES=0
 case "${1:-}" in
@@ -70,8 +79,27 @@ fi
 stamp="$(date +%Y%m%d-%H%M%S)"
 backup="$ROOT/var/backup-$stamp"
 mkdir -p "$backup"
-cp -a "$ROOT/var/desk.db" "$backup/" 2>/dev/null || true
-cp -a "$ROOT/var/checkpoints.db" "$backup/" 2>/dev/null || true
+# SQLite online backup, not cp: in WAL mode the newest commits live in
+# desk.db-wal until a checkpoint, so copying desk.db alone silently drops
+# them. Connection.backup() reads through the WAL and writes one complete,
+# self-contained file. Any failure aborts the reset — no backup, no wipe.
+"$PY" - "$ROOT/var" "$backup" <<'PYEOF'
+import sqlite3, sys
+from pathlib import Path
+src_dir, dst_dir = Path(sys.argv[1]), Path(sys.argv[2])
+for name in ("desk.db", "checkpoints.db"):
+    src = src_dir / name
+    if not src.exists():
+        continue
+    s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    d = sqlite3.connect(dst_dir / name)
+    with d:
+        s.backup(d)
+    ok = d.execute("PRAGMA integrity_check").fetchone()[0]
+    d.close(); s.close()
+    if ok != "ok":
+        sys.exit(f"backup of {name} failed integrity_check: {ok}")
+PYEOF
 if [ -d "$ROOT/var/narratives" ]; then cp -a "$ROOT/var/narratives" "$backup/"; fi
 ok "backup → $backup"
 
@@ -95,7 +123,10 @@ PYEOF
 )
 # the graph's own memory: leaving it would resurrect suspended runs whose
 # desk.db rows no longer exist
-rm -f "$ROOT/var/checkpoints.db"
+# (with its WAL and shared-memory files: a stray -wal would be replayed into
+# the next checkpoints.db created at the same path)
+rm -f "$ROOT/var/checkpoints.db" "$ROOT/var/checkpoints.db-wal" \
+      "$ROOT/var/checkpoints.db-shm"
 rm -rf "$ROOT/var/narratives"
 ok "desk reset to base"
 dim "  run 'bin/claire start' — accounts and opening balances are recreated"

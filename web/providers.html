@@ -10,17 +10,20 @@
     <h3 id="pform-title">Add a provider</h3>
     <p class="muted">Secrets never enter the database — "key env var" is the
     NAME of a variable you add to etc/claire.env (then restart claire-api).
+    Only ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY or XAI_API_KEY
+    are accepted (or none) — a free-form name would let a provider entry send
+    any secret in claire.env to its base URL.
     A local Ollama needs no key: kind openai_compatible, base URL
     http://127.0.0.1:11434/v1.</p>
     <div class="row">
       <input id="p-id" placeholder="id e.g. ollama" style="width:110px">
       <input id="p-name" placeholder="display name" style="width:140px">
       <select id="p-kind"><option value="openai_compatible">
-        openai_compatible</option><option value="anthropic">anthropic</option>
+        openai_compatible</option><option value="anthropic">anthropic</option><option value="claude_sdk">claude_sdk (Max subscription)</option>
       </select>
       <input id="p-url" placeholder="base URL (openai_compatible only)"
         style="flex:1">
-      <input id="p-key" placeholder="key env var e.g. GROQ_API_KEY"
+      <input id="p-key" placeholder="key env var e.g. OPENAI_API_KEY"
         style="width:190px">
     </div>
     <div class="row" style="margin-top:.5rem">
@@ -45,10 +48,9 @@
   <div id="mcps">loading…</div>
   <div class="card">
     <h3>Add an MCP server</h3>
-    <p class="muted">The command is launched with the env vars named below
-    taken from etc/claire.env. A server attached to a broker activates that
-    broker's real adapter once its credentials are present; until then the
-    paper sim stands in.</p>
+    <p class="muted">Configuration only, for now: the desk does not launch
+    these servers, and every order goes to the in-process paper sim whether or
+    not the credentials named below are present.</p>
     <div class="row">
       <input id="m-id" placeholder="id e.g. ibkr" style="width:110px">
       <select id="m-broker"><option value="">no broker</option>
@@ -95,20 +97,20 @@ async function refresh() {
       return `<tr><td><b>${esc(p.display_name)}</b>
         ${p.enabled ? '' : '<span class="pill bad">off</span>'}<br>
         <span class="muted">${esc(p.base_url || 'api.anthropic.com')}</span></td>
-        <td>${p.kind}</td>
+        <td>${esc(p.kind)}</td>
         <td class="${p.key_present ? 'ok' : (p.key_ref ? 'bad' : 'muted')}">
           ${p.key_ref ? (p.key_present ? 'present' : 'MISSING') : 'none'}
           <br><span class="muted">${esc(p.key_ref || '')}</span></td>
         <td>${hs}</td>
-        <td class="muted">${Object.keys(p.capabilities)
-          .filter(k => p.capabilities[k]).join(', ') || '—'}</td>
+        <td class="muted">${esc(Object.keys(p.capabilities)
+          .filter(k => p.capabilities[k]).join(', ')) || '—'}</td>
         <td class="muted">${fmt(p.cost_per_1k_in, 4)} /
           ${fmt(p.cost_per_1k_out, 4)}</td>
-        <td class="row"><button class="ghost" onclick="probe('${p.id}')">
+        <td class="row"><button class="ghost" onclick="probe(${jsArg(p.id)})">
           probe</button>
-          <button class="ghost" onclick='editProvider(${JSON.stringify(
-            JSON.stringify(p))})'>edit</button>
-          <button class="ghost" onclick="toggleProvider(${JSON.stringify(
+          <button class="ghost" onclick="editProvider(${jsArg(
+            JSON.stringify(p))})">edit</button>
+          <button class="ghost" onclick="toggleProvider(${jsArg(
             JSON.stringify(p))})">${p.enabled ? 'disable' : 'enable'}</button>
         </td></tr>`;
     }).join('') + '</table>';
@@ -124,12 +126,12 @@ async function refresh() {
       <td class="${m.creds_present ? 'ok' : (m.env_refs.length ? 'bad'
         : 'muted')}">${m.env_refs.length === 0 ? 'none needed'
         : m.creds_present ? 'present'
-        : 'missing: ' + m.missing_refs.join(', ')}</td>
+        : 'missing: ' + esc(m.missing_refs.join(', '))}</td>
       <td class="muted">${esc(m.note || '')}</td>
       <td class="row">
-        <button class="ghost" onclick='editMcp(${JSON.stringify(
-          JSON.stringify(m))})'>edit</button>
-        <button class="ghost" onclick="delMcp('${m.id}')">delete</button>
+        <button class="ghost" onclick="editMcp(${jsArg(
+          JSON.stringify(m))})">edit</button>
+        <button class="ghost" onclick="delMcp(${jsArg(m.id)})">delete</button>
       </td></tr>`).join('') + '</table>';
 }
 

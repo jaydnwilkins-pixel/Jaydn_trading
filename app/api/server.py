@@ -75,24 +75,96 @@ def build_custodian(conn, repo, brokers, market, secret):
     from ..approvals import default_resume_post
     from ..custodian import Custodian, _account_broker_from_db
 
-    def fx_rate_for(instrument_id, account_id):
-        from ..accounting.money import to_micro
-        inst = conn.execute("SELECT currency FROM instruments WHERE id=?",
-                            (instrument_id,)).fetchone()
-        acct = conn.execute("SELECT base_currency FROM broker_accounts"
-                            " WHERE id=?", (account_id,)).fetchone()
-        try:
-            return to_micro(str(market.fx(inst["currency"],
-                                          acct["base_currency"])))
-        except Exception:                       # noqa: BLE001 — degrade loudly
-            return to_micro("1")
-
     return Custodian(conn, repo, brokers,
                      resume_post=default_resume_post("http://127.0.0.1:7788",
                                                      secret),
                      account_broker=_account_broker_from_db(conn),
-                     fx_rate_for=fx_rate_for,
+                     fx_rate_for=make_fx_rate_for(conn, market),
                      cal=sessions.load(conn) or None)
+
+
+class FxUnavailable(RuntimeError):
+    pass
+
+
+def make_fx_rate_for(conn, market):
+    """(instrument_id, account_id) -> fx rate ×1e6 for booking a fill.
+
+    A failed lookup RAISES. It used to return 1.0, so a ¥300,000 fill would
+    have been booked as $300,000 (H6). Raising leaves the fill unbooked; the
+    custodian flags it and books it on a later run once FX is back — late
+    is recoverable, a wrong rate in an immutable execution row is not."""
+    from ..accounting.money import to_micro
+
+    def fx_rate_for(instrument_id, account_id):
+        inst = conn.execute("SELECT currency FROM instruments WHERE id=?",
+                            (instrument_id,)).fetchone()
+        acct = conn.execute("SELECT base_currency FROM broker_accounts"
+                            " WHERE id=?", (account_id,)).fetchone()
+        if inst is None or acct is None:
+            raise FxUnavailable(f"unknown instrument/account "
+                                f"{instrument_id}/{account_id}")
+        if inst["currency"] == acct["base_currency"]:
+            return to_micro("1")
+        try:
+            rate = market.fx(inst["currency"], acct["base_currency"])
+        except Exception as e:                  # noqa: BLE001
+            raise FxUnavailable(
+                f"no {inst['currency']}→{acct['base_currency']} rate: "
+                f"{e}") from e
+        if rate is None or rate <= 0:
+            raise FxUnavailable(f"bad {inst['currency']}→"
+                                f"{acct['base_currency']} rate {rate!r}")
+        return to_micro(str(rate))
+    return fx_rate_for
+
+
+def choose_picks(conn, market, exchanges, held):
+    """(picker label, [(ticker, exchange, reason)]) for a scheduled run.
+
+    The SCREENER AGENT judges the shortlist, and "nothing worth a run today"
+    is a legitimate answer: an empty list starts no paid runs. Only a real
+    failure (ScreenerError: provider outage, unparseable output) falls back
+    to the deterministic top-of-book pick, so an outage never kills a
+    scheduled run (§1.7). Previously zero picks raised too, and the fallback
+    started runs the screener had just declined (M13)."""
+    from ..autonomous import pick_candidates
+    from ..screener import ScreenerError, screener_pick
+    try:
+        picks = [(p.ticker, p.exchange, p.reason) for p in
+                 screener_pick(conn, market, exchanges, held)]
+    except ScreenerError as e:
+        return (f"deterministic fallback ({e})",
+                [(t, ex, "top of book") for t, ex in
+                 pick_candidates(market, exchanges, held)])
+    return ("screener agent" if picks else "screener agent (no picks)",
+            picks)
+
+
+def start_runs(desk, jobs):
+    """Start one run per (ticker, exchange, trigger, reason). Each start is
+    isolated: start_run refuses an invalid symbol (ValueError) and an
+    unknown venue has no currency (KeyError), and one bad pick from a
+    screener or scan used to abort every pick after it. Skipped picks are
+    returned so the schedule's last_result records them."""
+    from ..autonomous import CCY
+    from ..graph.state import Instrument
+    started, skipped = [], []
+    for ticker, ex, trigger, reason in jobs:
+        try:
+            inst = Instrument(id=f"{ex}:{ticker}", ticker=ticker, exchange=ex,
+                              currency=CCY[ex],
+                              lot_size=100 if ex == "SGX" else 1)
+            wi = desk.start_run(inst, trigger=trigger)
+        except (ValueError, KeyError) as e:
+            print(f"skipped run for {ticker!r} on {ex!r}: {e}",
+                  file=sys.stderr)
+            skipped.append({"ticker": str(ticker)[:40],
+                            "exchange": str(ex)[:20], "error": str(e)[:200]})
+            continue
+        started.append({"work_item": wi, "ticker": ticker, "exchange": ex,
+                        "reason": reason})
+    return started, skipped
 
 
 def start_scheduler(conn, repo, desk, market, custodian):
@@ -101,13 +173,11 @@ def start_scheduler(conn, repo, desk, market, custodian):
     from datetime import datetime, timezone
 
     from .. import scheduler, sessions
-    from ..autonomous import CCY, REGIONS, pick_candidates
-    from ..graph.state import Instrument
+    from ..autonomous import REGIONS
 
     scheduler.seed(conn)
 
     def run_analysis(spec):
-        from ..screener import ScreenerError, screener_pick
         cal = sessions.load(conn) or None
         now = datetime.now(timezone.utc)
         exchanges = REGIONS[spec.get("region", "us")]
@@ -120,27 +190,12 @@ def start_scheduler(conn, repo, desk, market, custodian):
         held = {r["ticker"] for r in conn.execute(
             "SELECT DISTINCT i.ticker FROM lots l JOIN instruments i"
             " ON i.id=l.instrument_id WHERE l.qty_remaining > 0")}
-        # the SCREENER AGENT judges the shortlist; deterministic fallback
-        # so a provider outage never kills a scheduled run (§1.7)
-        picker, picks = "screener agent", []
-        try:
-            picks = [(p.ticker, p.exchange, p.reason) for p in
-                     screener_pick(conn, market, exchanges, held)]
-        except ScreenerError as e:
-            picker = f"deterministic fallback ({e})"
-            picks = [(t, ex, "top of book") for t, ex in
-                     pick_candidates(market, exchanges, held)]
-        started = []
-        for ticker, ex, reason in picks:
-            inst = Instrument(id=f"{ex}:{ticker}", ticker=ticker, exchange=ex,
-                              currency=CCY[ex],
-                              lot_size=100 if ex == "SGX" else 1)
-            started.append({"work_item": desk.start_run(
-                                inst, trigger=f"{picker}: {reason}"),
-                            "ticker": ticker, "exchange": ex,
-                            "reason": reason})
+        picker, picks = choose_picks(conn, market, exchanges, held)
+        started, rejected = start_runs(
+            desk, [(t, ex, f"{picker}: {reason}", reason)
+                   for t, ex, reason in picks])
         return {"started": started, "picker": picker,
-                "skipped_closed": skipped}
+                "skipped_closed": skipped, "skipped_invalid": rejected}
 
     def run_reconcile(spec):
         report = custodian.run_once()
@@ -166,18 +221,13 @@ def start_scheduler(conn, repo, desk, market, custodian):
             " ON i.id=l.instrument_id WHERE l.qty_remaining > 0")}
         hits = event_scan(conn, open_ex, held,
                           threshold=float(spec.get("threshold", 3.0)))
-        started = []
-        for c in hits[:int(spec.get("max_runs", 1))]:
-            inst = Instrument(id=f"{c['exchange']}:{c['ticker']}",
-                              ticker=c["ticker"], exchange=c["exchange"],
-                              currency=CCY[c["exchange"]],
-                              lot_size=100 if c["exchange"] == "SGX" else 1)
-            trig = (f"event scan: relative volume {c['rel_volume']:.1f}x its "
-                    f"10-day average today")
-            started.append({"work_item": desk.start_run(inst, trigger=trig),
-                            "ticker": c["ticker"], "exchange": c["exchange"],
-                            "reason": f"rel-vol {c['rel_volume']:.1f}x"})
+        started, rejected = start_runs(desk, [
+            (c["ticker"], c["exchange"],
+             f"event scan: relative volume {c['rel_volume']:.1f}x its "
+             f"10-day average today", f"rel-vol {c['rel_volume']:.1f}x")
+            for c in hits[:int(spec.get("max_runs", 1))]])
         return {"scanned": open_ex, "hits": len(hits), "started": started,
+                "skipped_invalid": rejected,
                 "picker": "event scan (unusual volume)"}
 
     sched = scheduler.Scheduler(conn, {
@@ -189,6 +239,13 @@ def start_scheduler(conn, repo, desk, market, custodian):
         "event_scan": run_event_scan,
     })
     sched.start()
+    # keep the read-only Saxo LIVE sign-in alive (refresh tokens rotate and
+    # expire in ~40 min); silent until bin/saxo login has been run
+    import threading
+
+    from ..tools import saxo_live
+    threading.Thread(target=saxo_live.keepalive_loop, daemon=True,
+                     name="saxo-keepalive").start()
     return sched
 
 

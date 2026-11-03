@@ -41,13 +41,15 @@ async function refresh() {
     lastSig = sig;
     document.getElementById('runs').innerHTML = '<table><tr><th>id</th>' +
       '<th>kind</th><th>ticker</th><th>state</th><th>updated</th></tr>' +
+      // the work-item id embeds the ticker, so it is attacker-shaped data:
+      // jsArg for the inline handler, esc for the id attributes
       runs.map(r => `<tr class="clickable ${openId === r.id ? 'sel' : ''}"
-        onclick="toggle('${r.id}')">
+        onclick="toggle(${jsArg(r.id)})">
         <td>${esc(r.id)}</td><td>${esc(r.kind)}</td><td>${esc(r.ticker)}</td>
         <td class="${cls[r.state] || ''}">${esc(r.state)}</td>
         <td class="muted">${ts(r.updated_at)}</td></tr>
-        <tr id="d-${r.id}" style="display:${openId === r.id ? '' : 'none'}">
-        <td colspan="5" id="dc-${r.id}"></td></tr>`).join('') + '</table>';
+        <tr id="d-${esc(r.id)}" style="display:${openId === r.id ? '' : 'none'}">
+        <td colspan="5" id="dc-${esc(r.id)}"></td></tr>`).join('') + '</table>';
     if (openId) render(openId);          // restore the open panel as it was
   }
   const f = await api('/api/feed');
@@ -100,13 +102,13 @@ function render(id) {
   if ((d.orders || []).length) html += '<p><b>Orders</b>: ' +
     d.orders.map(o => `${esc(o.side)} ${fmt(o.qty)} — ${esc(o.status)}`)
       .join(' · ') + '</p>';
-  if (d.summary) html += `<details id="sum-${id}" ${summaryOpen ? 'open' : ''}
+  if (d.summary) html += `<details id="sum-${esc(id)}" ${summaryOpen ? 'open' : ''}
     ontoggle="summaryOpen=this.open">
     <summary class="muted">run summary</summary>
     <div class="narr">${mdLite(d.summary)}</div></details>`;
   html += `<p class="muted" style="font-size:.72rem">events: ${
-    (d.events || []).map(e => `${e.from_state || ''}→${e.to_state}`)
-      .join(', ')}</p>`;
+    esc((d.events || []).map(e => `${e.from_state || ''}→${e.to_state}`)
+      .join(', '))}</p>`;
   el.innerHTML = html || '<span class="muted">no detail</span>';
 }
 refresh(); setInterval(refresh, 8000);

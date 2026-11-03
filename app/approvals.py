@@ -4,10 +4,17 @@ The dashboards server is the ONLY component that converts a human click into
 a resume — and only when the caller PRESENTS the token that was delivered in
 the approval card. Localhost access alone approves nothing.
 """
+import hmac
 import json
 import time
 
 import httpx
+
+
+# A resume claims the token ('resuming') for as long as the graph runs. A
+# claim older than this belongs to a process that died mid-resume and may be
+# taken over; execution is seconds, so ten minutes is generous.
+RESUMING_STALE_S = 600
 
 
 class AuthError(Exception):
@@ -39,7 +46,8 @@ def thesis_action(conn, payload: dict, resume_post, *, clock=time.time):
     row = conn.execute("SELECT * FROM work_items WHERE id=?", (wi,)).fetchone()
     if row is None:
         raise AuthError(404, "unknown work item")
-    if token != (row["approval_token"] or ""):
+    if not row["approval_token"] or not hmac.compare_digest(
+            token.encode(), row["approval_token"].encode()):   # constant-time
         raise AuthError(403, "token mismatch")
     if row["token_state"] == "burned":
         raise AuthError(409, "token already used")
@@ -61,18 +69,28 @@ def thesis_action(conn, payload: dict, resume_post, *, clock=time.time):
         if acct is None:
             raise AuthError(400, f"no account for broker "
                                  f"{payload['broker']!r}")
-        (bal,) = conn.execute(
-            "SELECT COALESCE(SUM(amount_base),0) FROM cash_transactions"
-            " WHERE account_id=?", (acct["id"],)).fetchone()
+        # what is FREE to spend: cash already promised to open buy orders is
+        # not, and approving against it only fails later at the fill
+        from .accounting.repo import Repo
+        bal = Repo(conn).available_cash(acct["id"])
         if float(payload["size_base"]) > bal / 1e6:
             raise AuthError(400, f"size {payload['size_base']:.2f} exceeds "
                                  f"{acct['id']} cash "
                                  f"{bal / 1e6:.2f} {acct['base_currency']} — "
                                  "top up on the Portfolio page or reduce size")
 
-    # authorize: mark pending_resume (NOT burned) + audit row
-    conn.execute("UPDATE work_items SET token_state='pending_resume',"
-                 " updated_at=? WHERE id=?", (now, wi))
+    # authorize: mark pending_resume (NOT burned) + audit row. Conditional on
+    # the state the checks above read, so an item that was resumed, burned or
+    # expired in between is refused rather than re-authorized. A re-click on
+    # a pending_resume token (claire-api was down) is allowed; the single-use
+    # claim that actually matters is taken atomically by /internal/resume.
+    cur = conn.execute(
+        "UPDATE work_items SET token_state='pending_resume', updated_at=?"
+        " WHERE id=? AND approval_token=? AND state='awaiting_approval'"
+        " AND token_state IN ('minted','pending_resume')",
+        (now, wi, row["approval_token"]))
+    if cur.rowcount != 1:
+        raise AuthError(409, "token already used or being used")
     conn.execute(
         "INSERT INTO events (item_id, ts, actor, from_state, to_state, payload)"
         " VALUES (?,?,?,?,?,?)",
@@ -103,9 +121,14 @@ def retry_pending(conn, resume_post, *, clock=time.time):
     """Crash recovery: re-POST resumes that were authorized but never acked.
     Called by the custodian; idempotent because /internal/resume is."""
     done = []
+    now = int(clock())
+    # 'resuming' past the stale window = the resuming process died mid-run;
+    # without picking those up the approval would be stuck for good
     for row in conn.execute(
             "SELECT id, approval_token FROM work_items"
-            " WHERE token_state='pending_resume'"):
+            " WHERE token_state='pending_resume'"
+            " OR (token_state='resuming' AND updated_at < ?)",
+            (now - RESUMING_STALE_S,)).fetchall():
         events = conn.execute(
             "SELECT payload, to_state FROM events WHERE item_id=?"
             " AND to_state LIKE 'authorize:%' ORDER BY id DESC LIMIT 1",
@@ -114,10 +137,13 @@ def retry_pending(conn, resume_post, *, clock=time.time):
             continue
         detail = json.loads(events["payload"] or "{}")
         action = events["to_state"].split(":", 1)[1]
-        code, _ = resume_post({
-            "work_item_id": row["id"],
-            "status": "approved" if action == "approve" else "rejected",
-            "token": row["approval_token"], "actor": "human", **detail})
+        try:
+            code, _ = resume_post({
+                "work_item_id": row["id"],
+                "status": "approved" if action == "approve" else "rejected",
+                "token": row["approval_token"], "actor": "human", **detail})
+        except Exception:                   # noqa: BLE001 — api down: next run
+            continue
         if code == 200:
             done.append(row["id"])
     return done

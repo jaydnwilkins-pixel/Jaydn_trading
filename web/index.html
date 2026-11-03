@@ -27,7 +27,8 @@
       writes &amp; data</span>
     <span><i style="border-color:#8a6a2a;border-top-style:dashed"></i>shortcut
       paths: breach → exit review · override → gate</span>
-    <span style="color:var(--purple)">⚙ MCP status sits inside each venue</span>
+    <span style="color:var(--purple)">⚙ MCP config sits inside each venue
+      (execution is always the paper sim)</span>
     <span>hover for detail · click to inspect, question or configure</span>
   </div>
 
@@ -94,11 +95,13 @@ function node(id, x, y, w, h, title, sub, cls, extra, tip, href) {
     <text class="nt" x="10" y="17">${esc(cut(title, 17))}</text>
     <text class="ns" x="10" y="30">${esc(cut(sub, 22))}</text>
     ${extra || ''}<title>${esc(tip || sub)}</title>`;
+  // ids are agent ids / broker names from desk.db: never trust them in a
+  // handler or attribute unescaped
   if (href)
-    return `<a href="${href}" class="mnode ${cls}${sel}"
+    return `<a href="${esc(href)}" class="mnode ${esc(cls)}${sel}"
       transform="translate(${x},${y})">${inner}</a>`;
-  return `<g class="mnode ${cls}${sel}" transform="translate(${x},${y})"
-    onclick="openDrawer('${id}')">${inner}</g>`;
+  return `<g class="mnode ${esc(cls)}${sel}" transform="translate(${x},${y})"
+    onclick="openDrawer(${jsArg(id)})">${inner}</g>`;
 }
 function renderMap() {
   const g = GRAPH, h = g.health || {}, parts = [], edges = [];
@@ -188,15 +191,17 @@ function renderMap() {
   brokers.forEach((b, i) => {
     const y = gy + 26 + i * 62;
     const m = (g.mcps || []).find(x => x.broker === b.broker);
-    const mcpTxt = m ? (m.creds_present ? `⚙ mcp ● ${m.id}`
+    // an MCP entry is configuration only — orders always go to the paper
+    // sim — so never draw it as "live", even with creds present
+    const mcpTxt = m ? (m.creds_present ? `⚙ mcp cfg ${m.id} (unused)`
       : `⚙ mcp ○ needs creds`) : '⚙ no mcp';
     const mcp = m ? `<text class="nm" x="10" y="46"
       fill="${m.creds_present ? 'var(--purple)' : 'var(--dim)'}"
       >${esc(cut(mcpTxt, 20))}</text>
       <rect x="6" y="36" width="118" height="14" fill="transparent"
         style="cursor:pointer" onclick="event.stopPropagation();
-        openDrawer('mcp:${m.id}')"><title>inspect MCP server</title></rect>`
-      : `<text class="nm" x="10" y="46" fill="var(--dim)">${mcpTxt}</text>`;
+        openDrawer(${jsArg('mcp:' + m.id)})"><title>inspect MCP server</title></rect>`
+      : `<text class="nm" x="10" y="46" fill="var(--dim)">${esc(mcpTxt)}</text>`;
     parts.push(node(b.broker, gx + 10, y, 128, 54, b.broker,
       `${b.adapter} · ${b.open_orders} open`,
       b.state || 'idle', mcp, `${b.state} — ${b.detail}`));
@@ -260,14 +265,15 @@ async function openDrawer(id) {
     body.innerHTML = `<p>serves broker <b>${esc(m.broker || '—')}</b>
       ${m.enabled ? '' : '<span class="pill bad">disabled</span>'}</p>
       <p class="muted">command<br><code>${esc(m.command.join(' '))}</code></p>
-      <p>credentials (${m.env_refs.join(', ') || 'none needed'}):
+      <p>credentials (${esc(m.env_refs.join(', ')) || 'none needed'}):
         <b class="${m.creds_present ? 'ok' : 'bad'}">
         ${m.env_refs.length === 0 ? 'none needed'
           : m.creds_present ? 'present'
-          : 'missing ' + m.missing_refs.join(', ')}</b></p>
+          : 'missing ' + esc(m.missing_refs.join(', '))}</b></p>
       <p class="muted">${esc(m.note || '')}</p>
-      <p class="muted">While credentials are missing this venue runs on the
-        deterministic paper sim. Edit servers on
+      <p class="muted">Configuration only: execution always runs on the
+        deterministic in-process paper sim — the desk never launches this MCP
+        server to place orders, credentials or not. Edit servers on
         <a href="/providers">Providers &amp; MCP</a>.</p>`;
     return;
   }
@@ -289,15 +295,17 @@ async function openDrawer(id) {
       (a.display_name || id) + ' — ' + a.state;
     body.innerHTML = '<p class="muted">loading activity…</p>';
     let act = {runs: [], narrative: null, cost_24h: 0};
-    try { act = await api('/api/agent-activity?id=' + id); } catch {}
+    try { act = await api('/api/agent-activity?id=' +
+      encodeURIComponent(id)); } catch {}
+    // display_name / model are user-editable: escape them like any input
     const provOpts = PROVIDERS.map(pr => {
       const okc = a.requires.every(c => pr.capabilities[c]);
-      return `<option value="${pr.id}" ${pr.id === a.provider_id ?
-        'selected' : ''} ${okc ? '' : 'disabled'}>${pr.display_name}
+      return `<option value="${esc(pr.id)}" ${pr.id === a.provider_id ?
+        'selected' : ''} ${okc ? '' : 'disabled'}>${esc(pr.display_name)}
         ${okc ? '' : '(incompatible)'}</option>`;
     }).join('');
     body.innerHTML = `
-      <p class="muted">${a.tools.length ? 'tools: ' + a.tools.join(', ')
+      <p class="muted">${a.tools.length ? 'tools: ' + esc(a.tools.join(', '))
         : 'single structured call — no tools'} · $${fmt(act.cost_24h, 4)}
         spent in 24h</p>
       ${id === 'screener' ? `<p class="muted">This step also covers
@@ -308,11 +316,11 @@ async function openDrawer(id) {
       ${act.current ? `<p class="ok">● running now on
         ${esc(act.current.ticker || act.current.work_item_id || '—')}</p>`
         : '<p class="muted">idle right now</p>'}
-      <h2>Ask ${id} directly</h2>
+      <h2>Ask ${esc(id)} directly</h2>
       <div class="row"><input id="d-q" style="flex:1" placeholder=
         "e.g. what did you conclude last, and why?"
-        onkeydown="if(event.key==='Enter')askAgent('${id}')">
-        <button class="ghost" onclick="askAgent('${id}')">Ask</button></div>
+        onkeydown="if(event.key==='Enter')askAgent(${jsArg(id)})">
+        <button class="ghost" onclick="askAgent(${jsArg(id)})">Ask</button></div>
       <p class="muted" style="font-size:.72rem">answers come from this
         agent's own model + prompt, grounded in its run history — for
         desk-wide questions use <a href="/claire">Claire</a></p>
@@ -322,12 +330,12 @@ async function openDrawer(id) {
       ${act.runs.length === 0 ? `<p class="muted">Never run — launch a
         pipeline from Markets and this agent will light up.</p>`
         : `<div class="runlist">` + act.runs.map((r, i) =>
-          `<div class="runrow" id="rr-${i}" onclick="pickRun('${id}',${i},
-            '${r.work_item_id || ''}')">
+          `<div class="runrow" id="rr-${i}" onclick="pickRun(${jsArg(id)},${i},
+            ${jsArg(r.work_item_id || '')})">
             <span class="rt">${esc(r.ticker || r.work_item_id || '—')}</span>
             <span class="muted">${ago(r.started_at)}</span>
             <span class="${r.status === 'ok' ? 'ok' : r.status === 'error' ?
-              'bad' : 'warn'}">${r.status}</span>
+              'bad' : 'warn'}">${esc(r.status)}</span>
             <span class="muted">${r.tokens_in || 0}/${r.tokens_out || 0} tok</span>
             <span class="muted">$${fmt(r.cost_usd, 4)}</span>
             <span>${r.has_narrative ? '📄' : ''}</span>
@@ -336,8 +344,8 @@ async function openDrawer(id) {
       <h2>Model &amp; provider</h2>
       <div class="row">
         <select id="p-prov">${provOpts}</select>
-        <input id="p-model" value="${a.model}" style="flex:1">
-        <button onclick="saveAgent('${id}')">Save</button>
+        <input id="p-model" value="${esc(a.model)}" style="flex:1">
+        <button onclick="saveAgent(${jsArg(id)})">Save</button>
         <button class="ghost" onclick="testProv()">Test</button></div>
       <details style="margin-top:.6rem"><summary class="muted">system prompt
         </summary><pre style="white-space:pre-wrap">${esc(a.system_prompt)}
@@ -349,12 +357,14 @@ async function openDrawer(id) {
   }
   const b = (g.brokers || []).find(x => x.broker === id);
   if (b) {
-    body.innerHTML = `<p>account <b>${b.account}</b>
-      <span class="pill">${b.environment}</span><br>
-      cash <b>${fmt(b.cash)}</b> ${b.ccy} · open orders
-      <b>${b.open_orders}</b> · adapter <b>${b.adapter}</b></p>
-      ${b.mcp ? `<p class="muted">MCP: <code>${esc(b.mcp.command)}</code><br>
-        creds (${b.mcp.env_refs.join(', ') || 'none'}):
+    body.innerHTML = `<p>account <b>${esc(b.account)}</b>
+      <span class="pill">${esc(b.environment)}</span><br>
+      cash <b>${fmt(b.cash)}</b> ${esc(b.ccy)} · open orders
+      <b>${esc(b.open_orders)}</b> · adapter <b>${esc(b.adapter)}</b></p>
+      <p class="muted">${esc(b.detail || '')}</p>
+      ${b.mcp ? `<p class="muted">MCP (configured, not used for execution):
+        <code>${esc(b.mcp.command)}</code><br>
+        creds (${esc(b.mcp.env_refs.join(', ')) || 'none'}):
         <b class="${b.mcp.creds_present ? 'ok' : 'bad'}">
         ${b.mcp.creds_present ? 'present' : 'missing'}</b></p>` : ''}
       <p><a href="/portfolio">top up / withdraw on Portfolio</a></p>`;
@@ -437,9 +447,14 @@ async function askAgent(id) {
   const out = document.getElementById('d-answer');
   out.innerHTML = '<p class="muted">asking…</p>';
   try {
+    // a direct question is a paid LLM call: paired key required, like any POST
     const r = await fetch('/api/agent-ask', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Dash-Key': dashKey()},
       body: JSON.stringify({agent_id: id, text: q})});
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || r.status);
+    }
     const reader = r.body.getReader(); const dec = new TextDecoder();
     let buf = '';
     for (;;) {
@@ -522,7 +537,7 @@ async function refresh() {
   renderMap();
   document.getElementById('tiles').innerHTML =
     OVERVIEW.cash.map(c => `<div class="tile"><b>${fmt(c.cash)}</b>
-      <span>${c.account} (${c.ccy})</span></div>`).join('');
+      <span>${esc(c.account)} (${esc(c.ccy)})</span></div>`).join('');
 }
 function connectSSE() {
   const dot = document.getElementById('conn');

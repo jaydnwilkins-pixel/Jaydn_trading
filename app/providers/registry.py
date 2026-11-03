@@ -12,6 +12,12 @@ import uuid
 from langchain_core.callbacks import BaseCallbackHandler
 
 
+# The only env vars a providers row may name as its key (review C1). The
+# dashboards validate writes against this same set.
+PROVIDER_KEY_REFS = frozenset({"ANTHROPIC_API_KEY", "OPENAI_API_KEY",
+                               "DEEPSEEK_API_KEY", "XAI_API_KEY"})
+
+
 class CapabilityError(Exception):
     pass
 
@@ -119,6 +125,35 @@ def _cache_tokens(usage, which):
     return int(details.get(f"cache_{which}") or details.get(which) or 0)
 
 
+def _usage_of(response):
+    """(usage dict, layer). The shape says which convention it follows, so
+    classify by keys, not by where the dict was found:
+    - 'anthropic': raw cache_*_input_tokens keys — input_tokens EXCLUDES the
+      cached spans;
+    - 'langchain': input_token_details — input_tokens INCLUDES them;
+    - 'plain': no cache information at all (OpenAI-style, fakes)."""
+    usage = None
+    try:
+        usage = (response.llm_output or {}).get("usage") or \
+            (response.llm_output or {}).get("token_usage")
+    except AttributeError:
+        pass
+    if not usage:
+        for gens in response.generations:
+            for g in gens:
+                meta = getattr(getattr(g, "message", None), "usage_metadata",
+                               None)
+                if meta and not usage:
+                    usage = meta            # keep input_token_details too
+    usage = dict(usage or {})
+    if "cache_creation_input_tokens" in usage or \
+            "cache_read_input_tokens" in usage:
+        return usage, "anthropic"
+    if usage.get("input_token_details"):
+        return usage, "langchain"
+    return usage, "plain"
+
+
 class MeterCallback(BaseCallbackHandler):
     """Every LLM call lands in agent_runs: tokens, cost, latency (§1.6)."""
 
@@ -143,39 +178,61 @@ class MeterCallback(BaseCallbackHandler):
     on_chat_model_start = on_llm_start
 
     def on_llm_end(self, response, **kw):
-        usage = {}
-        try:
-            usage = response.llm_output.get("usage") or response.llm_output.get(
-                "token_usage") or {}
-        except AttributeError:
-            pass
-        if not usage:
-            for gens in response.generations:
-                for g in gens:
-                    meta = getattr(g, "message", None)
-                    meta = getattr(meta, "usage_metadata", None)
-                    if meta:
-                        usage = dict(meta)      # keep input_token_details too
+        usage, layer = _usage_of(response)
         tin = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
         tout = usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
         cwrite = _cache_tokens(usage, "creation")
         cread = _cache_tokens(usage, "read")
-        # The two layers disagree about what input_tokens means: Anthropic
-        # reports the UNCACHED remainder, langchain's usage_metadata reports
-        # the total. Adding the cached spans to a figure that already contains
-        # them would bill the same tokens twice, so derive the fresh count
-        # instead of trusting either convention.
-        fresh = tin - cwrite - cread if tin >= cwrite + cread else tin
+        # The two layers disagree about what input_tokens means: Anthropic's
+        # raw usage reports the UNCACHED remainder, langchain's usage_metadata
+        # reports the total including cached spans. Which one we hold is
+        # known from WHERE it came from — guessing from the magnitudes (the
+        # old approach) subtracted the cache twice whenever the uncached
+        # remainder happened to exceed the cached spans.
+        fresh = max(tin - cwrite - cread, 0) if layer == "langchain" else tin
         tin = fresh + cwrite + cread            # store the true prompt size
-        cost = (fresh / 1000 * self.cost_in
-                + cwrite / 1000 * self.cost_in * CACHE_WRITE_MULTIPLIER
-                + cread / 1000 * self.cost_in * CACHE_READ_MULTIPLIER
-                + tout / 1000 * self.cost_out)
+        # A call served by the fallback is priced (and recorded) as the model
+        # that actually answered, not the primary the agent is assigned.
+        provider_id, model = self._served_by(response)
+        cost_in, cost_out = (self.cost_in, self.cost_out) \
+            if (provider_id, model) == (self.provider_id, self.model) \
+            else price_for(self.conn, provider_id, model)
+        cost = (fresh / 1000 * cost_in
+                + cwrite / 1000 * cost_in * CACHE_WRITE_MULTIPLIER
+                + cread / 1000 * cost_in * CACHE_READ_MULTIPLIER
+                + tout / 1000 * cost_out)
         self.conn.execute(
             "UPDATE agent_runs SET ended_at=?, tokens_in=?, tokens_out=?,"
             " cache_write_tokens=?, cache_read_tokens=?, cost_usd=?,"
-            " status='ok' WHERE id=?",
-            (int(time.time()), tin, tout, cwrite, cread, cost, self.run_id))
+            " provider_id=?, model=?, status='ok' WHERE id=?",
+            (int(time.time()), tin, tout, cwrite, cread, cost, provider_id,
+             model, self.run_id))
+
+    def _served_by(self, response):
+        """(provider, model) that produced this response. Providers echo the
+        model id in their metadata; it may carry a date suffix, so match the
+        agent's configured ids by prefix."""
+        served = None
+        try:
+            served = (response.llm_output or {}).get("model_name") or \
+                (response.llm_output or {}).get("model")
+        except AttributeError:
+            pass
+        if not served:
+            for gens in response.generations:
+                for g in gens:
+                    meta = getattr(getattr(g, "message", None),
+                                   "response_metadata", None) or {}
+                    served = served or meta.get("model_name") or \
+                        meta.get("model")
+        if not served:
+            return self.provider_id, self.model
+        a = agent_row(self.conn, self.agent_id)
+        fb_model, fb_provider = a["fallback_model"], a["fallback_provider_id"]
+        if fb_model and fb_model != self.model and \
+                str(served).startswith(fb_model):
+            return fb_provider or self.provider_id, fb_model
+        return self.provider_id, self.model
 
     def on_llm_error(self, error, **kw):
         self.conn.execute(
@@ -201,9 +258,22 @@ CACHE_MINIMUM_TOKENS = {"claude-opus-5": 512, "claude-fable-5": 512,
 
 def build_llm(conn, provider_id, model, temperature=None, max_tokens=None,
               env=os.environ):
-    from langchain.chat_models import init_chat_model
     p = provider_row(conn, provider_id)
-    key = env.get(p["api_key_ref"] or "", "")
+    if p["kind"] == "claude_sdk":
+        # Claude Agent SDK on the claude.ai (Max) login — no API key, no
+        # per-token bill. temperature/max_tokens are not SDK options; the
+        # Claude 5 models reject temperature anyway.
+        from .claude_sdk import SdkChat
+        return SdkChat(model, provider_id=provider_id)
+    from langchain.chat_models import init_chat_model
+    ref = p["api_key_ref"] or ""
+    if ref and ref not in PROVIDER_KEY_REFS:
+        # a providers row is sent `env[api_key_ref]` as a bearer token, so a
+        # row naming CLAIRE_INTERNAL_SECRET (or any non-LLM secret) would leak
+        # it to whatever base_url the row points at — refuse, whatever wrote it
+        raise ProviderError(f"provider {provider_id!r} names key {ref!r}, "
+                            "which is not an LLM provider key")
+    key = env.get(ref, "")
     kw = {"max_retries": 3}                 # ride out transient 429/529s
     if temperature is not None and supports_temperature(model):
         kw["temperature"] = temperature
@@ -240,6 +310,17 @@ def model_for(conn, agent_id, *, work_item_id=None, env=os.environ,
     if a["fallback_provider_id"]:
         fb = _build(conn, a["fallback_provider_id"], a["fallback_model"],
                     a["temperature"], a["max_tokens"], env=env)
-        llm = llm.with_fallbacks([fb])
+        llm = with_fallback(llm, fb)
     meter = MeterCallback(conn, agent_id, work_item_id)
     return llm.with_config(callbacks=[meter])
+
+
+def with_fallback(llm, fb):
+    """Attach a fallback model. A Claude SDK (subscription) model and a
+    LangChain (API) model cannot be chained — and silently falling back from
+    the subscription onto the metered API is exactly what must not happen —
+    so a mixed pair keeps the primary alone."""
+    from .claude_sdk import is_sdk
+    if is_sdk(llm) != is_sdk(fb):
+        return llm
+    return llm.with_fallbacks([fb])

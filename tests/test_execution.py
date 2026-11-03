@@ -241,3 +241,27 @@ def test_watcher_respects_closed_market():
     r = watcher.tick()
     assert r["fired"] == []
     assert "NASDAQ:NVDA" in r["closed"]
+
+
+def test_sim_dedupes_on_client_order_id():
+    from app.tools.brokers import PaperSimBroker
+    b = PaperSimBroker(fill_mode="instant")
+    a = b.place_bracket(symbol="AAPL", side="buy", qty=10, limit=100,
+                        client_order_id="co_1")
+    again = b.place_bracket(symbol="AAPL", side="buy", qty=10, limit=100,
+                            client_order_id="co_1")
+    assert again.broker_order_id == a.broker_order_id
+    assert len(b.orders) == 1
+
+
+def test_production_deps_wire_the_gate_price_check():
+    from app.wiring import _last_price
+
+    class M:
+        def quote(self, sym):
+            assert sym == "C07.SI"
+            return {"price": "31.20"}
+
+    class Inst:
+        ticker, exchange = "C07", "SGX"
+    assert _last_price(M())(Inst()) == "31.20"

@@ -177,3 +177,53 @@ def test_agents_are_given_an_explicit_step_budget():
     assert "Analyse SBUX." in seen["task"]
     assert f"roughly {na.STEP_BUDGET} tool calls" in seen["task"]
     assert na.RECURSION_LIMIT == 30
+
+
+def _resp(usage, *, model=None, where="metadata"):
+    """A fake LLMResult: usage either as usage_metadata or in llm_output."""
+    class M:
+        usage_metadata = usage if where == "metadata" else None
+        response_metadata = {"model_name": model} if model else {}
+
+    class G:
+        message = M()
+
+    class R:
+        llm_output = {"usage": usage} if where == "llm_output" else None
+        generations = [[G()]]
+    return R()
+
+
+def test_raw_usage_larger_than_cache_is_not_subtracted_twice():
+    """Review M12: raw Anthropic usage of 5000 uncached + 4000 cache-write
+    was metered as 5000 tokens because 5000 >= 4000 looked like a total."""
+    conn = _conn()
+    registry.assign(conn, "news", "anthropic", "claude-haiku-4-5",
+                    ts=T0, require_health=False)
+    for where in ("metadata", "llm_output"):
+        m = registry.MeterCallback(conn, "news", "wi_m12")
+        m.on_llm_start({}, [])
+        m.on_llm_end(_resp({"input_tokens": 5000, "output_tokens": 0,
+                            "cache_creation_input_tokens": 4000,
+                            "cache_read_input_tokens": 0}, where=where))
+        row = conn.execute("SELECT tokens_in, cost_usd FROM agent_runs"
+                           " WHERE id=?", (m.run_id,)).fetchone()
+        assert row["tokens_in"] == 9000
+        expect = 5000 / 1000 * 0.001 + 4000 / 1000 * 0.001 * \
+            registry.CACHE_WRITE_MULTIPLIER
+        assert abs(row["cost_usd"] - expect) < 1e-9
+
+
+def test_fallback_call_is_billed_as_the_fallback_model():
+    conn = _conn()
+    registry.assign(conn, "arbiter", "anthropic", "claude-opus-5", ts=T0,
+                    fallback_provider_id="anthropic",
+                    fallback_model="claude-sonnet-5", require_health=False)
+    m = registry.MeterCallback(conn, "arbiter", "wi_fb")
+    m.on_llm_start({}, [])
+    m.on_llm_end(_resp({"input_tokens": 1000, "output_tokens": 1000},
+                       model="claude-sonnet-5-20260601"))
+    row = conn.execute("SELECT model, cost_usd FROM agent_runs WHERE id=?",
+                       (m.run_id,)).fetchone()
+    assert row["model"] == "claude-sonnet-5"
+    assert abs(row["cost_usd"] - (0.003 + 0.015)) < 1e-9   # not opus rates

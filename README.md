@@ -7,9 +7,17 @@ accounting are deterministic Python — no LLM ever touches money. Paper/SIM
 only, enforced in code and schema.
 
 Full specification: [DESIGN.md](DESIGN.md). Build status: **all §20 steps
-implemented**. On this machine, both `ANTHROPIC_API_KEY` and
-`CLAIRE_INTERNAL_SECRET` are already set in `etc/claire.env` and Claire runs
-live — this section is for setting up a *fresh* checkout elsewhere.
+implemented**. On this machine `CLAIRE_INTERNAL_SECRET` is already set in
+`etc/claire.env` and Claire runs live — this section is for setting up a
+*fresh* checkout elsewhere.
+
+**Model billing.** Every agent defaults to the `claude_max` provider: the
+Claude Agent SDK signed in with the machine's claude.ai login, so model use
+counts against the Claude Max subscription, not API credit
+(`app/providers/claude_sdk.py`). It needs no API key; it does need `claude`
+to have been logged in once as this user (`claude` → `/login`). LangGraph
+still owns orchestration and the approval gate. The `anthropic` (API-key)
+provider remains available per agent on the Agents page.
 
 Physically lives at `/mnt/projects/claire_trading`; `~/claire_trading` is a
 symlink to it.
@@ -19,7 +27,9 @@ symlink to it.
 ```sh
 python3.14 -m venv venv && ./venv/bin/pip install -r requirements.txt
 cp etc/claire.env.example etc/claire.env && chmod 600 etc/claire.env
-#   → set CLAIRE_INTERNAL_SECRET (openssl rand -hex 24) and ANTHROPIC_API_KEY
+#   → set CLAIRE_INTERNAL_SECRET (openssl rand -hex 24); ANTHROPIC_API_KEY
+#     only if an agent is moved to the API-billed `anthropic` provider
+claude   # once, then /login — the default provider uses this sign-in
 ./venv/bin/python -m app.api.server        # :7788 graph runtime + chat
 ./venv/bin/python -m app.dashboards        # :7787 pages + watcher
 ```

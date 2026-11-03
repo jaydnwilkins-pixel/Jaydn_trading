@@ -7,15 +7,30 @@ Two spec shapes:
   {"type": "daily", "time": "10:00", "tz": "Asia/Singapore",
    "days": [1..7 ISO weekdays], "region": "asia", "require_open": true}
 
-Daily jobs never back-fire: a job that was due while the process was down runs
-at its next occurrence, not immediately on boot (starting a stale market scan
-hours late would be worse than skipping it).
+Daily firing rule (stateless — derived from the spec, `last_run_at` and now):
+a daily job fires when its most recent scheduled slot is at most
+DAILY_GRACE_SECONDS in the past and it has not run since that slot. So
+  * a job that has never run (`last_run_at` NULL) fires at its next slot;
+  * a slot missed because the process was down (or the job was disabled)
+    is SKIPPED once the grace window has passed — the job waits for its next
+    slot instead of firing hours late (a stale "pre-open" market scan running
+    mid-session would be worse than skipping it);
+  * a short outage (a restart, a slow tick) inside the grace window still
+    fires the slot, slightly late.
+
+"tz": "local" means the host's real IANA zone (TZ, then /etc/localtime), so
+DST transitions are honoured; it is resolved on every call, not cached.
 """
 import json
+import os
 import threading
 import time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+# how late a daily slot may still fire (restart / tick jitter); beyond this a
+# missed slot is skipped. The scheduler polls every 20 s, so 10 min is ample.
+DAILY_GRACE_SECONDS = 10 * 60
 
 DEFAULTS = [
     ("analysis_asia", "Screen + pipeline: SGX·HKEX·TSE·ASX", "claire-api",
@@ -62,9 +77,38 @@ def seed(conn):
             " VALUES (?,?,?,?)", (job, desc, runs_in, json.dumps(spec)))
 
 
+def _local_zone():
+    """The host's IANA zone, DST-aware. Order: $TZ, the /etc/localtime
+    symlink target, /etc/timezone, the raw /etc/localtime TZif file, and
+    only as a last resort the current fixed UTC offset."""
+    tzenv = os.environ.get("TZ", "").lstrip(":")
+    if tzenv:
+        try:
+            return ZoneInfo(tzenv)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    try:
+        target = os.path.realpath("/etc/localtime")
+        if "zoneinfo/" in target:
+            return ZoneInfo(target.split("zoneinfo/", 1)[1])
+    except (OSError, ZoneInfoNotFoundError, ValueError):
+        pass
+    try:
+        with open("/etc/timezone") as f:
+            return ZoneInfo(f.read().strip())
+    except (OSError, ZoneInfoNotFoundError, ValueError):
+        pass
+    try:
+        with open("/etc/localtime", "rb") as f:
+            return ZoneInfo.from_file(f, key="localtime")
+    except (OSError, ValueError):
+        pass
+    return datetime.now().astimezone().tzinfo
+
+
 def _tz(name):
     if not name or name == "local":
-        return datetime.now().astimezone().tzinfo
+        return _local_zone()
     return ZoneInfo(name)
 
 
@@ -86,20 +130,57 @@ def validate_spec(spec: dict):
     raise ValueError("spec.type must be interval|daily")
 
 
+def _slot(d: date, h: int, mi: int, tz) -> int:
+    # wall-clock HH:MM on that date in tz; DST gaps/folds resolve via fold=0
+    return int(datetime.combine(d, dtime(h, mi), tzinfo=tz).timestamp())
+
+
+def _daily_slots(spec):
+    tz = _tz(spec.get("tz", "local"))
+    h, mi = (int(x) for x in spec["time"].split(":"))
+    days = spec.get("days") or list(range(1, 8))
+    return tz, h, mi, days
+
+
+def prev_slot_ts(spec: dict, now: int) -> int | None:
+    """Latest scheduled daily slot at or before `now` (within 8 days)."""
+    tz, h, mi, days = _daily_slots(spec)
+    today = datetime.fromtimestamp(now, tz).date()
+    for back in range(9):
+        d = today - timedelta(days=back)
+        if d.isoweekday() in days:
+            ts = _slot(d, h, mi, tz)
+            if ts <= now:
+                return ts
+    return None
+
+
+def _next_slot_after(spec: dict, ref: int) -> int:
+    tz, h, mi, days = _daily_slots(spec)
+    start = datetime.fromtimestamp(ref, tz).date()
+    for d in range(9):
+        day = start + timedelta(days=d)
+        if day.isoweekday() in days:
+            ts = _slot(day, h, mi, tz)
+            if ts > ref:
+                return ts
+    raise ValueError("no valid day within 9 days — days list broken?")
+
+
 def next_run_ts(spec: dict, last_run: int | None, now: int) -> int:
+    """When the job should (have) run; a job is due when now >= this.
+
+    Daily: if the latest slot is inside the grace window and has not been run
+    (last_run NULL or older than the slot), that slot is returned (<= now, so
+    it fires). Otherwise the next slot after now — a missed slot older than
+    DAILY_GRACE_SECONDS is skipped, never back-fired."""
     if spec["type"] == "interval":
         return (last_run + spec["minutes"] * 60) if last_run else now
-    tz = _tz(spec.get("tz", "local"))
-    ref = datetime.fromtimestamp(last_run or now, tz)
-    h, mi = (int(x) for x in spec["time"].split(":"))
-    for d in range(9):
-        cand = (ref + timedelta(days=d)).replace(hour=h, minute=mi, second=0,
-                                                 microsecond=0)
-        if cand <= ref:
-            continue
-        if cand.isoweekday() in spec.get("days", list(range(1, 8))):
-            return int(cand.timestamp())
-    raise ValueError("no valid day within 9 days — days list broken?")
+    prev = prev_slot_ts(spec, now)
+    if (prev is not None and now - prev <= DAILY_GRACE_SECONDS
+            and (last_run is None or last_run < prev)):
+        return prev
+    return _next_slot_after(spec, now)
 
 
 def rows_with_next(conn, clock=time.time):

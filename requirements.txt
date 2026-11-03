@@ -10,6 +10,9 @@ langchain-core==1.5.3
 langchain-anthropic==1.5.4
 langchain-protocol==0.0.18
 anthropic==0.121.0
+# Claude Agent SDK: the default provider (claude_max) runs agents on the
+# claude.ai Max login instead of API credit — app/providers/claude_sdk.py
+claude-agent-sdk==0.2.177
 pydantic==2.13.4
 pydantic_core==2.46.4
 fastapi==0.141.1

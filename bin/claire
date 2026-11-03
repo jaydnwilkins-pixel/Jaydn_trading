@@ -21,12 +21,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# physical path: the checkout is reachable as ~/claire_trading (a symlink) and
+# /mnt/projects/claire_trading (systemd); process matching uses this one
+ROOT_REAL="$(cd "$ROOT" && pwd -P)"
 PY="$ROOT/venv/bin/python3"
 ENV_FILE="$ROOT/etc/claire.env"
 LOG_DIR="$ROOT/var/log"
 DRAIN_STATE="$ROOT/var/.drain-schedules.json"
-API_PAT='app\.api\.server'
-DASH_PAT='app\.dashboards'
+API_PAT='-m app\.api\.server( |$)'
+DASH_PAT='-m app\.dashboards( |$)'
 API_URL='http://127.0.0.1:7788'
 DASH_URL='http://127.0.0.1:7787'
 DRAIN_TIMEOUT="${CLAIRE_DRAIN_TIMEOUT:-300}"
@@ -39,7 +42,19 @@ warn() { printf '%s!%s %s\n' "$c_yel" "$c_off" "$*"; }
 die()  { printf '%s✘%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 dim()  { printf '%s%s%s\n' "$c_dim" "$*" "$c_off"; }
 
-pids_for() { pgrep -f "$1" 2>/dev/null || true; }
+# Only processes of THIS user whose working directory is THIS checkout
+# (cmd_start launches them from "$ROOT"). A second clone, another user's
+# desk, or an editor with the module name in its argv is never matched — so
+# never signalled by stop. cwd, not argv: argv carries whichever path
+# (symlink or physical) the desk happened to be started through.
+pids_for() {
+  local p cwd
+  for p in $(pgrep -u "$(id -u)" -f -- "$1" 2>/dev/null || true); do
+    cwd="$(readlink -f "/proc/$p/cwd" 2>/dev/null || true)"
+    [ "$cwd" = "$ROOT_REAL" ] && printf '%s\n' "$p"
+  done
+  return 0
+}
 
 # Every DB question the script asks. Kept in one place so the SQL that
 # defines "work in flight" is readable and reviewable.
@@ -79,9 +94,27 @@ elif what == "positions":
     print(conn.execute("SELECT COUNT(*) c FROM lots WHERE qty_remaining > 0"
                        ).fetchone()["c"])
 elif what == "schedules-off":
-    # remember what was on, then switch it off so the drain can finish
+    # remember what was on, then switch it off so the drain can finish.
+    # The state file is written BEFORE anything is disabled, atomically, and
+    # MERGED with any list a previous interrupted drain left behind — so a
+    # second stop that finds nothing enabled never erases what was on.
+    import os
+    state = sys.argv[2]
     rows = [r["job"] for r in conn.execute(
         "SELECT job FROM schedules WHERE enabled=1")]
+    try:
+        with open(state) as f:
+            prev = f.read().split()
+    except FileNotFoundError:
+        prev = []
+    merged = list(dict.fromkeys(prev + rows))
+    if merged:
+        tmp = state + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(" ".join(merged))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, state)
     conn.execute("UPDATE schedules SET enabled=0 WHERE enabled=1")
     print(" ".join(rows))          # space-separated: bash reads it directly
 elif what == "schedules-on":
@@ -97,6 +130,11 @@ PYEOF
 cmd_start() {
   [ -f "$ENV_FILE" ] || die "missing $ENV_FILE"
   mkdir -p "$LOG_DIR"
+  # a drain that was cut off (SIGKILL, power loss) leaves its list behind;
+  # put those schedules back before the scheduler comes up
+  if [ -f "$DRAIN_STATE" ] && [ -z "$(pids_for "$API_PAT")" ]; then
+    restore_schedules
+  fi
   local started=0
   for svc in api dashboards; do
     local pat mod
@@ -151,26 +189,49 @@ cmd_status() {
 # ── stop ─────────────────────────────────────────────────────────────────
 restore_schedules() {
   [ -f "$DRAIN_STATE" ] || return 0
-  local n; n="$(dbq schedules-on "$(cat "$DRAIN_STATE")")"
-  rm -f "$DRAIN_STATE"
-  if [ "$n" -gt 0 ]; then dim "  schedules restored ($n job(s))"; fi
+  local n
+  # the file is only removed once the DB write succeeded: a failed restore
+  # (DB locked, killed mid-way) leaves it for the next stop/start to retry
+  if n="$(dbq schedules-on "$(cat "$DRAIN_STATE")")"; then
+    rm -f "$DRAIN_STATE"
+    if [ "$n" -gt 0 ]; then dim "  schedules restored ($n job(s))"; fi
+  else
+    warn "could not restore schedules — kept $DRAIN_STATE for the next start"
+  fi
   return 0
+}
+
+# A signal during the drain (Ctrl-C, terminal hang-up, systemd's SIGTERM on
+# stop timeout) restores the schedules and EXITS — a bare trap would run the
+# handler and then carry on draining.
+on_drain_signal() {
+  trap - EXIT HUP INT TERM
+  printf '\n'
+  warn "interrupted by SIG$1 — restoring schedules, not stopping"
+  restore_schedules
+  exit "$2"
 }
 
 drain() {
   # pause the schedules first — draining while the scheduler keeps launching
-  # new runs never finishes. Restored on every exit path, including Ctrl-C.
-  trap restore_schedules EXIT INT TERM
-  local saved; saved="$(dbq schedules-off)"
-  printf '%s' "$saved" > "$DRAIN_STATE"
+  # new runs never finishes. Restored on every exit path: normal return,
+  # error exit, Ctrl-C, hang-up, SIGTERM.
+  trap restore_schedules EXIT
+  trap 'on_drain_signal HUP 129' HUP
+  trap 'on_drain_signal INT 130' INT
+  trap 'on_drain_signal TERM 143' TERM
+  local saved; saved="$(dbq schedules-off "$DRAIN_STATE")"
   dim "  paused $(printf '%s' "$saved" | wc -w) schedule(s) so nothing new starts"
 
-  local waited=0
+  # wall-clock deadline (dbq calls take real time too), so the unit's
+  # TimeoutStopSec can be sized against DRAIN_TIMEOUT with confidence
+  local start=$SECONDS waited=0
   while [ "$waited" -lt "$DRAIN_TIMEOUT" ]; do
     if [ "$(dbq inflight total)" = 0 ]; then ok "nothing in flight"; return 0; fi
     printf '\r  waiting for %s to settle… %ss/%ss ' \
       "$(dbq inflight text)" "$waited" "$DRAIN_TIMEOUT"
-    sleep 5; waited=$((waited + 5))
+    sleep 5 & wait $! || true          # wait: signals are handled at once
+    waited=$((SECONDS - start))
   done
   printf '\n'
   warn "still busy after ${DRAIN_TIMEOUT}s — NOT stopping ($(dbq inflight text))."
@@ -198,7 +259,7 @@ cmd_stop() {
     say "Graceful shutdown — letting work in flight finish."
     drain || return 1
     restore_schedules
-    trap - EXIT INT TERM
+    trap - EXIT HUP INT TERM
   else
     local total; total="$(dbq inflight total)"
     if [ "$total" != 0 ]; then

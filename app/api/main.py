@@ -5,11 +5,15 @@ authorization. Therefore /internal/resume: localhost only, shared secret,
 token verified against the DB, single-use enforced here. It is not a tool any
 agent can call.
 """
+import hmac
 import time
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
+
+# a 'resuming' claim older than this is a dead process's; see approvals.py
+from ..approvals import RESUMING_STALE_S
 
 LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
@@ -17,6 +21,12 @@ LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 DONE_STATES = {"approved": ("approved", "executing", "done"),
                "rejected": ("rejected",),
                "expired": ("expired",)}
+
+
+def _same(a, b) -> bool:
+    """Constant-time comparison for secrets and tokens: `==` returns early
+    at the first differing byte, which leaks the matching prefix length."""
+    return hmac.compare_digest((a or "").encode(), (b or "").encode())
 
 
 class ResumeBody(BaseModel):
@@ -49,6 +59,14 @@ class RunBody(BaseModel):
     lot_size: int = 1
     trigger: str | None = None
 
+    @model_validator(mode="after")
+    def _symbol(self):
+        # a bad ticker is the caller's error (422), not a server fault (500);
+        # it also never reaches the work-item id or the web pages
+        from .desk import validate_symbol
+        validate_symbol(self.ticker, self.exchange)
+        return self
+
 
 def create_app(desk, conn, secret: str, *, clock=time.time,
                ask_handler=None, agent_ask_handler=None) -> FastAPI:
@@ -58,7 +76,8 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
         host = request.client.host if request.client else ""
         if host not in LOCAL_HOSTS:
             raise HTTPException(403, "localhost only")
-        if not secret or request.headers.get("x-claire-secret") != secret:
+        if not secret or not _same(request.headers.get("x-claire-secret"),
+                                   secret):
             raise HTTPException(403, "bad internal secret")
 
     @app.post("/internal/resume")
@@ -73,31 +92,66 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
         elif body.actor != "human":
             raise HTTPException(403, "approve/reject requires a human actor")
 
-        if body.token != (row["approval_token"] or ""):
+        if not _same(body.token, row["approval_token"]) or \
+                not row["approval_token"]:
             raise HTTPException(403, "token mismatch")
         if row["token_state"] == "burned":
             if row["state"] in DONE_STATES[body.status]:
                 return {"ok": True, "idempotent": True, "state": row["state"]}
             raise HTTPException(409, "token already used")
-        if row["state"] != "awaiting_approval":
+        # an approval whose execution raised stays `approved` with its token
+        # unburned, so the SAME approval can be retried (M5); it used to get
+        # 409 here forever. The custodian expires it after 60 minutes.
+        retrying = body.status == "approved" and row["state"] == "approved"
+        if row["state"] != "awaiting_approval" and not retrying:
             raise HTTPException(409, f"item is {row['state']}")
         now = int(clock())
-        if body.status != "expired" and row["expires_at"] and \
-                now >= row["expires_at"]:
+        if body.status != "expired" and not retrying and \
+                row["expires_at"] and now >= row["expires_at"]:
             raise HTTPException(410, "approval expired")
+
+        # Single use, enforced by the database rather than by the reads
+        # above: one conditional UPDATE claims the token, and only the caller
+        # whose UPDATE matched may resume. Two concurrent resumes (approve +
+        # reject, or a double click) both passed the old check-then-act.
+        from_state = "approved" if retrying else "awaiting_approval"
+        cur = conn.execute(
+            "UPDATE work_items SET token_state='resuming', updated_at=?"
+            + (", state='approved'" if body.status == "approved" else "")
+            + " WHERE id=? AND approval_token=? AND state=?"
+            " AND (token_state IN ('minted','pending_resume')"
+            "      OR (token_state='resuming' AND updated_at < ?))",
+            (now, body.work_item_id, row["approval_token"], from_state,
+             now - RESUMING_STALE_S))
+        if cur.rowcount != 1:
+            raise HTTPException(409, "token is being used by another resume")
+        if body.status == "approved":
+            desk.repo._event(body.work_item_id, now, body.actor, row["state"],
+                             "approved" if not retrying else "approve_retry",
+                             {"size_base": body.size_base, "qty": body.qty,
+                              "broker": body.broker})
 
         payload = {"status": body.status, "size_base": body.size_base,
                    "qty": body.qty, "trail_pct": body.trail_pct,
                    "broker": body.broker, "actor": body.actor,
                    "token": body.token,
                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
-        if body.status == "approved":
-            desk.repo.set_state(body.work_item_id, "approved",
-                                actor=body.actor, ts=now,
-                                payload={"size_base": body.size_base,
-                                         "qty": body.qty,
-                                         "broker": body.broker})
-        desk.resume(body.work_item_id, payload)
+        try:
+            desk.resume(body.work_item_id, payload)
+        except Exception as e:                      # noqa: BLE001
+            # execution raised (venue down, cap hit, FX unavailable…). Release
+            # the claim back to pending_resume — NOT burned — so a retry by
+            # the human or the custodian can complete it; record why.
+            conn.execute(
+                "UPDATE work_items SET token_state='pending_resume',"
+                " updated_at=? WHERE id=? AND token_state='resuming'",
+                (now, body.work_item_id))
+            desk.repo._event(body.work_item_id, now, "system",
+                             desk.work_item(body.work_item_id)["state"],
+                             "resume_failed", {"error": str(e)[:300]})
+            raise HTTPException(
+                500, f"resume failed, approval kept for retry: "
+                     f"{str(e)[:200]}") from e
         conn.execute("UPDATE work_items SET token_state='burned',"
                      " updated_at=? WHERE id=?", (now, body.work_item_id))
         return {"ok": True, "state": desk.work_item(body.work_item_id)["state"]}

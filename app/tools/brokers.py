@@ -51,14 +51,22 @@ class PaperSimBroker:
         self.fill_mode = fill_mode
         self.marks = marks or {}                        # symbol -> Decimal price
         self.orders: dict[str, _Book] = {}
+        self._by_client: dict[str, str] = {}             # client id -> order id
         self._seq = itertools.count(1)
 
     def place_bracket(self, *, symbol, side, qty, limit=None, stop_loss=None,
-                      take_profit=None) -> PlacedOrder:
+                      take_profit=None, client_order_id=None) -> PlacedOrder:
+        # A replay of the same client order id is the SAME order (review M4):
+        # hand back the original instead of placing a second one.
+        if client_order_id and client_order_id in self._by_client:
+            return PlacedOrder(self._by_client[client_order_id], "accepted",
+                               "duplicate client_order_id")
         qty = Decimal(str(qty))
         if qty <= 0:
             return PlacedOrder("", "rejected", "qty must be positive")
         oid = f"sim-{uuid.uuid4().hex[:10]}"
+        if client_order_id:
+            self._by_client[client_order_id] = oid
         book = _Book(side=side, qty=qty,
                      limit=Decimal(str(limit)) if limit else None,
                      stop_loss=Decimal(str(stop_loss)) if stop_loss else None,

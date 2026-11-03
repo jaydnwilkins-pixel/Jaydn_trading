@@ -340,10 +340,10 @@ def test_node_status_vocabulary(web):
     base, conn = web
     with paired(base) as c:
         g = c.get("/api/agent-graph").json()
-        # no ANTHROPIC_API_KEY in the test env → agents cannot run: error
+        # not signed in to Claude (conftest) → SDK agents cannot run: error
         tech = g["agents"]["technical"]
         assert tech["state"] == "error"
-        assert "ANTHROPIC_API_KEY" in tech["detail"]
+        assert "not signed in" in tech["detail"]
 
         # a run in flight outranks everything → active (this is the glow)
         conn.execute(
@@ -427,7 +427,7 @@ def test_mcp_crud_and_provider_upsert(web):
         r = c.post("/api/provider", json={
             "id": "groq", "display_name": "Groq", "kind": "openai_compatible",
             "base_url": "https://api.groq.com/openai/v1",
-            "api_key_ref": "GROQ_API_KEY",
+            "api_key_ref": "OPENAI_API_KEY",
             "capabilities": {"tool_calling": True, "structured_output": True},
             "cost_per_1k_in": 0.0001, "cost_per_1k_out": 0.0002})
         assert r.status_code == 200

@@ -72,6 +72,33 @@ MIGRATIONS = [
     # the old name described the old behaviour; anything still on it would
     # silently keep measuring from entry
     "UPDATE price_alerts SET rule='trail_pct' WHERE rule='drop_pct_from_entry'",
+    # M4: the order row exists before the venue call, carrying the id the
+    # venue is given; submitted_at is the claim that stops a second placement
+    "ALTER TABLE orders ADD COLUMN client_order_id TEXT",
+    "ALTER TABLE orders ADD COLUMN submitted_at INTEGER",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_id"
+    " ON orders(client_order_id)",
+    # decision time: queued (pending_session) orders count toward the daily
+    # trade cap too — they used to be invisible to it until placed
+    "ALTER TABLE orders ADD COLUMN created_at INTEGER",
+    "UPDATE orders SET created_at=COALESCE(placed_at, updated_at)"
+    " WHERE created_at IS NULL",
+    # cash committed to open buys; without it two approvals could both pass
+    # the cash check and the second fill would be refused at the venue's
+    # expense (the sim fills instantly, the book debits at poll time)
+    "ALTER TABLE orders ADD COLUMN reserved_base INTEGER",
+    # M7: trailing rules belong to a POSITION (instrument, account, side), and
+    # there is exactly one. The old ON CONFLICT DO NOTHING had no constraint to
+    # hit, so every approval appended another row. Dedupe (keep the newest —
+    # it carries the latest threshold) BEFORE the unique index can be built.
+    "ALTER TABLE price_alerts ADD COLUMN account_id TEXT",
+    "ALTER TABLE price_alerts ADD COLUMN side INTEGER",
+    "DELETE FROM price_alerts WHERE rule='trail_pct' AND id NOT IN"
+    " (SELECT MAX(id) FROM price_alerts WHERE rule='trail_pct'"
+    "  GROUP BY instrument_id, IFNULL(account_id,''), IFNULL(side,0))",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_trail_unique"
+    " ON price_alerts(instrument_id, IFNULL(account_id,''), IFNULL(side,0))"
+    " WHERE rule='trail_pct'",
 ]
 
 
@@ -83,3 +110,46 @@ def init(conn) -> None:
         except sqlite3.OperationalError as e:
             if "duplicate column" not in str(e):
                 raise
+    _widen_provider_kinds(conn)
+
+
+def _widen_provider_kinds(conn) -> None:
+    """Databases created before the Claude Agent SDK provider have a CHECK
+    on providers.kind that rejects 'claude_sdk'. SQLite cannot alter a CHECK,
+    so rebuild the table in place (create-copy-drop-rename; no indexes or
+    triggers hang off this table). Rows and ids are preserved, so the
+    agents/provider_models references stay valid."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
+                       " AND name='providers'").fetchone()
+    if row is None or "claude_sdk" in row[0]:
+        return
+    new_sql = row[0].replace("'anthropic','openai_compatible'",
+                             "'anthropic','claude_sdk','openai_compatible'")
+    if "claude_sdk" not in new_sql:
+        raise RuntimeError("providers table has an unexpected kind CHECK; "
+                           "migrate it by hand")
+    for old in ("CREATE TABLE IF NOT EXISTS providers", "CREATE TABLE providers"):
+        if new_sql.startswith(old):
+            new_sql = "CREATE TABLE providers_new" + new_sql[len(old):]
+            break
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
+                           " AND name='providers'").fetchone()
+        if "claude_sdk" in cur[0]:          # another process won the race
+            conn.execute("COMMIT")
+            return
+        conn.execute(new_sql)
+        conn.execute("INSERT INTO providers_new SELECT * FROM providers")
+        conn.execute("DROP TABLE providers")
+        conn.execute("ALTER TABLE providers_new RENAME TO providers")
+        bad = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if bad:
+            raise RuntimeError(f"foreign key check failed: {list(bad)[:3]}")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")

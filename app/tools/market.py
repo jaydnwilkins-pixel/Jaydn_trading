@@ -74,6 +74,18 @@ def normalize_price(price, currency: str):
     return Decimal(str(price)), currency
 
 
+def _mark_stale(val):
+    """Copy of a cached value flagged stale. Per-symbol maps get the flag on
+    every record; a single record gets it at top level. Scalars (FX rates as
+    str/Decimal) and lists cannot carry a flag and are returned as-is — the
+    key is still listed in Market._stale_keys for the health view."""
+    if isinstance(val, dict) and val:
+        if all(isinstance(v, dict) for v in val.values()):
+            return {k: {**v, "stale": True} for k, v in val.items()}
+        return {**val, "stale": True}
+    return val
+
+
 class Market:
     """Keyed provider > TradingView > Yahoo, with a last-good cache so a
     throttled source degrades to a stale value rather than an error."""
@@ -136,24 +148,40 @@ class Market:
             r.raise_for_status()
             return r.json()
 
-    def _cached(self, key, ttl, fn):
+    def _fresh(self, key, ttl) -> bool:
+        hit = self._cache.get(key)
+        return hit is not None and self.clock() - hit[0] < ttl
+
+    def _primary_gate(self, key, ttl) -> bool:
+        """Only a FRESH cache hit may skip the rate budget; an expired entry
+        means a real call to the keyed provider, so it must be budgeted."""
+        return self._fresh(key, ttl) or self._primary_ok()
+
+    def _cached_flag(self, key, ttl, fn):
         """TTL cache with a last-good fallback: when the unofficial endpoints
-        rate-limit or hiccup, serve the previous value marked stale rather
-        than erroring the UI (honest degradation, §1.7)."""
+        rate-limit or hiccup, serve the previous value rather than erroring
+        the UI (honest degradation, §1.7). Returns (value, is_stale)."""
         now = self.clock()
         hit = self._cache.get(key)
         if hit and now - hit[0] < ttl:
-            return hit[1]
+            return hit[1], False
         try:
             val = fn()
         except Exception:
             if hit is not None:
                 self._stale_keys.add(key)
-                return hit[1]
+                return hit[1], True
             raise
         self._cache[key] = (now, val)
         self._stale_keys.discard(key)
-        return val
+        return val, False
+
+    def _cached(self, key, ttl, fn):
+        """As _cached_flag, but a stale fallback is returned visibly marked
+        `stale: True` (on each per-symbol record of a quote/metric map, or on
+        the record itself) — never silently passed off as fresh."""
+        val, stale = self._cached_flag(key, ttl, fn)
+        return _mark_stale(val) if stale else val
 
     # ── quotes ───────────────────────────────────────────────────────────
     def spark(self, symbols: list[str]) -> dict:
@@ -165,8 +193,7 @@ class Market:
             covered = tuple(s for s in symbols
                             if getattr(self._primary, "supports",
                                        lambda s: True)(s))
-            if covered and (("pq", covered) in self._cache
-                            or self._primary_ok()):
+            if covered and self._primary_gate(("pq", covered), 60):
                 try:
                     out = dict(self._cached(("pq", covered), 60,
                                             lambda: self._primary.quote(
@@ -213,15 +240,16 @@ class Market:
             return self._get(f"{BASE}/v8/finance/spark",
                              {"symbols": ",".join(symbols), "range": "1d",
                               "interval": "5m"})
-        data = self._cached(("spark", tuple(symbols)), 60, fetch)
+        data, cache_stale = self._cached_flag(("spark", tuple(symbols)), 60,
+                                              fetch)
         out = {}
         for sym in symbols:
             d = data.get(sym) or {}
             price = d.get("close")
             if isinstance(price, list):             # some variants return series
                 price = next((p for p in reversed(price) if p is not None), None)
-            stale = price is None
-            if stale:
+            stale = price is None or cache_stale
+            if price is None:
                 price = d.get("previousClose")
             if price is None:
                 raise MarketError(f"no price for {sym}")
@@ -243,7 +271,7 @@ class Market:
         if self._primary is not None and not symbol.endswith("=X") \
                 and not symbol.startswith("^") \
                 and getattr(self._primary, "supports", lambda s: True)(symbol) \
-                and (key in self._cache or self._primary_ok()):
+                and self._primary_gate(key, 900):
             try:
                 return self._cached(key, 900,
                                     lambda: self._primary.chart(
@@ -257,7 +285,8 @@ class Market:
             return self._get(f"{BASE}/v8/finance/chart/{symbol}",
                              {"range": range_, "interval": interval})
         ttl = 900 if interval == "1d" else 300      # daily bars move slowly
-        data = self._cached(("chart", symbol, range_, interval), ttl, fetch)
+        data, stale = self._cached_flag(("chart", symbol, range_, interval),
+                                        ttl, fetch)
         try:
             res = data["chart"]["result"][0]
             q = res["indicators"]["quote"][0]
@@ -266,7 +295,7 @@ class Market:
                     "low": q.get("low", []), "close": q.get("close", []),
                     "volume": q.get("volume", []),
                     "currency": res.get("meta", {}).get("currency"),
-                    "src": "yahoo"}
+                    "src": "yahoo", "stale": stale}
         except (KeyError, IndexError, TypeError) as e:
             raise MarketError(f"chart shape changed for {symbol}: {e}") from e
 
@@ -310,8 +339,7 @@ class Market:
             covered = tuple(s for s in symbols
                             if getattr(self._primary, "supports",
                                        lambda s: True)(s))
-            if covered and (("m", covered) in self._cache
-                            or self._primary_ok()):
+            if covered and self._primary_gate(("m", covered), 300):
                 try:                            # batched: one request for all
                     out = dict(self._cached(
                         ("m", covered), 300,
@@ -351,8 +379,8 @@ class Market:
         if from_ccy == to_ccy:
             return Decimal(1)
         pair = f"{from_ccy}{to_ccy}=X"
-        if self._primary is not None and (("pfx", pair) in self._cache
-                                          or self._primary_ok()):
+        if self._primary is not None and self._primary_gate(("pfx", pair),
+                                                            self.cache_ttl):
             try:
                 return Decimal(self._cached(
                     ("pfx", pair), self.cache_ttl,

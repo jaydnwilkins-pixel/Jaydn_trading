@@ -123,10 +123,9 @@ def test_agent_ask_unknown_agent_and_no_key_are_honest(world):
     lines = [json.loads(x) for x in handler(
         {"agent_id": "nonexistent", "text": "hi"})]
     assert lines[0]["kind"] == "error"
-    # real registry path with no key: error, not crash
-    import os
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        lines = [json.loads(x) for x in handler(
-            {"agent_id": "technical", "text": "hi"})]
-        assert lines[0]["kind"] == "error"
-        assert "ANTHROPIC_API_KEY" in lines[0]["text"]
+    # real registry path whose model call fails (the SDK is blocked in
+    # tests): an error line, not a crash
+    lines = [json.loads(x) for x in handler(
+        {"agent_id": "technical", "text": "hi"})]
+    assert lines[0]["kind"] == "error"
+    assert "blocked" in lines[0]["text"]

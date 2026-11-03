@@ -70,10 +70,10 @@ function renderStrip() {
       : 'opens ' + new Date(e.next_open).toLocaleString(undefined,
         {weekday: 'short', hour: '2-digit', minute: '2-digit'});
     return `<div class="mchip ${e.exchange === exchange ? 'sel' : ''}"
-      onclick="pickExchange('${e.exchange}')"
-      title="hours ${e.open_time}–${e.close_time}${e.lunch_break ?
-        ' (lunch ' + e.lunch_break + ')' : ''} · ${state}">
-      ${dot} <b>${e.exchange}</b><br><span class="t">${t}</span></div>`;
+      onclick="pickExchange(${jsArg(e.exchange)})"
+      title="hours ${esc(e.open_time)}–${esc(e.close_time)}${e.lunch_break ?
+        ' (lunch ' + esc(e.lunch_break) + ')' : ''} · ${esc(state)}">
+      ${dot} <b>${esc(e.exchange)}</b><br><span class="t">${t}</span></div>`;
   }).join('');
 }
 
@@ -82,22 +82,22 @@ async function pickExchange(ex) {
   exchange = ex; page = 0; renderStrip(); loadList();
   const el = document.getElementById('exinfo');
   const e = EXCHANGES.find(x => x.exchange === ex) || {};
-  const base = `<b style="letter-spacing:.08em">${ex}</b>
+  const base = `<b style="letter-spacing:.08em">${esc(ex)}</b>
     ${e.is_open ? '<span class="pill ok">● TRADING NOW</span>'
       : `<span class="pill bad">closed — opens ${new Date(e.next_open)
           .toLocaleString()}</span>`}
-    <span class="muted">hours ${e.open_time}–${e.close_time}${e.lunch_break ?
-      ' · lunch ' + e.lunch_break : ''} (${e.tz})</span>`;
+    <span class="muted">hours ${esc(e.open_time)}–${esc(e.close_time)}${e.lunch_break ?
+      ' · lunch ' + esc(e.lunch_break) : ''} (${esc(e.tz)})</span>`;
   el.innerHTML = base + ' <span class="muted">· index loading…</span>';
   try {
-    const i = await api('/api/exchange-info?exchange=' + ex);
+    const i = await api('/api/exchange-info?exchange=' + encodeURIComponent(ex));
     const idx = i.index || {};
     el.innerHTML = base + (idx.level
       ? ` · index <b>${fmt(idx.level)}</b>
          <b class="${idx.change_pct >= 0 ? 'ok' : 'bad'}">${idx.change_pct ==
            null ? '' : (idx.change_pct >= 0 ? '+' : '') +
            fmt(idx.change_pct) + '%'}</b>
-         <span class="muted">(${idx.symbol}) · volume
+         <span class="muted">(${esc(idx.symbol)}) · volume
          ${fmtBig(idx.day_volume)} · ${fmt(i.listings, 0)} listings</span>`
       : ' <span class="muted">· index data unavailable right now</span>');
   } catch { el.innerHTML = base; }
@@ -226,7 +226,7 @@ function pick(i) {
   document.getElementById('detail').innerHTML = `<div class="card"
     style="margin:0">
     <h3>${esc(sel.symbol)} <span class="muted">${esc(sel.name || '')}</span>
-      ${sel.rating_label ? `<span class="pill warn">${sel.rating_label}</span>`
+      ${sel.rating_label ? `<span class="pill warn">${esc(sel.rating_label)}</span>`
         : ''}</h3>
     <p class="muted" id="qchips">${sel.price ? 'last ' + fmt(sel.price) : ''}
       ${sel.change_pct != null ? ` · <b class="${sel.change_pct >= 0 ? 'ok'
@@ -250,11 +250,11 @@ function pick(i) {
       <label><input type="checkbox" id="t-rsi" onchange="loadChart(true)">
         RSI</label>
       <span style="flex:1"></span>
-      <button class="ghost" id="wl-btn" onclick="toggleWatch('${ex}')"
+      <button class="ghost" id="wl-btn" onclick="toggleWatch(${jsArg(ex)})"
         title="watchlisted names always enter the screener's universe">
         ${onWatchlist(sel.ticker || sel.symbol, ex) ? '★ watching'
           : '☆ watchlist'}</button>
-      <button onclick="sendToPipeline('${ex}')">Send to pipeline</button>
+      <button onclick="sendToPipeline(${jsArg(ex)})">Send to pipeline</button>
     </div>
     <div id="chart"><p class="muted">loading…</p></div>
   </div>`;

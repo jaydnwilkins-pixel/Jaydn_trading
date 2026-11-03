@@ -35,9 +35,15 @@ async function send() {
   btn.disabled = true;
   let current = null;
   try {
+    // /api/ask starts paid LLM work, so it needs the paired key like every
+    // other POST (api() can't be used: this response is a stream)
     const r = await fetch('/api/ask', {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'X-Dash-Key': dashKey()},
       body: JSON.stringify({text, thread: 'dashboard'})});
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(d.error || r.status);
+    }
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = '';

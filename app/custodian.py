@@ -12,8 +12,11 @@ from .accounting.money import to_micro
 
 class Custodian:
     def __init__(self, conn, repo, brokers, *, resume_post, account_broker,
-                 fx_rate_for, clock=time.time, cal=None):
+                 fx_rate_for, clock=time.time, cal=None, alert=None):
         self.conn, self.repo = conn, repo
+        # out-of-band channel for what must reach a human NOW (an unprotected
+        # position): app.alerts.send in claire-api; None = flags only
+        self.alert = alert
         self.brokers = brokers                  # broker name -> adapter
         self.resume_post = resume_post
         self.account_broker = account_broker    # account_id -> broker name
@@ -24,23 +27,41 @@ class Custodian:
     # it) used to abort run_once, so expiry, retries, orphan checks and drift
     # all stopped — on every run, for as long as the bad order existed (H8)
     DUTIES = ("_place_pending_session", "_poll_fills", "_expire_orders",
-              "_expire_approvals", "_retry_resumes", "_orphans", "_drift",
-              "_archive")
+              "_reprotect", "_expire_approvals", "_retry_resumes", "_orphans",
+              "_drift", "_leg_drift", "_archive")
 
     def run_once(self) -> dict:
         report = {"placed": [], "fills": 0, "completed": [], "order_expired": [],
-                  "approvals_expired": [], "resume_retried": [], "flags": []}
+                  "approvals_expired": [], "resume_retried": [],
+                  "reprotected": [], "flags": []}
         for duty in self.DUTIES:
             try:
                 getattr(self, duty)(report)
             except Exception as e:              # noqa: BLE001 — net must not die silent
                 report["flags"].append(f"custodian {duty.strip('_')} error: {e}")
+        self._live_alarm(report)
         ok = "degraded" if report["flags"] else "ok"
         self.conn.execute(
             "INSERT INTO service_health (service, checked_at, ok, detail)"
             " VALUES ('custodian', ?, ?, ?)",
             (int(self.clock()), ok, json.dumps(report, default=str)))
         return report
+
+    def _live_alarm(self, report):
+        """Any doubt about a LIVE order disarms live trading (DESIGN.md §22):
+        a fill the book could not record, an order Saxo does not know, a
+        placement with an unknown outcome. Real money waits for a human."""
+        from . import live_trading
+        live_ids = [r["id"] for r in self.conn.execute(
+            "SELECT o.id FROM orders o JOIN broker_accounts a"
+            " ON a.id=o.account_id WHERE a.environment='live'")]
+        hits = [f for f in report["flags"]
+                if any(oid in f for oid in live_ids)]
+        if hits and live_trading.disarm(self.conn, actor="custodian",
+                                        reason=hits[0][:250],
+                                        clock=self.clock):
+            report["flags"].append("LIVE TRADING DISARMED by the custodian: "
+                                   + hits[0][:200])
 
     def _retry_resumes(self, report):
         report["resume_retried"] = approvals.retry_pending(
@@ -61,7 +82,9 @@ class Custodian:
         for o in self.conn.execute(
                 "SELECT o.*, i.ticker, i.exchange FROM orders o"
                 " JOIN instruments i ON i.id=o.instrument_id"
-                " WHERE o.status='pending_session'").fetchall():
+                # a protective leg is born at the venue; it is never placed
+                " WHERE o.status='pending_session' AND o.leg IS NULL"
+                ).fetchall():
             try:
                 if o["submitted_at"] is not None:
                     # claimed but never acknowledged: the placer died mid-call
@@ -109,6 +132,12 @@ class Custodian:
                                          **payload})
 
     def _poll_fills(self, report):
+        """Every working order, protective legs included: a stop or target
+        that fills at the venue is a desk SELL (or buy-to-cover) booked
+        against the position like any other fill, and a leg the venue has
+        cancelled (its OCO sibling filled, or its entry was cancelled) is
+        marked so (protection.sync_from_venue)."""
+        from . import protection
         from .tools.brokers import BrokerError
         for o in self.conn.execute(
                 "SELECT * FROM orders WHERE status IN"
@@ -129,6 +158,7 @@ class Custodian:
             except Exception as e:              # noqa: BLE001 — per order
                 report["flags"].append(f"order {o['id']} poll error: {e}")
                 continue
+            unbooked = False
             for f in status["fills"]:
                 try:
                     # a failed FX lookup raises here and the fill waits for
@@ -139,21 +169,35 @@ class Custodian:
                         price_native=to_micro(f["price"]),
                         fx_rate=self.fx_rate_for(o["instrument_id"],
                                                  o["account_id"]),
-                        intended_price=o["limit_price"],  # → slippage metric
+                        # → slippage metric; a stop leg's intent is its stop
+                        intended_price=o["limit_price"] or o["stop_loss"],
                         ts=int(self.clock()))
                 except Exception as e:          # noqa: BLE001 — per fill
                     report["flags"].append(
                         f"FILL NOT BOOKED order {o['id']} fill "
                         f"{f['fill_id']}: {e} — the venue filled it, the book "
                         "has not; reconcile")
+                    unbooked = True
                     continue
                 if ex:
                     report["fills"] += 1
+            if o["leg"]:
+                if unbooked:
+                    # a terminal status now would refuse the fill the book
+                    # still owes (record_fill rejects fills on a cancelled
+                    # order): book first, sync on a later run
+                    continue
+                try:
+                    protection.sync_from_venue(self.repo, o, status,
+                                               ts=int(self.clock()))
+                except Exception as e:          # noqa: BLE001 — per order
+                    report["flags"].append(f"leg {o['id']} sync error: {e}")
+                continue                        # a leg completes no item
             self._maybe_complete(o["id"], report)
 
     def _maybe_complete(self, order_id, report):
         o = self.repo.order(order_id)
-        if o["status"] == "filled" and o["work_item_id"]:
+        if o["status"] == "filled" and o["work_item_id"] and not o["leg"]:
             wi = self.conn.execute("SELECT state FROM work_items WHERE id=?",
                                    (o["work_item_id"],)).fetchone()
             if wi and wi["state"] == "executing":
@@ -168,10 +212,13 @@ class Custodian:
         that followed, so book and broker diverged (H8). Without an adapter
         it now skips and flags; the in-process custodian does the cancel."""
         now = int(self.clock())
+        # protective legs are GTC at the venue and are excluded outright:
+        # cancelling a stop because a day order's clock ran out would strip
+        # the position of its protection
         for o in self.conn.execute(
                 "SELECT * FROM orders WHERE status IN"
                 " ('placed','partially_filled','pending_session')"
-                " AND expires_at < ?", (now,)).fetchall():
+                " AND leg IS NULL AND expires_at < ?", (now,)).fetchall():
             try:
                 if o["broker_order_id"]:
                     adapter = self._adapter(o["account_id"])
@@ -224,7 +271,7 @@ class Custodian:
         for r in self.conn.execute(
                 "SELECT w.id FROM work_items w WHERE w.state='approved'"
                 " AND NOT EXISTS (SELECT 1 FROM orders o WHERE"
-                "  o.work_item_id=w.id AND o.status NOT IN"
+                "  o.work_item_id=w.id AND o.leg IS NULL AND o.status NOT IN"
                 "  ('rejected','cancelled','expired'))"
                 " AND COALESCE((SELECT MAX(e.ts) FROM events e WHERE"
                 "  e.item_id=w.id AND e.to_state='approved'), w.updated_at)"
@@ -247,16 +294,23 @@ class Custodian:
                 "SELECT id FROM work_items WHERE state='running'"
                 " AND updated_at < ?", (now - 7200,)):
             report["flags"].append(f"work item {r['id']} running > 2h")
+        # an approval refused at placement is NOT an orphan: it is parked on
+        # the Approvals page ("Approved but not placed — needs you"), and
+        # flagging it marked the custodian degraded for no reason
+        parked = {f["id"] for f in approvals.failed_approvals(
+            self.conn, clock=self.clock)}
         for r in self.conn.execute(
                 "SELECT id FROM work_items WHERE state='approved'"
                 " AND updated_at < ?", (now - 600,)):
+            if r["id"] in parked:
+                continue
             report["flags"].append(f"approved item {r['id']} has no order after 10m")
         # executing with nothing left that could complete it (M6): every
         # order terminal and none filled — the item would never move again
         for r in self.conn.execute(
                 "SELECT w.id FROM work_items w WHERE w.state='executing'"
                 " AND NOT EXISTS (SELECT 1 FROM orders o WHERE"
-                "  o.work_item_id=w.id AND o.status IN"
+                "  o.work_item_id=w.id AND o.leg IS NULL AND o.status IN"
                 "  ('pending_session','placed','partially_filled','filled'))"
                 " AND w.updated_at < ?", (now - 600,)):
             report["flags"].append(
@@ -264,17 +318,165 @@ class Custodian:
         for r in self.conn.execute(
                 "SELECT l.id FROM lots l WHERE l.qty_remaining < 0"):
             report["flags"].append(f"lot {r['id']} negative remainder")
-        # UNPROTECTED: an open long position whose opening order carried no
-        # stop — the watcher is its only safety net, and you should know (§11)
-        for r in self.conn.execute(
-                "SELECT DISTINCT l.instrument_id FROM lots l"
+        self._unprotected(report)
+
+    def _unprotected(self, report):
+        """UNPROTECTED: a position with no resting stop at its venue — the
+        watcher is then its only safety net, and you should know (§11).
+
+        Where the venue holds the protective legs as orders (Saxo), the book
+        tracks them (§11a), so the question is answered from the legs: are
+        the working stop legs enough for every share held? Elsewhere (the
+        in-process sim keeps a bracket's stop inside the entry) it is the old
+        test: did the order that opened a long carry a stop at all."""
+        for p in self.conn.execute(
+                "SELECT account_id, instrument_id, SUM(CASE WHEN qty_opened<0"
+                " THEN -qty_remaining ELSE qty_remaining END) AS q FROM lots"
+                " WHERE qty_remaining > 0 GROUP BY account_id, instrument_id"
+                ).fetchall():
+            q = p["q"]
+            if not q:
+                continue
+            tracked = self.conn.execute(
+                "SELECT 1 FROM orders WHERE account_id=? AND instrument_id=?"
+                " AND leg IS NOT NULL LIMIT 1",
+                (p["account_id"], p["instrument_id"])).fetchone()
+            if tracked:
+                (covered,) = self.conn.execute(
+                    "SELECT COALESCE(SUM(o.qty - COALESCE((SELECT SUM(e.qty)"
+                    " FROM executions e WHERE e.order_id=o.id),0)),0)"
+                    " FROM orders o WHERE o.account_id=? AND o.instrument_id=?"
+                    " AND o.leg='stop' AND o.side=? AND o.status IN"
+                    " ('placed','partially_filled')",
+                    (p["account_id"], p["instrument_id"],
+                     "sell" if q > 0 else "buy")).fetchone()
+                if covered < abs(q):
+                    report["flags"].append(
+                        f"UNPROTECTED position {p['instrument_id']} on "
+                        f"{p['account_id']}: {(abs(q) - covered) / 1e6:g} of "
+                        f"{abs(q) / 1e6:g} shares have no resting stop at the "
+                        "venue; watcher alerts are the only backstop")
+                continue
+            if q < 0:
+                continue
+            bare = self.conn.execute(
+                "SELECT 1 FROM lots l"
                 " JOIN executions e ON e.id = l.open_execution_id"
                 " LEFT JOIN orders o ON o.id = e.order_id"
-                " WHERE l.qty_remaining > 0 AND l.qty_opened > 0"
-                " AND (o.stop_loss IS NULL OR o.id IS NULL)"):
-            report["flags"].append(
-                f"UNPROTECTED position {r['instrument_id']} — no resting stop"
-                " at the venue; watcher alerts are the only backstop")
+                " WHERE l.account_id=? AND l.instrument_id=?"
+                " AND l.qty_remaining > 0 AND l.qty_opened > 0"
+                " AND (o.stop_loss IS NULL OR o.id IS NULL) LIMIT 1",
+                (p["account_id"], p["instrument_id"])).fetchone()
+            if bare:
+                report["flags"].append(
+                    f"UNPROTECTED position {p['instrument_id']} — no resting "
+                    "stop at the venue; watcher alerts are the only backstop")
+
+    # ── protective legs (§11a) ───────────────────────────────────────────
+    def _reprotect(self, report):
+        """A desk order that had to cancel a position's stop/target has
+        finished: re-protect whatever it left, at the original levels
+        (protection.reprotect). Waits until the order is terminal — while a
+        sell is still working, Saxo would refuse a second resting sell and
+        the two could together sell more than is held. A failure is flagged
+        every run while shares remain bare, and alerted once."""
+        from . import protection
+        from .tools.market import yahoo_symbol
+        ts = int(self.clock())
+        for o in self.conn.execute(
+                "SELECT o.*, i.ticker, i.exchange FROM orders o"
+                " JOIN instruments i ON i.id=o.instrument_id"
+                " WHERE o.protect_state='pending' AND o.status IN"
+                " ('filled','cancelled','expired','rejected')").fetchall():
+            adapter = self._adapter(o["account_id"])
+            if adapter is None:
+                continue                        # the in-process custodian will
+            state, note = protection.reprotect(
+                self.repo, adapter, o["id"],
+                symbol=yahoo_symbol(o["ticker"], o["exchange"]), ts=ts)
+            report["reprotected"].append({"order": o["id"], "state": state,
+                                          "note": note})
+        for o in self.conn.execute(
+                "SELECT * FROM orders WHERE protect_state='failed'").fetchall():
+            held, _, _ = self.repo.position(o["account_id"],
+                                            o["instrument_id"])
+            if held == 0:
+                self.conn.execute(
+                    "UPDATE orders SET protect_state='not_needed',"
+                    " protect_note=?, updated_at=? WHERE id=?",
+                    ((o["protect_note"] or "") + " — resolved: position "
+                     "closed", ts, o["id"]))
+                continue
+            report["flags"].append(f"RE-PROTECTION FAILED after order "
+                                   f"{o['id']}: {o['protect_note']}")
+            if self.alert is not None and o["protect_alerted_at"] is None:
+                try:
+                    self.alert(f"⚠ {o['protect_note']} (after desk order "
+                               f"{o['id']})", title="Claire — UNPROTECTED")
+                except Exception:               # noqa: BLE001 — flag stands
+                    continue
+                self.conn.execute("UPDATE orders SET protect_alerted_at=?"
+                                  " WHERE id=?", (ts, o["id"]))
+
+    def _leg_drift(self, report):
+        """The venue's working orders vs the book's legs, for venues that can
+        list them (Saxo). Flagged, never corrected (§12):
+        - a leg the book thinks is working that the venue no longer lists
+          (it filled or was cancelled where the poll could not see it);
+        - an order at the venue on the EXIT side of a desk position that the
+          book does not track — it could sell the desk's shares."""
+        from .tools.market import yahoo_symbol
+        for acct in self.conn.execute(
+                "SELECT id, broker FROM broker_accounts").fetchall():
+            adapter = self.brokers.get(acct["broker"])
+            if adapter is None or not hasattr(adapter, "working_orders"):
+                continue
+            book = self.conn.execute(
+                "SELECT * FROM orders WHERE account_id=? AND leg IS NOT NULL"
+                " AND status IN ('placed','partially_filled')",
+                (acct["id"],)).fetchall()
+            positions = self.conn.execute(
+                "SELECT l.instrument_id, i.ticker, i.exchange, SUM(CASE WHEN"
+                " l.qty_opened<0 THEN -l.qty_remaining ELSE l.qty_remaining"
+                " END) AS q FROM lots l JOIN instruments i ON"
+                " i.id=l.instrument_id WHERE l.account_id=? AND"
+                " l.qty_remaining>0 GROUP BY l.instrument_id",
+                (acct["id"],)).fetchall()
+            if not book and not positions:
+                continue
+            try:
+                venue = adapter.working_orders()
+            except Exception as e:              # noqa: BLE001
+                report["flags"].append(f"leg drift {acct['id']}: cannot list "
+                                       f"the venue's working orders ({e})")
+                continue
+            ids = {w["order_id"] for w in venue}
+            for o in book:
+                if o["broker_order_id"] not in ids:
+                    report["flags"].append(
+                        f"LEG DRIFT {acct['id']}: {o['leg']} leg {o['id']} "
+                        f"(venue {o['broker_order_id']}) is working on the "
+                        "book but not at the venue — reconcile")
+            known = {r["broker_order_id"] for r in self.conn.execute(
+                "SELECT broker_order_id FROM orders WHERE account_id=? AND"
+                " broker_order_id IS NOT NULL", (acct["id"],))}
+            for p in positions:
+                if not p["q"]:
+                    continue
+                exit_side = "sell" if p["q"] > 0 else "buy"
+                sym = yahoo_symbol(p["ticker"], p["exchange"])
+                for w in venue:
+                    if w.get("desk_symbol") != sym or w["order_id"] in known:
+                        continue
+                    if w.get("side") not in (None, exit_side):
+                        continue
+                    report["flags"].append(
+                        f"UNTRACKED venue order {w['order_id']} on "
+                        f"{acct['id']}: {w.get('type')} {w.get('side') or ''} "
+                        f"{w.get('amount')} {w.get('symbol')} @ "
+                        f"{w.get('price')} — not on the book; it could sell "
+                        "the desk's shares (bin/claire legs-backfill adopts "
+                        "a bracket's legs)")
 
     def _drift(self, report):
         """Reconcile the latest broker snapshot against the book (§12): the

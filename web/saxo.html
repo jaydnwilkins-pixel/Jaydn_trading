@@ -1,0 +1,265 @@
+<meta charset="utf-8"><title>Claire — Saxo accounts</title>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/charts.js"></script>
+<script src="/sell.js"></script>
+<script>nav('/saxo')</script>
+<style>
+  .tabs { display:flex; gap:.5rem; margin:.6rem 0 1rem; }
+  .tabs button { background:var(--panel); border:1px solid var(--line);
+    color:var(--text); padding:.45rem 1rem; border-radius:8px; cursor:pointer; }
+  .tabs button.on { border-color:var(--accent); color:var(--accent); }
+  .tabs button.live.on { border-color:var(--bad); color:var(--bad); }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+    gap:.7rem; margin-bottom:1rem; }
+  .tile { background:var(--panel); border:1px solid var(--line);
+    border-radius:10px; padding:.7rem .9rem; }
+  .tile .k { color:var(--muted); font-size:.75rem; }
+  .tile .v { font-size:1.35rem; font-family:var(--mono); margin-top:.15rem; }
+  td.num, th.num { text-align:right; font-family:var(--mono); }
+  /* allocation bar: one series, one hue (the site accent), thin, rounded
+     data-end, recessive track; the value is always printed beside it */
+  .alloc { display:flex; align-items:center; gap:.5rem; min-width:160px; }
+  .alloc .track { flex:1; height:8px; background:var(--line);
+    border-radius:4px; position:relative; }
+  .alloc .bar { position:absolute; left:0; top:0; bottom:0;
+    background:var(--accent); border-radius:0 4px 4px 0; }
+  .alloc .pct { font-family:var(--mono); font-size:.8rem; min-width:3.2rem;
+    text-align:right; color:var(--text); }
+  .banner { border:1px solid var(--line); border-radius:10px;
+    padding:.6rem .9rem; margin-bottom:1rem; background:var(--panel); }
+  .banner.live { border:2px solid var(--bad); }
+  .banner button { margin-left:.6rem; }
+  tr.pos { cursor:pointer; }
+  tr.pos:hover td { background:#101a2c; }
+  tr.pos.sel td { background:#0f2233; }
+  #chartbox { margin:1rem 0; }
+  #chartbox .head { display:flex; align-items:center; gap:.8rem;
+    margin-bottom:.4rem; }
+</style>
+<main>
+  <h1>Saxo accounts</h1>
+  <p class="muted">Straight from Saxo, read-only. These are your accounts at
+  the broker — separate from the desk's own paper book on
+  <a href="/portfolio">Portfolio</a>. Nothing on this page trades by itself:
+  <b>Sell</b> (shown only for shares the desk bought on that account) sends a
+  sell to <a href="/approvals">Approvals</a>, where you approve it.</p>
+  <div class="tabs" id="tabs">
+    <button data-env="live" class="live">Saxo LIVE — real money</button>
+    <button data-env="sim">Saxo SIM — paper</button>
+  </div>
+  <div id="view">loading…</div>
+</main>
+<script>
+const ACCOUNT = {live: 'Saxo LIVE', sim: 'Saxo SIM'};
+let ENV = new URLSearchParams(location.search).get('env') || 'live';
+
+function money(v, ccy) {
+  return v == null ? '—' : `${fmt(v, 2)}${ccy ? ' ' + esc(ccy) : ''}`;
+}
+function signed(v, ccy) {
+  if (v == null) return '—';
+  // sign is printed, so gain/loss never relies on colour alone
+  const cls = v > 0 ? 'ok' : v < 0 ? 'bad' : '';
+  return `<span class="${cls}">${v > 0 ? '+' : ''}${money(v, ccy)}</span>`;
+}
+function pctSigned(v) {
+  if (v == null) return '—';
+  const cls = v > 0 ? 'ok' : v < 0 ? 'bad' : '';
+  return `<span class="${cls}">${v > 0 ? '+' : ''}${fmt(v, 2)}%</span>`;
+}
+
+function allocBar(p) {
+  const w = p.weight_pct;
+  if (w == null) return '—';
+  const tip = `${p.symbol}: ${fmt(w, 1)}% of exposure · ` +
+    `${money(p.exposure_base)} in account currency`;
+  return `<div class="alloc" title="${esc(tip)}">
+    <div class="track"><div class="bar" style="width:${Math.max(w, 0.5)}%"></div></div>
+    <span class="pct">${fmt(w, 1)}%</span></div>`;
+}
+
+function render(d) {
+  const b = d.balance || {}, ccy = b.Currency;
+  const live = d.env === 'live';
+  const head = `<div class="banner ${live ? 'live' : ''}">
+    <b class="${live ? 'bad' : ''}">${live ? '⚠ REAL MONEY' : 'Simulated money'}</b>
+    — ${esc(d.account || '')}${d.account_id ? ' · account ' + esc(d.account_id) : ''}
+    · sign-in: ${d.signin && d.signin.signed_in
+      ? `<span class="ok">✔ active</span> (renews automatically)`
+      : `<span class="bad">✖ not signed in</span>`}
+    <button onclick="signIn(${jsArg(d.env)})">${d.signin && d.signin.signed_in
+      ? 'Sign in again' : 'Sign in to ' + ACCOUNT[d.env]}</button>
+    <span id="signin-msg" class="muted"></span></div>`;
+  if (d.error) {
+    document.getElementById('view').innerHTML = head +
+      `<div class="card"><p class="muted">${esc(d.error)}</p></div>`;
+    return;
+  }
+  const pos = d.positions || [], ord = d.orders || [];
+  const upl = pos.reduce((s, p) => s + (p.pnl_base || 0), 0);
+  const tiles = [
+    ['Total value', money(b.TotalValue, ccy)],
+    ['Cash', money(b.CashBalance, ccy)],
+    ['Unrealised P/L', signed(pos.some(p => p.pnl_base != null) ? upl
+                              : b.UnrealizedMarginProfitLoss, ccy)],
+    ['Available to trade', money(b.MarginAvailableForTrading, ccy)],
+    ['Open positions', esc(b.OpenPositionsCount ?? pos.length)],
+  ].map(([k, v]) => `<div class="tile"><div class="k">${k}</div>
+    <div class="v">${v}</div></div>`).join('');
+  // Sell: only what the DESK bought on this very account — the rest of a
+  // Saxo position is yours, outside the desk's book, and it cannot sell it
+  const skey = p => 'saxo|' + d.env + '|' + p.symbol;
+  pos.forEach(p => {
+    if (p.desk && p.desk.held > 0) sellRegister(skey(p), {
+      ticker: p.desk.ticker, exchange: p.desk.exchange, broker: p.desk.broker,
+      account_id: p.desk.account_id, label: ACCOUNT[d.env] + ' (' +
+      p.desk.account_id + ')', held: Math.min(p.desk.held, p.amount ?? p.desk.held),
+      price: p.current_price, currency: p.currency, whole: true,
+      source: 'saxo'});
+  });
+  const sellCell = p => !(p.desk && p.desk.held > 0)
+    ? `<span class="muted" style="font-size:.7rem" title="The desk can only
+        sell shares it bought itself, on its own book. This position is held
+        outside the desk.">not the desk's</span>`
+    : `${sellButton(skey(p))}${p.desk.held < (p.amount || 0) ? `<br><span
+        class="muted" style="font-size:.7rem">desk holds ${fmt(p.desk.held, 0)}
+        of ${fmt(p.amount, 0)}</span>` : ''}`;
+  const rows = pos.length ? pos.map((p, i) => `<tr class="pos${
+      SEL && SEL.symbol === p.symbol ? ' sel' : ''}" onclick="pick(${i})"
+      title="Click to chart ${esc(p.symbol)}">
+      <td><b>${esc(p.symbol)}</b><br><span class="muted">${esc(p.name || '')}</span></td>
+      <td class="num">${fmt(p.amount, 0)}</td>
+      <td class="num">${money(p.avg_open_price)}</td>
+      <td class="num">${money(p.current_price)}</td>
+      <td class="num">${money(p.market_value, p.currency)}</td>
+      <td class="num">${signed(p.pnl, p.currency)}</td>
+      <td class="num">${pctSigned(p.pnl_pct)}</td>
+      <td>${allocBar(p)}</td>
+      <td onclick="event.stopPropagation()">${sellCell(p)}</td></tr>`).join('')
+    : `<tr><td colspan="9" class="muted">No open positions.</td></tr>`;
+  const orows = ord.length ? ord.map(o => `<tr>
+      <td><b>${esc(o.symbol)}</b></td><td>${esc(o.side)}</td>
+      <td class="num">${fmt(o.amount, 0)}</td><td>${esc(o.type)}</td>
+      <td class="num">${money(o.price, o.currency)}</td>
+      <td>${esc(o.status)}</td><td>${esc(o.duration || '')}</td></tr>`).join('')
+    : `<tr><td colspan="7" class="muted">No working orders.</td></tr>`;
+  document.getElementById('view').innerHTML = head +
+    `<div class="tiles">${tiles}</div>
+     <h2>Positions <span class="muted" style="font-size:.8rem">
+       allocation = share of gross exposure</span></h2>
+     <table><thead><tr><th>Instrument</th><th class="num">Qty</th>
+       <th class="num">Avg cost</th><th class="num">Price</th>
+       <th class="num">Value</th><th class="num">P/L</th>
+       <th class="num">P/L %</th><th>Allocation</th><th></th></tr></thead>
+       <tbody>${rows}</tbody></table>
+     ${pos.filter(p => p.desk && p.desk.held > 0).map(p =>
+       `<div id="sellbox-${esc(skey(p))}"></div>`).join('')}
+     <div id="chartbox"></div>
+     <h2>Working orders <span class="muted" style="font-size:.8rem">
+       incl. stop-loss / take-profit legs held at Saxo</span></h2>
+     <table><thead><tr><th>Instrument</th><th>Side</th><th class="num">Qty</th>
+       <th>Type</th><th class="num">Price</th><th>Status</th><th>Duration</th>
+       </tr></thead><tbody>${orows}</tbody></table>
+     <p class="muted" style="font-size:.75rem">Refreshes every 30 s ·
+       ${new Date().toLocaleTimeString()}</p>`;
+}
+
+let POS = [], SEL = null, CHART = null;
+
+async function signIn(env) {
+  // Saxo sends the browser back to localhost (the URL registered on the
+  // app), so the sign-in has to start from a browser on this PC
+  const msg = document.getElementById('signin-msg');
+  if (!['localhost'].includes(location.hostname)) {
+    msg.innerHTML = `Sign-in works in a browser on the Claire PC: open
+      <a href="http://localhost:${location.port || 7787}/saxo?env=${esc(env)}">
+      localhost:${location.port || 7787}/saxo</a> there.`;
+    return;
+  }
+  try {
+    const r = await api('/api/saxo-login-start', {env});
+    location.href = r.url;            // Saxo's login page; it comes back here
+  } catch (e) { msg.innerHTML = `<span class="bad">${esc(e.message)}</span>`; }
+}
+
+function pick(i) {
+  SEL = POS[i];
+  CHART = null;
+  document.querySelectorAll('tr.pos').forEach((tr, k) =>
+    tr.classList.toggle('sel', k === i));
+  drawPosition();
+}
+
+async function drawPosition(rerenderOnly) {
+  const box = document.getElementById('chartbox');
+  if (!box || !SEL) return;
+  const range = (document.getElementById('crange') || {}).value || '6mo';
+  box.innerHTML = `<div class="card"><div class="head">
+      <h3 style="margin:0">${esc(SEL.symbol)} <span class="muted">
+        ${esc(SEL.name || '')}</span></h3>
+      <span style="flex:1"></span>
+      <select id="crange" onchange="CHART=null;drawPosition()">
+        ${['1mo', '3mo', '6mo', '1y', '2y', '5y'].map(r =>
+          `<option ${r === range ? 'selected' : ''}>${r}</option>`).join('')}
+      </select>
+      <button onclick="SEL=null;document.getElementById('chartbox').innerHTML=''">
+        ✖</button></div>
+      <div id="pchart"><p class="muted">loading chart…</p></div>
+      <p class="muted" style="font-size:.75rem">Daily prices from the desk's
+      market data · dashed line = your average cost at Saxo
+      (${money(SEL.avg_open_price, SEL.currency)})</p></div>`;
+  if (!SEL.chart_symbol) {
+    document.getElementById('pchart').innerHTML = `<p class="muted">No chart:
+      the desk has no market data mapping for ${esc(SEL.symbol)}.</p>`;
+    return;
+  }
+  try {
+    if (!CHART) CHART = await api('/api/chart?symbol=' +
+      encodeURIComponent(SEL.chart_symbol) + '&range=' + range);
+  } catch (e) {
+    document.getElementById('pchart').innerHTML =
+      `<p class="bad">${esc(e.message)}</p>`;
+    return;
+  }
+  drawChart(document.getElementById('pchart'), CHART, {
+    sma20: true, sma50: true, volume: true, height: 380,
+    levels: [{value: SEL.avg_open_price, color: 'var(--warn)',
+              label: 'your avg cost ' + fmt(SEL.avg_open_price, 2)}]});
+}
+window.addEventListener('resize', () => drawPosition(true));
+
+async function load() {
+  document.querySelectorAll('#tabs button').forEach(b =>
+    b.classList.toggle('on', b.dataset.env === ENV));
+  try {
+    const d = await api('/api/saxo-account?env=' + encodeURIComponent(ENV));
+    POS = d.positions || [];
+    // keep the selected position (and its chart) across the 30 s refresh;
+    // ?pos=SYMBOL (from the Portfolio page) preselects one on first load
+    const want = new URLSearchParams(location.search).get('pos');
+    if (!SEL && want && !load.done) SEL = POS.find(p => p.symbol === want) || null;
+    load.done = true;
+    if (SEL) SEL = POS.find(p => p.symbol === SEL.symbol) || null;
+    render(d);
+    sellRestore();                    // an open Sell form survives refresh
+    if (SEL) drawPosition(true);
+  }
+  catch (e) {
+    document.getElementById('view').innerHTML = `<div class="card"><p class="bad">
+      ${esc(e.message)}</p><p class="muted">This page needs the dashboard key
+      (🔑 in the menu bar) because it shows your real account.</p></div>`;
+  }
+}
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
+  ENV = b.dataset.env;
+  SEL = null; CHART = null;
+  history.replaceState(null, '', '/saxo?env=' + ENV);
+  load();
+});
+if (new URLSearchParams(location.search).get('signin') === 'ok')
+  toast('Signed in to ' + ACCOUNT[ENV] + ' ✓');
+load();
+// not while you are typing in a Sell form — a re-render would steal focus
+const typing = () => ['INPUT', 'SELECT']
+  .includes((document.activeElement || {}).tagName);
+setInterval(() => { if (!document.hidden && !typing()) load(); }, 30000);
+</script>

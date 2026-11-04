@@ -1,8 +1,64 @@
 <meta charset="utf-8"><title>Claire — Trading</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script>nav('/trading')</script>
+<style>
+  .runcard { background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; margin:.6rem 0; }
+  .runcard.sel { border-color:var(--accent-dim); }
+  .runhead { padding:.7rem 1rem; cursor:pointer; }
+  .runhead:hover { background:#101a2c; border-radius:12px; }
+  .runtitle { display:flex; gap:.6rem; align-items:baseline; flex-wrap:wrap; }
+  .runtitle .tk { font-weight:700; font-size:1.05rem; }
+  .runtitle .when { margin-left:auto; color:var(--dim); font-size:.8rem; }
+  .story { margin:.3rem 0 0; }
+  .next { margin:.2rem 0 0; }
+  .badge { display:inline-block; padding:.08rem .6rem; border-radius:99px;
+    font-size:.75rem; font-weight:600; border:1px solid var(--line); }
+  .badge.ok { border-color:var(--good); color:var(--good); }
+  .badge.bad { border-color:var(--bad); color:var(--bad); }
+  .badge.warn { border-color:var(--warn); color:var(--warn); }
+  .badge.muted { color:var(--dim); }
+  .badge.run { border-color:var(--accent); color:var(--accent); }
+  .verdict { font-weight:700; }
+  .verdict.buy { color:var(--good); } .verdict.sell { color:var(--bad); }
+  .verdict.pass { color:var(--warn); }
+  .runbody { padding:0 1rem .9rem; border-top:1px solid var(--line); }
+  .runbody h3 { font-size:.72rem; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--muted); margin:1rem 0 .4rem; }
+  .reasons li { margin:.2rem 0; }
+  .levels span { margin-right:1.2rem; }
+  .tl { list-style:none; padding:0; margin:0; }
+  .tl li { padding:.2rem 0 .2rem .9rem; border-left:2px solid var(--line); }
+  .tl li.ok { border-left-color:var(--good); }
+  .tl li.bad { border-left-color:var(--bad); }
+  .tl li.warn { border-left-color:var(--warn); }
+  .tl .t { color:var(--dim); font-size:.78rem; margin-right:.5rem; }
+  .steps { display:flex; flex-direction:column; gap:.35rem; }
+  .step { background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:.45rem .7rem; }
+  .step summary { cursor:pointer; list-style:none; }
+  .step summary::-webkit-details-marker { display:none; }
+  .step .lbl { font-weight:600; margin-right:.5rem; }
+  .step .one { color:var(--text); margin-top:.15rem; }
+  .step ul { margin:.4rem 0 .2rem 1.1rem; }
+  .stage { color:var(--muted); font-size:.72rem; letter-spacing:.1em;
+    text-transform:uppercase; margin:.4rem 0 .1rem; }
+  details.tech > summary, details.more > summary { cursor:pointer;
+    color:var(--dim); font-size:.8rem; margin-top:.8rem; }
+  details.tech pre { max-height:260px; overflow:auto; }
+  .linkbtn { background:none; border:none; color:var(--accent); padding:0;
+    font-weight:600; cursor:pointer; font-size:inherit; }
+  .feed { list-style:none; padding:0; margin:0; max-height:280px;
+    overflow:auto; background:var(--panel); border:1px solid var(--line);
+    border-radius:12px; }
+  .feed li { padding:.3rem .8rem; border-bottom:1px solid var(--line); }
+  .feed .t { color:var(--dim); font-size:.78rem; margin-right:.6rem; }
+</style>
 <main>
   <h1>Runs</h1>
+  <p class="muted">Start a research run on a stock. Claire's analysts research
+    it, a bull and a bear argue it out, and the arbiter gives a verdict. Any
+    trade waits for your approval on <a href="/approvals">Approvals</a>.</p>
   <div class="row">
     <input id="ticker" placeholder="ticker e.g. NVDA">
     <select id="exchange"><option>NASDAQ</option><option>NYSE</option>
@@ -11,8 +67,10 @@
       <option>PARIS</option><option>NSE</option></select>
     <button onclick="launch()">Run pipeline</button>
   </div>
-  <h2>Work items — click a row for detail</h2><div id="runs"></div>
-  <h2>Event feed</h2><pre id="feed" style="max-height:280px;overflow:auto"></pre>
+  <h2>Recent runs — click one for the full story</h2><div id="runs"></div>
+  <h2>Recent activity</h2><ul class="feed" id="feed"></ul>
+  <details class="tech"><summary>raw event feed</summary>
+    <pre id="rawfeed" style="max-height:280px;overflow:auto"></pre></details>
 </main>
 <script>
 const CCY = {NASDAQ:'USD',NYSE:'USD',LSE:'GBP',SGX:'SGD',HKEX:'HKD',TSE:'JPY',
@@ -23,54 +81,200 @@ async function launch() {
   const t = document.getElementById('ticker').value.trim().toUpperCase();
   if (!t) return toast('ticker?', false);
   try {
-    const r = await api('/api/run', {ticker: t, exchange: ex,
+    await api('/api/run', {ticker: t, exchange: ex,
       currency: CCY[ex], lot_size: ex === 'SGX' ? 100 : 1});
-    toast('launched ' + r.work_item_id);
+    toast(`Started researching ${t} — it will appear below`);
+    lastSig = null; refresh();
   } catch (e) { toast(e.message, false); }
 }
-const cls = {done:'ok', executing:'warn', awaiting_approval:'warn',
-             failed:'bad', rejected:'muted', expired:'muted', running:'warn'};
-let lastSig = null, DETAIL = {}, summaryOpen = false;
+
+/* ── plain-language vocabulary ─────────────────────────────────────── */
+const STATE = {
+  running: ['Researching…', 'run'],
+  awaiting_approval: ['Waiting for your approval', 'warn'],
+  approved: ['Approved — sending', 'warn'],
+  executing: ['Order at broker', 'warn'],
+  done: ['Finished', 'ok'],
+  failed: ['Failed', 'bad'],
+  rejected: ['Rejected by you', 'muted'],
+  expired: ['Expired', 'muted'],
+};
+function badge(r) {
+  const [label, tone] = STATE[r.state] || [String(r.state || '?'), 'muted'];
+  const s = r.story || {};
+  const why = r.state === 'failed' && s.failure ? ': ' + s.failure.reason : '';
+  return `<span class="badge ${tone}">${esc(label + why)}</span>`;
+}
+const VERDICT = {buy: 'Buy', sell: 'Sell', pass: 'Pass'};
+function when(t) {
+  if (!t) return '—';
+  const d = new Date(t * 1000);
+  return esc(d.toLocaleString(undefined, {day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit'})) + ` <span class="muted">(${
+    esc(ago(t))})</span>`;
+}
+function until(t) {
+  const s = t - Date.now() / 1000;
+  if (s <= 0) return 'now';
+  if (s < 5400) return 'in ' + Math.round(s / 60) + ' min';
+  if (s < 172800) return 'in ' + Math.round(s / 3600) + ' h';
+  return 'in ' + Math.round(s / 86400) + ' days';
+}
+function money(n, ccy) { return `${fmt(n, 2)} ${esc(ccy || '')}`.trim(); }
+function shares(q) { return `${fmt(q, 4)} share${Number(q) === 1 ? '' : 's'}`; }
+function stockName(r) {
+  const s = r.story || {};
+  return `<span class="tk">${esc(r.ticker)}</span>` +
+    (s.name ? ` <span>${esc(s.name)}</span>` : '') +
+    (s.exchange ? ` <span class="muted">${esc(s.exchange)}</span>` : '');
+}
+function runLink(id, text) {
+  return `<button class="linkbtn" onclick="event.stopPropagation();` +
+    `toggle(${jsArg(id)})">${esc(text)}</button>`;
+}
+function origin(r) {
+  const s = r.story || {};
+  const d = s.origin_detail ? ` (${esc(s.origin_detail)})` : '';
+  switch (s.origin) {
+    case 'you': return 'You started this run.';
+    case 'daily_screen': return `Picked by the daily screen${d}.`;
+    case 'volume_scan': return `Started by the hourly volume scan${d}.`;
+    case 'price_alert':
+      return `Exit review: a price alert fired on a position you hold${d}.`;
+    case 'override': return `Your override of ${
+      s.override_of ? runLink(s.override_of, 'the earlier run') : 'a run'}.`;
+    case 'other': return `Started by: ${esc(s.origin_detail)}.`;
+  }
+  return '';
+}
+function convText(s) {
+  if (s.conviction == null) return '';
+  return `${esc(s.conviction_word || '')} conviction (${fmt(s.conviction, 2)})`;
+}
+function verdict(r) {
+  const s = r.story || {};
+  if (!s.verdict) {
+    return r.state === 'running' ? 'No verdict yet.' :
+      r.state === 'failed' ? 'No verdict — the run stopped early.' : '';
+  }
+  const v = String(s.verdict).toLowerCase();
+  const word = VERDICT[v] || s.verdict;
+  let tail = '';
+  if (v === 'pass') tail = r.kind === 'sell_review'
+    ? ' — keep holding, the desk decided not to sell'
+    : ' — the desk decided not to trade';
+  const who = s.origin === 'override' ? 'Your decision' : 'Verdict';
+  const c = convText(s);
+  return `${who}: <span class="verdict ${esc(v)}">${esc(word)}</span>${tail}` +
+    (c && s.origin !== 'override' ? `, ${c}` : '') + '.';
+}
+function nextStep(r) {
+  const s = r.story || {};
+  const fa = s.failed_attempts || {};
+  const ap = s.approval;
+  const fills = s.fills || [];
+  const working = (s.orders || []).filter(o =>
+    ['placed', 'partially_filled', 'pending_session'].includes(o.status));
+  const apText = ap ? `You approved ${ap.size != null ? fmt(ap.size, 0) + ' ' +
+    esc(ap.currency || '') : (ap.qty != null ? shares(ap.qty) : 'the trade')}` +
+    ` on ${esc(ap.account || 'the broker')}` : '';
+  const failNote = fa.tries ? ` <span class="bad">${fmt(fa.tries, 0)} failed ` +
+    `placement attempt${fa.tries === 1 ? '' : 's'}${fa.reasons && fa.reasons[0]
+      ? ': ' + esc(fa.reasons[0].reason) : ''}.</span>` : '';
+  const fillText = fills.map(f => `${f.side === 'buy' ? 'Bought' : 'Sold'} ` +
+    `${shares(f.qty)} at ${money(f.avg_price, f.currency)} on ${
+      esc(f.account)} (${when(f.at)})`).join('; ');
+  switch (r.state) {
+    case 'running': return 'Claire is researching this now…';
+    case 'awaiting_approval':
+      return `<b>Waiting for your approval</b> — <a href="/approvals" ` +
+        `onclick="event.stopPropagation()">review it on Approvals</a>` +
+        (r.expires_at ? ` (expires ${until(r.expires_at)})` : '') + '.';
+    case 'approved':
+      return `${apText}; sending the order to the broker.` + failNote +
+        (fa.tries ? ' <a href="/approvals" onclick="event.stopPropagation()">' +
+          'Retry or cancel on Approvals</a>.' : '');
+    case 'executing':
+      return `${apText}. ` + (working.length ? working.map(o =>
+        `Order working at the broker: ${esc(o.side)} ${shares(o.qty)}` +
+        (o.limit_price != null ? `, limit ${money(o.limit_price,
+          s.currency)}` : '') + ` on ${esc(o.account)}`).join('; ') + '.'
+        : 'The order is at the broker.') + (fillText ? ` ${fillText}.` : '');
+    case 'done': {
+      if (fillText) return fillText + '.' + (fa.tries ? ` <span class="muted">` +
+        `(after ${fmt(fa.tries, 0)} failed placement attempt${fa.tries === 1
+          ? '' : 's'} — see the run for why)</span>` : '');
+      if (s.verdict === 'pass') {
+        const ov = s.overridden_by || [];
+        return 'No trade was placed.' + (ov.length ? ' You overrode this ' +
+          'verdict — ' + ov.map(o => runLink(o.id, 'see the override run'))
+            .join(', ') + '.' : '');
+      }
+      return (ap ? apText + '. ' : '') + 'Finished without a fill.' + failNote;
+    }
+    case 'failed': return `<span class="bad">Failed: ${
+      esc((s.failure || {}).reason || 'see details below')}</span>`;
+    case 'rejected': return 'You rejected the trade' +
+      (s.ended && s.ended.reason ? ` (${esc(s.ended.reason)})` : '') + '.';
+    case 'expired': return 'Expired' + (s.ended && s.ended.reason
+      ? `: ${esc(s.ended.reason)}` : ' before it was approved') + '.';
+  }
+  return '';
+}
+
+/* ── list ──────────────────────────────────────────────────────────── */
+let lastSig = null, DETAIL = {}, STAMP = {}, RUNS = [];
+const OPEN = new Set();        // which <details> are open, across re-renders
+function keep(el) {
+  if (el.open) OPEN.add(el.dataset.k); else OPEN.delete(el.dataset.k);
+}
+const isOpen = k => OPEN.has(k) ? 'open' : '';
 
 async function refresh() {
   const runs = await api('/api/runs');
-  // only rebuild the table when something actually changed — a blind
-  // re-render every 8s was collapsing whatever you had open
+  RUNS = runs;
+  // only rebuild when something actually changed — a blind re-render every
+  // 8s was collapsing whatever you had open
   const sig = runs.map(r => r.id + r.state + r.updated_at).join('|');
   if (sig !== lastSig) {
     lastSig = sig;
-    document.getElementById('runs').innerHTML = '<table><tr><th>id</th>' +
-      '<th>kind</th><th>ticker</th><th>state</th><th>updated</th></tr>' +
-      // the work-item id embeds the ticker, so it is attacker-shaped data:
-      // jsArg for the inline handler, esc for the id attributes
-      runs.map(r => `<tr class="clickable ${openId === r.id ? 'sel' : ''}"
-        onclick="toggle(${jsArg(r.id)})">
-        <td>${esc(r.id)}</td><td>${esc(r.kind)}</td><td>${esc(r.ticker)}</td>
-        <td class="${cls[r.state] || ''}">${esc(r.state)}</td>
-        <td class="muted">${ts(r.updated_at)}</td></tr>
-        <tr id="d-${esc(r.id)}" style="display:${openId === r.id ? '' : 'none'}">
-        <td colspan="5" id="dc-${esc(r.id)}"></td></tr>`).join('') + '</table>';
-    if (openId) render(openId);          // restore the open panel as it was
+    for (const r of runs) {                  // a changed run's cached detail
+      if (STAMP[r.id] && STAMP[r.id] !== r.updated_at) delete DETAIL[r.id];
+      STAMP[r.id] = r.updated_at;
+    }
+    document.getElementById('runs').innerHTML = runs.length ? runs.map(r =>
+      // ids and tickers are attacker-shaped data: jsArg for the inline
+      // handler, esc for the id attributes
+      `<div class="runcard ${openId === r.id ? 'sel' : ''}" id="d-${esc(r.id)}">
+        <div class="runhead" onclick="toggle(${jsArg(r.id)})">
+          <div class="runtitle">${stockName(r)} ${badge(r)}
+            <span class="when">${when(r.created_at)}</span></div>
+          <p class="story">${origin(r)} ${verdict(r)}</p>
+          <p class="next">${nextStep(r)}</p>
+        </div>
+        <div class="runbody" id="dc-${esc(r.id)}"
+          style="display:${openId === r.id ? '' : 'none'}"></div>
+      </div>`).join('')
+      : '<p class="muted">No runs yet — start one above.</p>';
+    if (openId) detail(openId);              // restore the open panel
   }
   const f = await api('/api/feed');
-  document.getElementById('feed').textContent = f.events.slice(-60).reverse()
-    .map(e => `${ts(e.ts)}  ${e.item_id}  ${e.actor}: ` +
-      `${e.from_state || ''}→${e.to_state}`).join('\n');
+  renderFeed(f.events || []);
 }
 function toggle(id) {
   openId = openId === id ? null : id;
-  lastSig = null;                        // force one rebuild for the highlight
-  document.querySelectorAll('[id^="d-"]').forEach(el =>
-    el.style.display = 'none');
-  if (openId) {
-    document.getElementById('d-' + id).style.display = '';
-    detail(id);
-  }
+  lastSig = null;
+  refresh().then(() => {
+    if (openId) {
+      const el = document.getElementById('d-' + openId);
+      if (el) el.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+    }
+  });
 }
 async function detail(id) {
   if (!DETAIL[id]) {
     const el = document.getElementById('dc-' + id);
-    if (el) el.innerHTML = '<span class="muted">loading…</span>';
+    if (el && !el.innerHTML) el.innerHTML = '<p class="muted">loading…</p>';
     try { DETAIL[id] = await api('/api/run-detail?id=' +
       encodeURIComponent(id)); }
     catch (e) { if (el) el.innerHTML = `<p class="bad">${esc(e.message)}</p>`;
@@ -78,38 +282,201 @@ async function detail(id) {
   }
   render(id);
 }
+
+/* ── one run, opened ───────────────────────────────────────────────── */
+const SIGNAL_TONE = {bullish: 'ok', bearish: 'bad', neutral: 'muted',
+  buy: 'ok', sell: 'bad', pass: 'warn'};
+function stepHtml(id, st) {
+  const k = `step:${id}:${st.agent}`;
+  const sig = st.signal ? `<span class="badge ${SIGNAL_TONE[st.signal] ||
+    'muted'}">${esc(st.signal === 'pass' ? 'Pass' :
+      (VERDICT[st.signal] || st.signal.charAt(0).toUpperCase() +
+      st.signal.slice(1)))}</span>` : '';
+  const conv = st.conviction != null ? `<span class="muted">${
+    st.conviction < 0.4 ? 'low' : st.conviction < 0.7 ? 'medium' : 'high'
+    } conviction (${fmt(st.conviction, 2)})</span>` : '';
+  const one = st.status === 'error'
+    ? `<span class="bad">Didn't finish: ${esc(st.error || 'error')}</span>`
+    : esc(st.summary || (st.points || [])[0] || 'No conclusion recorded.');
+  const more = (st.points || []).length || st.has_report;
+  return `<details class="step" data-k="${esc(k)}" ontoggle="keep(this)"
+      ${isOpen(k)}>
+    <summary><span class="lbl">${esc(st.label)}</span>${sig} ${conv}
+      ${more ? '<span class="muted" style="float:right">▸ more</span>' : ''}
+      <div class="one">${one}</div></summary>
+    ${(st.points || []).length ? '<ul>' + st.points.map(p =>
+      `<li>${esc(p)}</li>`).join('') + '</ul>' : ''}
+    ${st.has_report ? `<button class="ghost" onclick="report(${jsArg(id)},
+      ${jsArg(st.agent)}, this)">Read the full report</button>
+      <div class="rep"></div>` : ''}
+  </details>`;
+}
+async function report(id, agent, btn) {
+  const box = btn.nextElementSibling;
+  if (box.innerHTML) { box.innerHTML = ''; btn.textContent =
+    'Read the full report'; return; }
+  box.innerHTML = '<p class="muted">loading…</p>';
+  try {
+    const n = await api(`/api/agent-narrative?agent=${encodeURIComponent(agent)
+      }&work_item=${encodeURIComponent(id)}`);
+    if (n.error) throw new Error(n.error);
+    box.innerHTML = `<div class="narr">${mdLite(n.report || '')}</div>` +
+      (n.transcript ? `<details class="more"><summary>how it got there
+        (working notes)</summary><div class="narr">${mdLite(n.transcript)}
+        </div></details>` : '');
+    btn.textContent = 'Hide the full report';
+  } catch (e) { box.innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+}
 function render(id) {
   const el = document.getElementById('dc-' + id);
   const d = DETAIL[id];
   if (!el || !d) return;
+  const s = d.story || {};
   let html = '';
-  const errEv = (d.events || []).filter(e => e.payload &&
-    e.payload.includes('error')).slice(-1)[0];
-  if (d.state === 'failed' && errEv) {
-    let why = errEv.payload;
-    try { why = (JSON.parse(errEv.payload).errors || [why]).join('\n'); }
-    catch {}
-    html += `<p class="bad">why it failed:</p><pre>${esc(why)}</pre>`;
+
+  // why: the arbiter's key reasons
+  if ((s.reasons || []).length) html += `<h3>${s.origin === 'override'
+    ? "What the desk said (you overrode it)" : 'Key reasons'}</h3>
+    <ul class="reasons">${s.reasons.map(x => `<li>${esc(x)}</li>`).join('')}
+    </ul>`;
+
+  // the plan, when there is one
+  const L = s.levels || {};
+  if (s.verdict && s.verdict !== 'pass' && (L.entry_low != null ||
+      L.stop_loss != null)) {
+    const entry = L.entry_low === L.entry_high || L.entry_high == null
+      ? money(L.entry_low, s.currency)
+      : `${fmt(L.entry_low)}–${money(L.entry_high, s.currency)}`;
+    html += `<h3>The plan</h3><p class="levels">
+      <span>${esc(VERDICT[s.verdict] || s.verdict)} at <b>${entry}</b></span>
+      <span>give up (stop) at <b>${money(L.stop_loss, s.currency)}</b></span>
+      <span>take profit at <b>${money(L.take_profit, s.currency)}</b></span>
+      </p>`;
   }
-  if (d.thesis) html += `<p><b>Thesis</b>: ${esc(d.thesis.direction)}
-    · conviction ${fmt(d.thesis.conviction)} · entry
-    ${fmt(d.thesis.entry_low)}–${fmt(d.thesis.entry_high)} · stop
-    ${fmt(d.thesis.stop_loss)} · target ${fmt(d.thesis.take_profit)}
-    ${esc(d.thesis.currency || '')}</p>`;
-  if ((d.agent_runs || []).length) html += '<p><b>LLM calls</b>: ' +
-    d.agent_runs.map(a => `${esc(a.agent_id)} (${esc(a.status)}, $${
-      fmt(a.cost_usd, 4)})`).join(' · ') + '</p>';
-  if ((d.orders || []).length) html += '<p><b>Orders</b>: ' +
-    d.orders.map(o => `${esc(o.side)} ${fmt(o.qty)} — ${esc(o.status)}`)
-      .join(' · ') + '</p>';
-  if (d.summary) html += `<details id="sum-${esc(id)}" ${summaryOpen ? 'open' : ''}
-    ontoggle="summaryOpen=this.open">
-    <summary class="muted">run summary</summary>
-    <div class="narr">${mdLite(d.summary)}</div></details>`;
-  html += `<p class="muted" style="font-size:.72rem">events: ${
-    esc((d.events || []).map(e => `${e.from_state || ''}→${e.to_state}`)
-      .join(', '))}</p>`;
+
+  // what happened, in order
+  if ((d.timeline || []).length) html += '<h3>What happened</h3><ul class="tl">' +
+    d.timeline.map(t => `<li class="${esc(t.tone)}"><span class="t">${
+      when(t.ts)}</span>${esc(t.text)}</li>`).join('') + '</ul>';
+
+  // placement retries, collapsed
+  const fa = s.failed_attempts || {};
+  if (fa.tries || fa.rows) {
+    const k = `fails:${id}`;
+    html += `<details class="more" data-k="${esc(k)}" ontoggle="keep(this)"
+      ${isOpen(k)}><summary>${fmt(fa.tries || fa.rows, 0)} failed placement
+      attempt${(fa.tries || fa.rows) === 1 ? '' : 's'} between ${
+      when(fa.first_ts)} and ${when(fa.last_ts)} — never reached the broker
+      </summary><ul>${(fa.reasons || []).map(x => `<li>${esc(x.reason)} —
+      ${fmt(x.count, 0)}× <span class="muted">(${esc(x.raw)})</span></li>`)
+      .join('')}</ul><p class="muted">${fmt(fa.rows, 0)} refused order rows
+      with no broker id are hidden.</p></details>`;
+  }
+
+  // orders that reached the broker
+  if ((s.orders || []).length) html += '<h3>Orders at the broker</h3><ul>' +
+    s.orders.map(o => `<li>${esc(o.side === 'buy' ? 'Buy' : 'Sell')} ${
+      shares(o.qty)}${o.limit_price != null ? ` at ${money(o.limit_price,
+      s.currency)}` : ''} on ${esc(o.account)} — ${esc(String(o.status)
+      .replace(/_/g, ' '))}</li>`).join('') + '</ul>';
+
+  // the pipeline, step by step
+  const steps = d.steps || [];
+  if (steps.length) {
+    const stage = {fundamental: 'Research', technical: 'Research',
+      news: 'Research', bull: 'Debate', bear: 'Debate', arbiter: 'Decision'};
+    let last = null;
+    html += '<h3>How Claire got there</h3><div class="steps">' +
+      steps.map(st => {
+        const h = stage[st.agent] !== last
+          ? `<div class="stage">${esc(stage[st.agent] || '')}</div>` : '';
+        last = stage[st.agent];
+        return h + stepHtml(id, st);
+      }).join('') + '</div>';
+  } else if (s.origin === 'override' && s.override_of) {
+    html += `<h3>How Claire got there</h3><p>This run is your override, so
+      it has no research of its own — the research is on ${
+      runLink(s.override_of, 'the original run')}.</p>`;
+  }
+
+  if (d.summary) {
+    const k = `sum:${id}`;
+    html += `<details class="more" data-k="${esc(k)}" ontoggle="keep(this)"
+      ${isOpen(k)}><summary>run summary (the recorder's write-up)</summary>
+      <div class="narr">${mdLite(d.summary)}</div></details>`;
+  }
+
+  // internals, kept but out of the way
+  const k = `tech:${id}`;
+  const cost = (d.agent_runs || []).reduce((a, r) => a + (r.cost_usd || 0), 0);
+  html += `<details class="tech" data-k="${esc(k)}" ontoggle="keep(this)"
+    ${isOpen(k)}><summary>details for developers</summary>
+    <p class="muted">run id <code>${esc(d.id)}</code> · type ${esc(d.kind)}
+      · state ${esc(d.state)} · trigger ${esc(d.trigger || '—')}
+      ${d.override_of ? ` · override of <code>${esc(d.override_of)}</code>`
+        : ''}</p>
+    ${s.failure ? `<p class="bad">raw errors:</p><pre>${esc(
+      (s.failure.raw || []).join('\n'))}</pre>` : ''}
+    ${(d.agent_runs || []).length ? `<p><b>LLM calls</b> ($${fmt(cost, 4)}
+      total)</p><table><tr><th>agent</th><th>model</th><th>status</th>
+      <th>tokens in/out</th><th>cost</th><th>started</th></tr>${
+      d.agent_runs.map(a => `<tr><td>${esc(a.agent_id)}</td><td>${
+        esc(a.model)}</td><td>${esc(a.status)}</td><td>${fmt(a.tokens_in, 0)}
+        / ${fmt(a.tokens_out, 0)}</td><td>$${fmt(a.cost_usd, 4)}</td><td>${
+        esc(ts(a.started_at))}</td></tr>`).join('')}</table>` : ''}
+    ${(d.orders || []).length ? `<p><b>order rows</b>: ${d.orders.length}</p>
+      <pre>${esc(d.orders.map(o => `${o.id}  ${o.side} ${o.qty}  ${o.status}` +
+        `  broker=${o.broker_order_id || '-'}`).join('\n'))}</pre>` : ''}
+    ${(d.narratives || []).length ? `<p><b>files</b>: ${
+      esc(d.narratives.join(', '))}</p>` : ''}
+    <p><b>events</b></p><pre>${esc((d.events || []).map(e =>
+      `${ts(e.ts)}  ${e.actor}: ${e.from_state || ''}→${e.to_state}` +
+      (e.payload ? '  ' + e.payload : '')).join('\n'))}</pre>
+  </details>`;
   el.innerHTML = html || '<span class="muted">no detail</span>';
+}
+
+/* ── activity feed: sentences, repeats collapsed ───────────────────── */
+const FEED = {running: 'research started', done: 'finished',
+  failed: 'failed', awaiting_approval: 'waiting for your approval',
+  approved: 'you approved the trade', approve_retry: 'retried sending the order',
+  resume_failed: 'sending the order failed', executing: 'order at the broker',
+  rejected: 'you rejected the trade', expired: 'expired',
+  override: 'you overrode the verdict', amended: 'you changed the levels'};
+function renderFeed(events) {
+  document.getElementById('rawfeed').textContent = events.slice(-60).reverse()
+    .map(e => `${ts(e.ts)}  ${e.item_id}  ${e.actor}: ` +
+      `${e.from_state || ''}→${e.to_state}`).join('\n');
+  const byId = Object.fromEntries(RUNS.map(r => [r.id, r]));
+  const rows = [], lastOf = {};
+  for (const e of events) {
+    if (String(e.to_state || '').startsWith('authorize:')) continue;
+    const said = FEED[e.to_state] || String(e.to_state || '').replace(/_/g, ' ');
+    // a retry loop is one line, not a hundred — even when two runs' loops
+    // interleave, each run's repeats fold into its own line
+    const prev = lastOf[e.item_id];
+    const retry = ['approve_retry', 'resume_failed'].includes(e.to_state);
+    if (prev && (prev.said === said || (retry && prev.retry))) {
+      prev.n += e.to_state === 'resume_failed' ? 1 : 0; prev.ts = e.ts;
+      if (retry) prev.said = 'sending the order failed';
+      continue;
+    }
+    const row = {id: e.item_id, said, ts: e.ts, retry,
+      n: e.to_state === 'resume_failed' ? 1 : 0};
+    rows.push(row); lastOf[e.item_id] = row;
+  }
+  rows.sort((x, y) => x.ts - y.ts);
+  const name = id => {
+    const r = byId[id];
+    if (r) return r.ticker;
+    const m = /^wi_\d{4}-\d{2}-\d{2}_([^_]+)_/.exec(id || '');
+    return m ? m[1] : id;
+  };
+  document.getElementById('feed').innerHTML = rows.slice(-40).reverse()
+    .map(x => `<li><span class="t">${when(x.ts)}</span><b>${esc(name(x.id))}
+      </b>${byId[x.id] && byId[x.id].kind === 'override' ? ' (override)' : ''}
+      — ${esc(x.said)}${x.n > 1 ? ` (${fmt(x.n, 0)} times)` : ''}</li>`)
+    .join('') || '<li class="muted">nothing yet</li>';
 }
 refresh(); setInterval(refresh, 8000);
 </script>

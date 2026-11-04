@@ -68,22 +68,61 @@ what = sys.argv[1]
 if what == "inflight":
     # a run that is mid-pipeline, an approval already authorised, or an order
     # the venue has not confirmed — all of these are "a trade in progress"
-    runs = conn.execute(
-        "SELECT COUNT(*) c FROM work_items WHERE state IN"
-        " ('running','executing','approved')").fetchone()["c"]
+    # ...except an approval whose placement was REFUSED: it is parked for
+    # the human (Approvals page → retry/cancel), survives a restart, and
+    # would otherwise hold a graceful stop for the whole drain timeout
+    from app import approvals
+    parked = [f["id"] for f in approvals.failed_approvals(conn)
+              if not f["auto_retry"]]
+    ph = ",".join("?" * len(parked)) or "''"
     pend = conn.execute(
         "SELECT COUNT(*) c FROM work_items WHERE token_state='pending_resume'"
-    ).fetchone()["c"]
+        f" AND id NOT IN ({ph})", parked).fetchone()["c"]
+    # An unfilled order at the in-process sim is lost on restart, so it holds
+    # a graceful stop. An order at a REAL venue (Saxo) lives at the broker —
+    # the custodian re-reads its fills after the restart — so it does not:
+    # it would otherwise hold every restart until the market closes.
+    import os
+    sim_exec = os.environ.get("SAXO_SIM_EXECUTION")
+    if sim_exec is None:                  # bin/claire need not have sourced it
+        try:
+            for line in open("etc/claire.env"):
+                if line.startswith("SAXO_SIM_EXECUTION="):
+                    sim_exec = line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+    venue = ["saxo_live"] + (["saxo"] if (sim_exec or "").lower()
+                             == "enabled" else [])
+    vh = ",".join("?" * len(venue))
+    at_venue = conn.execute(
+        "SELECT COUNT(*) c FROM orders o JOIN broker_accounts a"
+        " ON a.id=o.account_id WHERE o.status IN ('placed','partially_filled')"
+        f" AND o.broker_order_id IS NOT NULL AND a.broker IN ({vh})",
+        venue).fetchone()["c"]
+    waiting_items = [r["work_item_id"] for r in conn.execute(
+        "SELECT DISTINCT o.work_item_id FROM orders o JOIN broker_accounts a"
+        " ON a.id=o.account_id WHERE o.status IN ('placed','partially_filled')"
+        f" AND o.broker_order_id IS NOT NULL AND a.broker IN ({vh})",
+        venue) if r["work_item_id"]]
+    parked += waiting_items              # executing = waiting on that order
+    ph = ",".join("?" * len(parked)) or "''"
+    runs = conn.execute(
+        "SELECT COUNT(*) c FROM work_items WHERE state IN"
+        f" ('running','executing','approved') AND id NOT IN ({ph})",
+        parked).fetchone()["c"]
     orders = conn.execute(
         "SELECT COUNT(*) c FROM orders WHERE status NOT IN"
-        " ('filled','cancelled','rejected','expired')").fetchone()["c"]
+        " ('filled','cancelled','rejected','expired')").fetchone()["c"] - at_venue
     total = runs + pend + orders
     if len(sys.argv) > 2 and sys.argv[2] == "total":
         print(total)
     elif len(sys.argv) > 2 and sys.argv[2] == "text":
         bits = [f"{n} {label}" for n, label in
                 ((runs, "run(s) mid-pipeline"), (orders, "unfilled order(s)"),
-                 (pend, "authorised-not-acked")) if n]
+                 (pend, "authorised-not-acked"),
+                 (len(parked) - len(waiting_items),
+                  "refused trade(s) waiting for you on Approvals"),
+                 (at_venue, "order(s) working at Saxo")) if n]
         print(", ".join(bits) or "nothing")
     else:
         print(total)
@@ -291,6 +330,15 @@ case "${1:-}" in
   stop)    shift; cmd_stop "$@" ;;
   restart) shift; cmd_stop "$@" && cmd_start ;;
   status)  shift; cmd_status ;;
+  live)    shift
+           # real-money switch (DESIGN.md §22): status/setup/arm/disarm/limits
+           set -a; [ -f "$ENV_FILE" ] && . "$ENV_FILE"; set +a
+           cd "$ROOT" && exec "$PY" -m app.live_cli "$@" ;;
+  legs-backfill) shift
+           # one-time: put Saxo's resting stop/target legs on the book
+           # (DESIGN.md §11a). Read-only at Saxo; back up desk.db first.
+           set -a; [ -f "$ENV_FILE" ] && . "$ENV_FILE"; set +a
+           cd "$ROOT" && exec "$PY" -m app.legs_cli "$@" ;;
   *) cat <<EOF
 Claire desk control
 
@@ -300,6 +348,11 @@ Claire desk control
   claire stop --kill           stop now, abandoning anything in flight
   claire restart [--kill]      stop then start
   claire status                what is running, and what is in flight
+  claire live status|setup|arm|disarm|limits
+                               the REAL-MONEY Saxo switch — off by default
+  claire legs-backfill [--dry-run] [--yes]
+                               adopt Saxo's resting stop/target legs onto
+                               the book (one-time; read-only at Saxo)
 
 Resetting the book is deliberately NOT in this script — see bin/claire-reset.
 EOF

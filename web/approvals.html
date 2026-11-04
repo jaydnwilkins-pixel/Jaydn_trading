@@ -6,6 +6,8 @@
   <p class="muted">Nothing trades without you. Every decision below shows the
   complete evidence the desk assembled — each agent's report, the debate, and
   the arbiter's verdict — so you approve on the record, not on a headline.</p>
+  <div id="live-banner"></div>
+  <div id="failed"></div>
   <div id="cards">loading…</div>
 
   <h2>Recently decided — no action needed</h2>
@@ -26,7 +28,208 @@ async function refresh() {
 }
 function pct(v) { return v == null ? '—' : fmt(v) + '%'; }
 
+function renderLive() {
+  // shown only while real-money trading is ARMED (DESIGN.md §22)
+  const lv = DATA.live || {}, el = document.getElementById('live-banner');
+  if (!lv.armed) { el.innerHTML = ''; return; }
+  const lim = lv.limits || {};
+  const used = Object.values(lv.today || {})[0] || {};
+  el.innerHTML = `<div class="card" style="border:2px solid #c0392b">
+    <b class="bad">⚠ LIVE TRADING ARMED</b> — approvals on <b>saxo_live</b>
+    place REAL orders on your Saxo account. Limits: ${esc(lim.max_order_base)}
+    per order · ${esc(lim.max_orders_per_day)} orders/day ·
+    ${esc(lim.max_daily_notional_base)} per day. Today:
+    ${esc(used.orders ?? 0)} orders, ${fmt(used.notional_base ?? 0)} placed.
+    <button class="reject" onclick="disarmLive()">Disarm live trading</button>
+  </div>`;
+}
+
+async function disarmLive() {
+  try { await api('/api/live-disarm', {reason: 'disarmed from Approvals'});
+        toast('live trading disarmed ✓'); }
+  catch (e) { toast(e.message, false); }
+  refresh();
+}
+
+/* Approved, sent, refused (by the exchange, sizing, a limit…). Nothing is
+   retried behind your back. Here you EDIT the order — levels, size, account,
+   trailing floor — check it with Saxo (a precheck places nothing), then
+   retry; or cancel it, after which a PASS can be overridden again. */
+function renderFailed() {
+  const f = DATA.failed || [], el = document.getElementById('failed');
+  if (!f.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<h2>Approved but not placed — needs you</h2>` +
+    f.map(retryCard).join('');
+  f.forEach(x => { if (!(x.id in CTX)) loadCtx(x.id); else updRetry(x.id); });
+}
+
+function retryCard(x) {
+  const t = x.thesis || {}, ap = x.approval || {}, id = esc(x.id);
+  const sell = t.direction === 'sell';
+  const mins = Math.floor((x.expires_in_s || 0) / 60);
+  const val = (k, v) => FORM['rt' + k + '-' + x.id] ?? (v ?? '');
+  const opts = (DATA.accounts || []).map(a => `<option value="${esc(a.broker)}"
+      ${a.disabled ? 'disabled' : ''}
+      ${a.broker === (FORM['rtbroker-' + x.id] ?? ap.broker) ? 'selected' : ''}>${
+      a.environment === 'live' ? '⚠ ' : ''}${esc(a.label || a.broker)}${
+      a.disabled ? ' — ' + esc(a.disabled) : ''}</option>`).join('');
+  const num = (k, v, w = 95, step = '0.01') => `<input id="rt${k}-${id}"
+      type="number" step="${step}" min="0" style="width:${w}px"
+      value="${esc(val(k, v))}" oninput="updRetry(${jsArg(x.id)})">`;
+  return `<div class="card" style="border:1px solid var(--warn)">
+    <p><b class="warn">⚠ ${esc((t.direction || '').toUpperCase())}
+      ${esc(x.ticker)}</b> ${x.kind === 'override' ? '(your override)' : ''}</p>
+    <p class="bad" style="font-size:.85rem">Refused ${ago(x.failed_at)}
+      (${esc(x.attempts)} attempt${x.attempts === 1 ? '' : 's'}):
+      ${esc(x.error || 'unknown error')}</p>
+    <p style="font-size:.8rem">${x.auto_retry
+      ? '<span class="warn">Temporary failure (venue or network) — the desk retries this automatically every 5 min; you can also retry now.</span>'
+      : '<b>Refused — this waits for you.</b> Nothing is re-sent automatically.'}
+      ${hintFor(x.error)}</p>
+    <div id="ovctx-${id}">${ctxTable(CTX[x.id])}</div>
+    <h3 style="font-size:.9rem;margin:.5rem 0 .2rem">Edit the order</h3>
+    <div class="row" style="flex-wrap:wrap;gap:.6rem">
+      <label>entry ${num('entry', t.entry_high || t.entry_low)}</label>
+      <label>stop ${num('stop', t.stop_loss)}</label>
+      <label>target ${num('target', t.take_profit)}</label>
+      <button type="button" onclick="retrySuggest(${jsArg(x.id)})">use suggestion</button>
+    </div>
+    <div class="row" style="flex-wrap:wrap;gap:.6rem;margin-top:.4rem">
+      ${sell ? `<label>shares ${num('qty', ap.qty, 90, '1')}</label>`
+             : `<label>size ${num('size', ap.size_base, 100, '1')}</label>`}
+      <label>trailing floor ${num('trail', ap.trail_pct, 60, '0.5')}%</label>
+      <select id="rtbroker-${id}" onchange="updRetry(${jsArg(x.id)})">${opts}</select>
+    </div>
+    <p id="rthint-${id}" style="font-size:.8rem;margin:.4rem 0"></p>
+    <p id="rtcheck-${id}" style="font-size:.82rem;margin:.2rem 0"></p>
+    <p class="muted" style="font-size:.78rem">The approval stays valid for
+      <b>${mins} min</b> more, then expires (stale prices should not trade).
+      Retry re-checks the live price, cash and limits as if new.</p>
+    <div class="row">
+      <button type="button" onclick="checkTrade(${jsArg(x.id)})">✓ Check with Saxo</button>
+      <button onclick="retryTrade(${jsArg(x.id)})">↻ Retry with these values</button>
+      <button class="reject" onclick="cancelTrade(${jsArg(x.id)})">✖ Cancel this trade</button>
+    </div></div>`;
+}
+
+/* plain-language advice for the refusals Saxo actually returns */
+function hintFor(err) {
+  const e = err || '';
+  if (e.includes('TooFarFromEntryOrder')) return `<br><b>What it means:</b>
+    Saxo will not accept a stop-loss or take-profit this far from the entry.
+    Bring the target (and if needed the stop) closer, then press
+    <i>Check with Saxo</i> before retrying.`;
+  if (e.includes('TooFarFromMarket') || e.includes('PriceExceedsAggressive'))
+    return `<br><b>What it means:</b> the entry is too far from where the
+      stock trades now — move it closer to the last price.`;
+  if (e.includes('whole multiple')) return `<br><b>What it means:</b> the order
+    was sized in a fraction of a share; this is fixed — just retry.`;
+  if (e.includes('InsufficientCash') || e.includes('holds')) return `<br>
+    <b>What it means:</b> not enough cash for this size — reduce the size.`;
+  return '';
+}
+
+function retryValues(id) {
+  const g = k => (document.getElementById(`rt${k}-${id}`) || {}).value;
+  const n = k => g(k) === '' || g(k) == null ? null : Number(g(k));
+  return {entry: n('entry'), stop: n('stop'), target: n('target'),
+          size_base: n('size'), qty: n('qty'), trail_pct: n('trail'),
+          broker: g('broker')};
+}
+
+function retrySuggest(id) {
+  const v = retryValues(id), L = (CTX[id] || {}).levels || {};
+  const x = (DATA.failed || []).find(f => f.id === id) || {};
+  if (!v.entry || !L.atr14) return;
+  const risk = 2 * L.atr14, buy = (x.thesis || {}).direction !== 'sell';
+  document.getElementById('rtstop-' + id).value = n2(buy ? v.entry - risk : v.entry + risk);
+  document.getElementById('rttarget-' + id).value = n2(buy ? v.entry + 2 * risk : v.entry - 2 * risk);
+  updRetry(id);
+}
+
+function updRetry(id) {
+  const box = document.getElementById('ovctx-' + id);
+  if (box) box.innerHTML = ctxTable(CTX[id]);
+  const hint = document.getElementById('rthint-' + id);
+  if (!hint) return;
+  const x = (DATA.failed || []).find(f => f.id === id) || {};
+  const buy = (x.thesis || {}).direction !== 'sell';
+  const v = retryValues(id), L = (CTX[id] || {}).levels || {};
+  const parts = [];
+  if (v.entry && L.atr14) {
+    const r = 2 * L.atr14;
+    parts.push(`<span class="muted">Suggestion: stop <b>${n2(buy ? v.entry - r : v.entry + r)}</b>
+      · target <b>${n2(buy ? v.entry + 2 * r : v.entry - 2 * r)}</b>
+      (2 × daily move ${fmt(L.atr14, 2)}, 2:1 reward:risk)</span>`);
+  }
+  if (v.entry && v.stop) {
+    const wrong = buy ? v.stop >= v.entry : v.stop <= v.entry;
+    const risk = Math.abs(v.entry - v.stop) / v.entry * 100;
+    const rew = v.target ? Math.abs(v.target - v.entry) / v.entry * 100 : null;
+    parts.push(wrong ? `<b class="bad">stop must be ${buy ? 'below' : 'above'} the entry</b>`
+      : `Your levels: stop ${fmt(risk, 1)}% away${rew != null
+        ? ` · target ${fmt(rew, 1)}% away · reward:risk ${fmt(rew / risk, 1)} : 1` : ''}`);
+  }
+  const p = ((CTX[id] || {}).quote || {}).price;
+  if (buy && v.size_base && v.entry) {
+    const acct = (DATA.accounts || []).find(a => a.broker === v.broker) || {};
+    const px = p || v.entry;
+    const sh = acct.whole_shares ? Math.floor(v.size_base / px)
+      : Math.floor(v.size_base / px * 10) / 10;
+    parts.push(`≈ <b>${sh} shares</b> at ~${fmt(px, 2)}`);
+  }
+  hint.innerHTML = parts.join('<br>');
+}
+
+async function checkTrade(id) {
+  const out = document.getElementById('rtcheck-' + id);
+  out.innerHTML = '<span class="muted">asking Saxo…</span>';
+  try {
+    const r = await api('/api/trade-check', {work_item_id: id, ...retryValues(id)});
+    out.innerHTML = r.ok === null ? `<span class="muted">${esc(r.note)}</span>`
+      : r.ok ? `<b class="ok">✔ Saxo would accept this:</b> ${esc(r.amount)} shares
+          @ ${esc(r.price)}${(r.legs || []).map(l => ` · ${l.type === 'StopIfTraded'
+            ? 'stop' : 'target'} ${esc(l.price)}`).join('')} · est. cash
+          ${fmt(r.estimated_cash, 2)} ${esc(r.currency || '')}`
+      : `<b class="bad">✖ Saxo would refuse:</b> ${esc(r.error)}`;
+  } catch (e) { out.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
+}
+
+async function retryTrade(id) {
+  const v = retryValues(id);
+  const acct = (DATA.accounts || []).find(a => a.broker === v.broker) || {};
+  const body = {work_item_id: id, ...v};
+  const what = `${v.entry} entry, stop ${v.stop ?? '—'}, target ${v.target ?? '—'}, ` +
+    `${v.size_base ? v.size_base + ' ' + (acct.ccy || '') : (v.qty || 0) + ' shares'} on ` +
+    `${acct.label || v.broker}`;
+  if (acct.environment === 'live') {
+    const typed = prompt(`⚠ REAL MONEY.\n${what}\n\nType LIVE to retry:`);
+    if (typed !== 'LIVE') return;
+    body.confirm_live = 'LIVE';
+  } else if (!confirm(`Retry with: ${what}?`)) return;
+  const out = document.getElementById('rtcheck-' + id);
+  try {
+    await api('/api/trade-retry', body);
+    Object.keys(FORM).forEach(k => { if (k.endsWith('-' + id)) delete FORM[k]; });
+    toast('sent ✓');
+  } catch (e) {
+    if (out) out.innerHTML = `<b class="bad">${esc(e.message)}</b>`;
+    toast(e.message, false);
+  }
+  refresh();
+}
+
+async function cancelTrade(id) {
+  if (!confirm('Cancel this trade? You can override the PASS again later.')) return;
+  try { await api('/api/trade-cancel', {work_item_id: id}); toast('cancelled'); }
+  catch (e) { toast(e.message, false); }
+  refresh();
+}
+
 function render() {
+  saveForm(CARD_INPUTS);              // before the cards are rebuilt
+  renderLive();
+  renderFailed();
   const el = document.getElementById('cards');
   el.innerHTML = DATA.cards.length === 0
     ? `<div class="card"><p class="muted">Nothing awaiting your decision.
@@ -35,13 +238,47 @@ function render() {
     : DATA.cards.map(card).join('');
   DATA.cards.forEach(a => updEst(a.id));
   renderDecided();
+  restoreForm();
+  DATA.cards.forEach(a => {            // live price for sells & your trades
+    if (!showsCtx(a)) return;
+    if (!(a.id in CTX)) loadCtx(a.id); else loadCtx(a.id, true);
+    prefillSize(a);
+  });
+  OPEN.forEach(id => loadCtx(id, true));   // refresh the live price table
+  (DATA.failed || []).forEach(x => { if (x.id in CTX) loadCtx(x.id, true); });
+}
+
+/* The page refreshes itself; without this, a refresh closed the verdict you
+   had open and wiped the override levels you had typed. */
+const OPEN = new Set(), FORM = {}, CTX = {};
+/* the approval cards' own inputs too — but only when saved BEFORE the cards
+   are rebuilt (render does that); renderDecided runs after the rebuild, when
+   those inputs hold their defaults again */
+const CARD_INPUTS = ', [id^="qty-"], [id^="size-"], [id^="trail-"], [id^="broker-"]';
+function saveForm(extra = '') {
+  document.querySelectorAll('[id^="ov"], [id^="rt"]' + extra).forEach(el => {
+    if ('value' in el && el.id) FORM[el.id] = el.value;
+  });
+}
+function restoreForm() {
+  Object.entries(FORM).forEach(([id, v]) => {
+    const el = document.getElementById(id);
+    if (el && 'value' in el) el.value = v;
+  });
+  (DATA.decided || []).forEach(r => { if (OPEN.has(r.id)) updOverride(r.id); });
+}
+function onToggle(el, id) {
+  if (el.open) { OPEN.add(id); loadCtx(id); } else OPEN.delete(id);
 }
 
 function renderDecided() {
+  saveForm();
   const d = DATA.decided || [];
   document.getElementById('decided').innerHTML = d.length === 0
     ? '<p class="muted">Nothing concluded in the last 7 days.</p>'
-    : d.map(r => `<details class="card" style="padding:.6rem .9rem">
+    : d.map(r => `<details class="card" style="padding:.6rem .9rem"
+        data-id="${esc(r.id)}" ${OPEN.has(r.id) ? 'open' : ''}
+        ontoggle="onToggle(this, ${jsArg(r.id)})">
         <summary><b>${esc(r.direction || '?').toUpperCase()}</b>
           ${esc(r.ticker)} · conviction ${fmt(r.conviction)} ·
           <span class="muted">${esc(r.state)} ${ago(r.at)}</span>
@@ -64,73 +301,270 @@ function renderDecided() {
 }
 
 /* Overturning a PASS. The desk declined, so it never priced the trade —
-   there is no entry or stop to inherit and you have to author them. The
-   thesis validator rejects a stop that is not below your entry, which is the
-   same guard the agents' own theses pass through. */
+   you author the levels, with the live price and reference levels in front
+   of you. Suggestions are a stated rule (2 × ATR stop, 2:1 target), never
+   filled in silently. The thesis validator still checks whatever you send. */
+const n2 = v => v == null || isNaN(v) ? null : Math.round(v * 100) / 100;
+
+async function loadCtx(id, quiet) {
+  try { CTX[id] = await api('/api/levels-for-override?id=' + encodeURIComponent(id)); }
+  catch (e) { if (!quiet) CTX[id] = {error: e.message}; }
+  updOverride(id);
+  updRetry(id);
+  const box = document.getElementById('cctx-' + id);
+  if (box) box.innerHTML = ctxTable(CTX[id]);
+}
+
+function ctxTable(c) {
+  if (!c) return '<p class="muted">loading live price…</p>';
+  if (c.error) return `<p class="bad">${esc(c.error)}</p>`;
+  const q = c.quote || {}, L = c.levels || {}, ccy = esc(q.currency || c.currency || '');
+  const chg = q.change_pct == null ? '—' : `<span class="${q.change_pct >= 0 ? 'ok' : 'bad'}">${
+    q.change_pct >= 0 ? '+' : ''}${fmt(q.change_pct, 2)}%</span>`;
+  const cell = (k, v, tip) => `<td title="${esc(tip || '')}"><span class="muted"
+    style="font-size:.72rem">${k}</span><br><b>${v}</b></td>`;
+  return `<table style="margin:.4rem 0"><tr>
+    ${cell('Last price', q.price == null ? '—' : fmt(q.price, 2) + ' ' + ccy,
+      q.stale ? 'last good value — feed is stale' : 'live quote · ' + (q.src || ''))}
+    ${cell('Today', chg)}
+    ${cell('Prev close', fmt(q.previous_close, 2))}
+    ${cell("Day's range", L.day_low == null ? '—'
+      : fmt(L.day_low, 2) + ' – ' + fmt(L.day_high, 2))}
+    ${cell('Volume', q.volume == null ? '—' : fmt(q.volume, 0))}
+    </tr><tr>
+    ${cell('SMA 20', fmt(L.sma20, 2), '20-day average')}
+    ${cell('SMA 50', fmt(L.sma50, 2), '50-day average')}
+    ${cell('20-day low', fmt(L.low20, 2), 'recent swing low — support')}
+    ${cell('20-day high', fmt(L.high20, 2), 'recent swing high — resistance')}
+    ${cell('Typical daily move', L.atr14 == null ? '—' : fmt(L.atr14, 2) + ' (ATR 14)',
+      'average true range: how far it usually moves in a day')}
+    </tr></table>
+    ${q.stale ? '<p class="warn" style="font-size:.75rem">⚠ price feed is stale — check before trading</p>' : ''}
+    <p class="muted" style="font-size:.75rem">The desk holds
+      <b>${fmt(c.held_total || 0, 2)}</b> shares of ${esc(c.ticker)}${
+      Object.keys(c.held || {}).length ? ' (' + Object.entries(c.held).map(([a, n]) =>
+        esc(a) + ': ' + fmt(n, 2)).join(', ') + ')' : ''}.</p>`;
+}
+
 function overrideForm(r) {
+  const id = esc(r.id);
   return `<div class="card" style="margin-top:.6rem;padding:.6rem .8rem">
     <h3 style="font-size:.95rem;margin:0">Override — trade it anyway</h3>
     <p class="muted" style="font-size:.75rem">This does not place an order. It
       sends <b>${esc(r.ticker)}</b> to the approval gate with the levels you
-      set, where you still size it and approve it as normal. A PASS carries no
-      prices, so the entry and floor below are yours, not the desk's.</p>
-    <div class="row" style="flex-wrap:wrap">
-      <select id="ovdir-${esc(r.id)}">
+      set, where you still size it and approve it as normal.</p>
+    <div id="ovctx-${id}">${ctxTable(CTX[r.id])}</div>
+    <div class="row" style="flex-wrap:wrap;gap:.6rem">
+      <select id="ovdir-${id}" onchange="updOverride(${jsArg(r.id)})">
         <option value="buy">buy</option><option value="sell">sell</option>
       </select>
-      <label>entry <input id="oventry-${esc(r.id)}" type="number" step="0.01"
-        min="0.01" style="width:100px" placeholder="price"></label>
-      <label>stop (floor) <input id="ovstop-${esc(r.id)}" type="number" step="0.01"
-        min="0.01" style="width:100px" placeholder="must be below entry"></label>
-      <label>target <input id="ovtarget-${esc(r.id)}" type="number" step="0.01"
-        min="0.01" style="width:100px" placeholder="optional"></label>
+      <label>entry <input id="oventry-${id}" type="number" step="0.01"
+        min="0.01" style="width:100px" placeholder="limit price"
+        oninput="updOverride(${jsArg(r.id)})"></label>
+      <button type="button" onclick="useLast(${jsArg(r.id)})">use last price</button>
+      <span id="ovlevels-${id}" style="display:contents">
+        <label id="ovstoplbl-${id}">stop <input id="ovstop-${id}" type="number"
+          step="0.01" min="0.01" style="width:100px"
+          oninput="updOverride(${jsArg(r.id)})"></label>
+        <label>target <input id="ovtarget-${id}" type="number" step="0.01"
+          min="0.01" style="width:100px" placeholder="optional"
+          oninput="updOverride(${jsArg(r.id)})"></label>
+        <button type="button" onclick="useSuggested(${jsArg(r.id)})">use suggestion</button>
+      </span>
     </div>
+    <p id="ovhint-${id}" style="font-size:.8rem;margin:.4rem 0"></p>
     <div class="row" style="margin-top:.4rem">
-      <input id="ovnote-${esc(r.id)}" placeholder="why are you overruling the desk?"
+      <input id="ovnote-${id}" placeholder="why are you overruling the desk?"
         style="flex:1" maxlength="200">
       <button onclick="override(${jsArg(r.id)})">⚠ Send to approval</button>
     </div>
-    <p class="yours" id="ovmsg-${esc(r.id)}"></p>
+    <p class="yours" id="ovmsg-${id}"></p>
   </div>`;
+}
+
+/* buy · short (sell, nothing held) · exit (sell, shares held) */
+function mode(id) {
+  const dir = (document.getElementById('ovdir-' + id) || {}).value;
+  if (dir !== 'sell') return 'buy';
+  return ((CTX[id] || {}).held_total || 0) > 0 ? 'exit' : 'short';
+}
+
+function suggestion(id, entry) {
+  const L = (CTX[id] || {}).levels || {}, atr = L.atr14, m = mode(id);
+  if (!entry || !atr || m === 'exit') return null;
+  const risk = 2 * atr;
+  return m === 'buy'
+    ? {stop: n2(entry - risk), target: n2(entry + 2 * risk)}
+    : {stop: n2(entry + risk), target: n2(entry - 2 * risk)};
+}
+
+function useLast(id) {
+  const p = (((CTX[id] || {}).quote) || {}).price;
+  if (p == null) return;
+  document.getElementById('oventry-' + id).value = n2(p);
+  updOverride(id);
+}
+function useSuggested(id) {
+  const s = suggestion(id, Number(document.getElementById('oventry-' + id).value));
+  if (!s) return;
+  document.getElementById('ovstop-' + id).value = s.stop;
+  document.getElementById('ovtarget-' + id).value = s.target;
+  updOverride(id);
+}
+
+function updOverride(id) {
+  const box = document.getElementById('ovctx-' + id);
+  if (box) box.innerHTML = ctxTable(CTX[id]);
+  const hint = document.getElementById('ovhint-' + id);
+  if (!hint) return;
+  const m = mode(id), L = (CTX[id] || {}).levels || {};
+  const entry = Number(document.getElementById('oventry-' + id).value) || null;
+  const stopEl = document.getElementById('ovstop-' + id);
+  const tgtEl = document.getElementById('ovtarget-' + id);
+  document.getElementById('ovlevels-' + id).style.display =
+    m === 'exit' ? 'none' : 'contents';
+  document.getElementById('ovstoplbl-' + id).firstChild.textContent =
+    m === 'buy' ? 'stop (below entry) ' : 'stop (above entry) ';
+  const s = suggestion(id, entry);
+  stopEl.placeholder = s ? 'suggest ' + s.stop : (m === 'buy' ? 'below entry' : 'above entry');
+  tgtEl.placeholder = s ? 'suggest ' + s.target : 'optional';
+  if (m === 'exit') {
+    hint.innerHTML = `<b>Exit:</b> selling shares the desk holds
+      (${fmt(CTX[id].held_total, 2)}). No stop or target needed — you choose
+      how many shares to sell on the approval card. The entry is your limit:
+      it only sells at that price or better.`;
+    return;
+  }
+  const stop = Number(stopEl.value) || null, tgt = Number(tgtEl.value) || null;
+  const parts = [];
+  if (m === 'short') parts.push(`<b class="warn">Short sale</b> — the desk holds
+    no ${esc((CTX[id] || {}).ticker || '')}, so selling borrows shares. A stop
+    ABOVE the entry is required: a short's loss has no ceiling.`);
+  if (s) parts.push(`<span class="muted">Suggestion: stop <b>${s.stop}</b>
+    (entry ${m === 'buy' ? '−' : '+'} 2 × daily move ${fmt(L.atr14, 2)}) ·
+    target <b>${s.target}</b> (2 × the risk, a 2:1 reward:risk)${
+    m === 'buy' && L.low20 ? ` · recent 20-day low ${fmt(L.low20, 2)}` : ''}${
+    m === 'short' && L.high20 ? ` · recent 20-day high ${fmt(L.high20, 2)}` : ''}
+    </span>`);
+  else if (!entry) parts.push('<span class="muted">Enter an entry price (or use the last price) to see a suggested stop and target.</span>');
+  if (entry && stop) {
+    const risk = Math.abs(entry - stop) / entry * 100;
+    const rr = tgt ? Math.abs(tgt - entry) / Math.abs(entry - stop) : null;
+    const wrong = m === 'buy' ? stop >= entry : stop <= entry;
+    parts.push(wrong
+      ? `<b class="bad">stop must be ${m === 'buy' ? 'below' : 'above'} the entry</b>`
+      : `Your levels: risk <b>${fmt(risk, 1)}%</b>${tgt ? ` · reward <b>${
+        fmt(Math.abs(tgt - entry) / entry * 100, 1)}%</b> · reward:risk <b>${
+        fmt(rr, 1)} : 1</b>` : ''}`);
+  }
+  hint.innerHTML = parts.join('<br>');
 }
 
 async function override(id) {
   const r = (DATA.decided || []).find(x => x.id === id) || {};
   const v = k => document.getElementById(`ov${k}-${id}`).value;
-  const entry = Number(v('entry')), stop = Number(v('stop'));
-  const target = Number(v('target')) || null, dir = v('dir');
+  const m = mode(id), dir = v('dir');
+  const entry = Number(v('entry'));
+  const stop = m === 'exit' ? null : (Number(v('stop')) || null);
+  const target = m === 'exit' ? null : (Number(v('target')) || null);
   const msg = document.getElementById('ovmsg-' + id);
-  if (!entry || !stop) {
-    msg.innerHTML = '<b class="bad">entry and stop are both required</b>';
+  if (!entry) { msg.innerHTML = '<b class="bad">an entry price is required</b>'; return; }
+  if (m !== 'exit' && !stop) {
+    msg.innerHTML = `<b class="bad">${m === 'buy' ? 'a buy' : 'a short'} needs a stop</b>`;
     return;
   }
-  if (dir === 'buy' && stop >= entry) {
-    msg.innerHTML = '<b class="bad">for a buy the stop must sit BELOW the ' +
-      'entry — that floor is what limits the loss</b>';
+  if (m === 'buy' && stop >= entry) {
+    msg.innerHTML = '<b class="bad">for a buy the stop must sit BELOW the entry</b>';
     return;
   }
-  if (dir === 'sell' && stop <= entry) {
-    msg.innerHTML = '<b class="bad">for a sell the stop must sit ABOVE the ' +
-      'entry</b>';
+  if (m === 'short' && stop <= entry) {
+    msg.innerHTML = '<b class="bad">for a short the stop must sit ABOVE the entry</b>';
     return;
   }
-  const risk = Math.abs(entry - stop) / entry * 100;
+  const what = m === 'exit' ? `an EXIT (sell what the desk holds) at ${entry}`
+    : `a ${m === 'short' ? 'SHORT' : 'BUY'} at ${entry}, stop ${stop}` +
+      ` (${(Math.abs(entry - stop) / entry * 100).toFixed(1)}% away)` +
+      (target ? `, target ${target}` : '');
   if (!confirm(`Overrule the desk on ${r.ticker}?\n\nThe arbiter returned ` +
     `PASS at conviction ${fmt(r.conviction)}. You are sending it to the ` +
-    `approval gate as a ${dir.toUpperCase()} at ${entry}, floor ${stop} ` +
-    `(${risk.toFixed(1)}% away).\n\nNothing is bought until you approve it ` +
-    `there.`)) return;
+    `approval gate as ${what}.\n\nNothing trades until you approve it there.`)) return;
   try {
     await api('/api/override', {work_item_id: id, direction: dir, entry,
                                 stop, target, note: v('note') || null});
+    Object.keys(FORM).forEach(k => { if (k.endsWith('-' + id)) delete FORM[k]; });
     toast('sent to approval ✓');
   } catch (e) { msg.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
   refresh();
 }
 
+/* sells and your own (manual) trades show the live price on the card */
+const showsCtx = a => (a.thesis || {}).direction === 'sell' || a.kind === 'manual';
+const heldTotal = a => Object.values(a.held || {}).reduce((s, n) => s + n, 0);
+/* a sell of shares the desk holds is an EXIT: sized in shares, no floor */
+const isExit = a => (a.thesis || {}).direction === 'sell' && heldTotal(a) > 0;
+function heldOn(a, broker) {
+  const acct = (DATA.accounts || []).find(x => x.broker === broker) || {};
+  return (a.held || {})[acct.id] || 0;
+}
+/* which account the card starts on: what the trade suggested, else (for an
+   exit) the account that holds the most shares, else the first usable one */
+function defaultBroker(a) {
+  const ok = x => x && !x.disabled;
+  const sg = (a.suggested || {}).broker;
+  if (ok((DATA.accounts || []).find(x => x.broker === sg))) return sg;
+  if (isExit(a)) {
+    const best = Object.entries(a.held || {}).sort((x, y) => y[1] - x[1])[0];
+    const acct = best && (DATA.accounts || []).find(x => x.id === best[0]);
+    if (ok(acct)) return acct.broker;
+  }
+  return ((DATA.accounts || []).find(ok) || {}).broker;
+}
+/* a buy suggested in SHARES (price triggers) is approved as a spend:
+   size = shares × entry, converted into the account's currency */
+async function prefillSize(a) {
+  const sg = a.suggested || {}, t = a.thesis || {};
+  const el = document.getElementById('size-' + a.id);
+  if (!el || sg.size_base || !sg.qty || ('size-' + a.id) in FORM ||
+      prefillSize.done.has(a.id)) return;
+  const acct = (DATA.accounts || []).find(x => x.broker ===
+    (document.getElementById('broker-' + a.id) || {}).value) || {};
+  const entry = t.entry_high || t.entry_low;
+  if (!entry) return;
+  let fx = 1;
+  if (t.currency && acct.ccy && t.currency !== acct.ccy) {
+    const key = t.currency + acct.ccy;
+    if (!(key in fxCache)) {
+      try { fxCache[key] = Number((await api(`/api/fx?from=${t.currency}` +
+        `&to=${acct.ccy}`)).rate); } catch { fxCache[key] = null; }
+    }
+    if (!fxCache[key]) return;
+    fx = fxCache[key];
+  }
+  el.value = Math.ceil(sg.qty * entry * fx * 100) / 100;
+  prefillSize.done.add(a.id);
+  updEst(a.id);
+}
+prefillSize.done = new Set();
+
+function brokerChanged(id) {
+  const a = DATA.cards.find(x => x.id === id);
+  // an exit's share count follows the account: you can only sell what the
+  // desk holds THERE
+  if (a && isExit(a) && !(a.suggested || {}).qty) {
+    const q = document.getElementById('qty-' + id);
+    if (q) q.value = heldOn(a, document.getElementById('broker-' + id).value);
+  }
+  updEst(id);
+}
+
 function card(a) {
   const t = a.thesis || {};
   const sell = t.direction === 'sell';
+  const exit = isExit(a), manual = a.kind === 'manual';
+  const sg = a.suggested || {};
+  const pick = defaultBroker(a);
+  const qty0 = sg.qty ?? (exit ? heldOn(a, pick) : 0);
+  const size0 = sg.size_base ?? 1000;
   const lock = a.locked ? `<p class="warn">🔒 locked — click 🔑 in the nav and
     paste the dashboard key from etc/claire.env</p>` : '';
   const closed = a.session && a.session.is_open === false
@@ -144,8 +578,9 @@ function card(a) {
         <h3 style="font-size:1.15rem">${esc((t.direction || '?').toUpperCase())}
           ${esc(a.ticker)}
           <span class="pill">${esc(a.exchange || '—')}</span>
-          <span class="pill">${esc(a.kind)}</span>
-          <span class="pill">conviction ${fmt(t.conviction)}</span>
+          <span class="pill">${manual ? 'your trade' : esc(a.kind)}</span>
+          ${manual ? '' : `<span class="pill">conviction ${fmt(t.conviction)}</span>`}
+          ${exit ? '<span class="pill warn">exit</span>' : ''}
           ${closed}</h3>
         <p class="muted" style="font-size:.75rem">
           ${a.trigger ? '⟲ ' + esc(a.trigger) + ' · ' : ''}
@@ -155,34 +590,49 @@ function card(a) {
           ⚠ <b>Human override.</b> The desk returned PASS on this — the
           evidence below is that run's, and the entry and floor are yours.
           Nothing here re-analysed the position.</p>` : ''}
+        ${manual ? `<p class="warn" style="font-size:.78rem">
+          <b>Your own trade</b> — no agent analysed it${a.prior_run
+          ? '; the evidence below is the run that opened the position' : ''}.
+          It executes exactly like any other approval.</p>` : ''}
       </div>
     </div>
 
     <div class="mgrid" style="grid-template-columns:repeat(5,1fr)">
-      <div><span>entry</span><b>${fmt(t.entry_low)}–${fmt(t.entry_high)}</b></div>
+      <div><span>${sell ? 'limit' : 'entry'}</span><b>${fmt(t.entry_low)}${
+        t.entry_high !== t.entry_low ? '–' + fmt(t.entry_high) : ''}</b></div>
       <div><span>floor (stop)</span><b class="bad">${fmt(t.stop_loss)}</b></div>
       <div><span>target</span><b class="ok">${fmt(t.take_profit)}</b></div>
       <div><span>currency</span><b>${esc(t.currency || '')}</b></div>
       <div><span>exchange</span><b>${esc(a.exchange || '—')}</b></div>
     </div>
+    ${showsCtx(a) ? `<div id="cctx-${esc(a.id)}">${ctxTable(CTX[a.id])}</div>`
+      : ''}
     ${(t.conditions || []).length ? `<p class="muted" style="font-size:.78rem">
       ${(t.conditions || []).map(c => '⚠ ' + esc(c)).join('<br>')}</p>` : ''}
 
     <h2 style="margin-top:.8rem">Your order</h2>
     <div class="row">
       ${sell
-        ? `<label>quantity <input id="qty-${esc(a.id)}" type="number" step="0.1"
-             min="0.1" value="0" style="width:110px"
+        ? `<label>${exit ? 'shares to sell' : 'quantity'}
+             <input id="qty-${esc(a.id)}" type="number" step="any"
+             min="0" value="${esc(qty0)}" style="width:110px"
              oninput="updEst(${jsArg(a.id)})"></label>`
         : `<label>size <input id="size-${esc(a.id)}" type="number" step="1"
-             value="1000" style="width:110px"
+             value="${esc(size0)}" style="width:110px"
              oninput="updEst(${jsArg(a.id)})"></label>`}
-      <label>trailing floor
+      ${exit ? '' : `<label>trailing floor
         <input id="trail-${esc(a.id)}" type="number" step="0.5" min="0.5" max="90"
-          value="8" style="width:80px" oninput="updEst(${jsArg(a.id)})">%</label>
-      <select id="broker-${esc(a.id)}" onchange="updEst(${jsArg(a.id)})">
-        ${DATA.accounts.map(x => `<option value="${esc(x.broker)}">${esc(x.broker)}
-          (${fmt(x.cash, 0)} ${esc(x.ccy)})</option>`).join('')}
+          value="${esc(sg.trail_pct ?? 8)}" style="width:80px"
+          oninput="updEst(${jsArg(a.id)})">%</label>`}
+      <select id="broker-${esc(a.id)}" onchange="brokerChanged(${jsArg(a.id)})">
+        ${DATA.accounts.map(x => `<option value="${esc(x.broker)}"
+          ${x.disabled ? 'disabled' : ''} ${x.broker === pick ? 'selected' : ''}
+          title="${esc(x.disabled || '')}">${
+          x.environment === 'live' ? '⚠ ' : ''}${esc(x.label || x.broker)}${
+          x.disabled ? ' — ' + esc(x.disabled)
+                     : sell ? ` (desk holds ${fmt((a.held || {})[x.id] || 0, 4)})`
+                     : ` (${fmt(x.cash, 0)} ${esc(x.ccy)} on the desk book)`}
+          </option>`).join('')}
       </select>
       <span style="flex:1"></span>
       <button ${a.locked ? 'disabled' : ''}
@@ -246,8 +696,30 @@ async function updEst(id) {
   const floor = entry ? entry * (1 - trail / 100) : null;
   if (t.direction === 'sell') {
     const q = Number((document.getElementById('qty-' + id) || {}).value) || 0;
-    est.innerHTML = `exit <b>${fmt(q, 2)}</b> shares · proceeds credit
-      <b>${esc(acct.id)}</b>`;
+    const held = (a.held || {})[acct.id] || 0, px = t.entry_high || t.entry_low;
+    if (!isExit(a)) {
+      est.innerHTML = `<b class="warn">short sale</b> of <b>${fmt(q, 2)}</b>
+        shares on <b>${esc(acct.id)}</b> — the desk holds none; the stop
+        ${fmt(t.stop_loss)} rests at the venue with it`;
+      return;
+    }
+    const parts = [`sell <b>${fmt(q, 4)}</b> of the <b>${fmt(held, 4)}</b>
+      shares the desk holds on <b>${esc(acct.id)}</b> at limit
+      ${fmt(px)} ${esc(t.currency || '')} or better · proceeds ≈
+      <b>${fmt(q * (px || 0))} ${esc(t.currency || '')}</b>`];
+    if (q > held + 1e-9) parts.push(held > 0
+      ? `<b class="bad">more than the desk holds here — it sells at most
+         ${fmt(held, 4)}</b>`
+      : `<b class="bad">the desk holds no shares on this account</b>`);
+    if (acct.whole_shares && q !== Math.floor(q))
+      parts.push('<span class="warn">Saxo sells whole shares — rounds down to '
+        + Math.floor(q) + '</span>');
+    if (acct.whole_shares) parts.push(`<span class="muted">At Saxo the desk
+      first cancels this position's resting stop-loss / take-profit (Saxo
+      will not take a sell while they rest), then places your sell; if
+      shares are left afterwards they are re-protected at the same levels.
+      If Saxo will not cancel them, nothing is sold.</span>`);
+    est.innerHTML = parts.join('<br>');
     return;
   }
   const size = Number((document.getElementById('size-' + id) || {}).value) || 0;
@@ -262,9 +734,10 @@ async function updEst(id) {
     fxNote = fx ? ` · fx ${fmt(fx, 4)}` : ' · fx unavailable';
   }
   const entryBase = entry && fx ? entry * fx : null;
-  // fractional venues fill to 0.1 of a share; board-lot venues round down
+  // Saxo fills whole shares only; the built-in sim fills to 0.1 of a share
   const raw = entryBase ? size / entryBase : null;
-  const shares = raw == null ? null : Math.floor(raw * 10) / 10;
+  const shares = raw == null ? null
+    : acct.whole_shares ? Math.floor(raw) : Math.floor(raw * 10) / 10;
   const fee = feeFor(acct.fee_model, size);
   est.innerHTML = `≈ <b>${shares ?? '—'} shares</b> @ ~${fmt(entry)}
     ${esc(t.currency || '')} · est fee <b>${fmt(fee)} ${acct.ccy}</b>
@@ -280,14 +753,24 @@ async function act(id, action, token, sell) {
   const body = {work_item_id: id, action, token};
   if (action === 'approve') {
     body.broker = document.getElementById('broker-' + id).value;
-    body.trail_pct = Number(document.getElementById('trail-' + id).value) || null;
+    const trail = document.getElementById('trail-' + id);
+    // an exit closes the position: there is no floor left to trail
+    body.trail_pct = trail ? (Number(trail.value) || null) : null;
     if (sell) body.qty = Number(document.getElementById('qty-' + id).value);
     else body.size_base = Number(document.getElementById('size-' + id).value);
     const a = DATA.cards.find(x => x.id === id);
-    if (!confirm(`${action.toUpperCase()} ${a.ticker} on ${body.broker}` +
+    const acct = DATA.accounts.find(x => x.broker === body.broker) || {};
+    const what = `${action.toUpperCase()} ${a.ticker} on ${body.broker}` +
       `${sell ? ' — ' + body.qty + ' shares' : ' — ' + body.size_base +
-        ' ' + (DATA.accounts.find(x => x.broker === body.broker) || {}).ccy}` +
-      `, trailing floor ${body.trail_pct}%? (paper)`)) return;
+        ' ' + acct.ccy}` +
+      (body.trail_pct ? `, trailing floor ${body.trail_pct}%` : '');
+    if (acct.environment === 'live') {
+      // real money (DESIGN.md §22): the server refuses without this word
+      const typed = prompt(`⚠ REAL MONEY on your Saxo account.\n${what}\n\n` +
+        'Type LIVE to place this order with real money:');
+      if (typed !== 'LIVE') { toast('live approval cancelled', false); return; }
+      body.confirm_live = 'LIVE';
+    } else if (!confirm(what + '? (paper)')) return;
   }
   try { await api('/api/thesis-action', body); toast(action + 'd ✓'); }
   catch (e) { toast(e.message, false); }

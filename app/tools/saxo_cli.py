@@ -1,6 +1,11 @@
-"""bin/saxo — sign in to, and read, the real Saxo account (read-only)."""
+"""bin/saxo — sign in to, and read, the two Saxo accounts (read-only).
+
+  bin/saxo login sim|live      sign in (browser on THIS machine)
+  bin/saxo status              both sign-ins: alive, and for how long
+  bin/saxo positions [sim|live]  cash + positions (default: both)
+  bin/saxo test-alert          send a test Telegram/desktop alert
+"""
 import json
-import secrets
 import sys
 import threading
 import webbrowser
@@ -10,14 +15,17 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 from . import saxo_live
 
 
-def login():
-    cfg = saxo_live.app_config()
+def login(which):
+    try:
+        cfg = saxo_live.app_config(which=which)
+    except saxo_live.SaxoError as e:
+        sys.exit(str(e))
     registered = urlparse(cfg["redirect_uri"])
     if registered.hostname not in ("localhost", "127.0.0.1"):
-        sys.exit("SAXO_LIVE_APP_URL must be a localhost URL (e.g. "
+        sys.exit("the app's redirect URL must be a localhost URL (e.g. "
                  "http://localhost/claire-saxo) so this machine can catch "
                  "the sign-in redirect")
-    box, state = {}, secrets.token_urlsafe(16)
+    box = {}
 
     class Catch(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -46,29 +54,45 @@ def login():
     port = srv.server_address[1]
     redirect = urlunparse(registered._replace(
         netloc=f"{registered.hostname}:{port}"))
-    verifier, challenge = saxo_live.new_pkce()
-    url = saxo_live.authorize_url(cfg, redirect, challenge, state)
-    print("Opening Saxo sign-in in your browser. If it does not open, visit:"
+    url = saxo_live.begin_login(which, redirect)
+    state = parse_qs(urlparse(url).query)["state"][0]
+    print(f"Opening the Saxo {which.upper()} sign-in in your browser. If it "
+          "does not open, visit:"
           f"\n\n  {url}\n")
     webbrowser.open(url)
     srv.serve_forever()
     if not box.get("code"):
         sys.exit(f"Sign-in failed: {box.get('error')}")
-    saxo_live.exchange_code(cfg, box["code"], verifier, redirect)
+    try:
+        saxo_live.complete_login(state, box["code"])
+    except saxo_live.SaxoError as e:
+        sys.exit(f"Sign-in refused: {e}")
     print("Signed in. claire-api keeps the session alive while it runs.")
-    print(json.dumps(saxo_live.status(), indent=2))
+    print(json.dumps(saxo_live.status(which), indent=2))
 
 
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "positions"
+    arg = argv[2] if len(argv) > 2 else None
+    which = [arg] if arg else list(saxo_live.ENVS)
+    if arg and arg not in saxo_live.ENVS:
+        sys.exit("environment must be sim or live")
     if cmd == "login":
-        login()
+        if not arg:
+            sys.exit("usage: bin/saxo login sim|live")
+        login(arg)
     elif cmd == "status":
-        print(json.dumps(saxo_live.status(), indent=2))
+        print(json.dumps([saxo_live.status(w) for w in which], indent=2))
     elif cmd == "positions":
-        print(json.dumps(saxo_live.summary(), indent=2, default=str))
+        print(json.dumps([saxo_live.summary(w, with_orders=True)
+                          for w in which], indent=2, default=str))
+    elif cmd == "test-alert":
+        from .. import alerts
+        print("delivered via:", alerts.send(
+            "test alert — this is how you'll hear when the Saxo sign-in is "
+            "about to lapse or has lapsed.", title="Claire · Saxo") or "none")
     else:
-        sys.exit("usage: bin/saxo login | status | positions")
+        sys.exit(__doc__)
 
 
 if __name__ == "__main__":

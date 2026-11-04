@@ -15,6 +15,7 @@ another website is exactly what CORS does not preflight.
 """
 import hmac
 import json
+from html import escape as html_escape
 import re
 import select
 import socket
@@ -37,14 +38,17 @@ from .tools.brokers import seed_mcps
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
+SAXO_CALLBACK = "/claire-saxo"   # the path registered on both Saxo apps
 PAGES = {"/": "index.html", "/portfolio": "portfolio.html",
          "/markets": "markets.html", "/trading": "trading.html",
          "/agents": "agents.html", "/providers": "providers.html",
          "/claire": "claire.html", "/schedule": "agents.html",  # merged
-         "/approvals": "approvals.html"}
+         "/approvals": "approvals.html", "/saxo": "saxo.html",
+         "/usage": "usage.html", "/watchlist": "watchlist.html"}
 STATIC = {"/style.css": ("style.css", "text/css"),
           "/nav.js": ("nav.js", "text/javascript"),
-          "/charts.js": ("charts.js", "text/javascript")}
+          "/charts.js": ("charts.js", "text/javascript"),
+          "/sell.js": ("sell.js", "text/javascript")}
 
 PIPELINE_EDGES = [("prepare", "fundamental"), ("prepare", "technical"),
                   ("prepare", "news"), ("fundamental", "bull"),
@@ -76,6 +80,57 @@ class HTTPError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code, self.message = code, message
+
+
+def _levels(c):
+    """Reference levels from daily bars: SMA20/50, the 20-day swing low and
+    high, the day's range, and ATR14 (Wilder) — the typical daily move that
+    the suggested stop is sized from."""
+    hi, lo, cl = c.get("high") or [], c.get("low") or [], c.get("close") or []
+    bars = [(h, l, x) for h, l, x in zip(hi, lo, cl)
+            if None not in (h, l, x)]
+    if len(bars) < 15:
+        return {}
+    closes = [b[2] for b in bars]
+    trs = [max(h - l, abs(h - pc), abs(l - pc))
+           for (h, l, _), (_, _, pc) in zip(bars[1:], bars[:-1])]
+    atr = sum(trs[:14]) / 14
+    for tr in trs[14:]:
+        atr = (atr * 13 + tr) / 14
+
+    def sma(n):
+        return round(sum(closes[-n:]) / n, 4) if len(closes) >= n else None
+    last20 = bars[-20:]
+    return {"sma20": sma(20), "sma50": sma(50), "atr14": round(atr, 4),
+            "low20": round(min(b[1] for b in last20), 4),
+            "high20": round(max(b[0] for b in last20), 4),
+            "day_high": round(bars[-1][0], 4), "day_low": round(bars[-1][1], 4),
+            "bars": len(bars)}
+
+
+def _approval_account(a, repo, env, live):
+    """One broker choice on the approval card, labelled by the REAL account
+    it reaches. A live account is listed always but selectable only while
+    live trading is armed; the server enforces the same rule (§22)."""
+    sim_on = (env.get("SAXO_SIM_EXECUTION") or "").lower() == "enabled"
+    if a["environment"] == "live":
+        label = (f"Saxo LIVE {env.get('SAXO_LIVE_ACCOUNT_ID') or ''}"
+                 " — real money").replace("  ", " ")
+        disabled = None if live["armed"] else live["summary"]
+    elif a["broker"] == "saxo" and sim_on:
+        label = (f"Saxo SIM {env.get('SAXO_SIM_ACCOUNT_ID') or ''}"
+                 " — paper").replace("  ", " ")
+        disabled = None
+    else:
+        label, disabled = f"{a['broker']} — built-in paper sim", None
+    return {"id": a["id"], "broker": a["broker"], "ccy": a["base_currency"],
+            "environment": a["environment"],
+            "cash": repo.cash_balance(a["id"]) / 1e6,
+            "fee_model": json.loads(a["fee_model"]),
+            "label": label, "disabled": disabled,
+            # Saxo fills whole shares only; the estimate must say so
+            "whole_shares": a["environment"] == "live" or (
+                a["broker"] == "saxo" and sim_on)}
 
 
 def default_allowed_hosts(bind):
@@ -151,6 +206,312 @@ def _validate_schedule_patch(current: dict, patch) -> dict:
             raise ValueError(f"spec {k}={v!r} is out of range")
         out[k] = v
     return out
+
+
+# ── LLM usage (the /usage page) ─────────────────────────────────────────────
+# Every model call is a row in agent_runs. On the Max subscription (claude_sdk)
+# cost_usd is 0 — nothing is billed — so the page counts TOKENS, and shows an
+# "API-equivalent value" (published per-token prices) purely as a measure of
+# what the subscription absorbs. tokens_in is stored as the TRUE prompt size
+# (fresh + cache write + cache read, see claude_sdk.Meter.finish and
+# registry.MeterCallback.on_llm_end); fresh input is derived, never re-added.
+BOB_USAGE_FILE = Path.home() / "bob" / "usage.json"   # read-only, never written
+
+USAGE_AGENT_LABELS = {
+    "screener": "Screener", "fundamental": "Fundamental analyst",
+    "technical": "Technical analyst", "news": "News analyst",
+    "bull": "Bull researcher", "bear": "Bear researcher",
+    "arbiter": "Arbiter", "claire_chat": "Claire chat",
+    "recorder": "Recorder (trade journal)"}
+
+USAGE_SOURCE_LABELS = {
+    "daily_asia": "Daily screen (Asia)", "daily_eu": "Daily screen (Europe)",
+    "daily_us": "Daily screen (US)", "daily": "Daily screen",
+    "volume_scan": "Volume scan", "exit_review": "Exit review",
+    "override": "Your override", "manual": "Your manual run",
+    "chat": "Claire chat", "agent_qa": "Agent Q&A", "screener": "Screener",
+    "journal": "Trade journal", "other": "Other research run"}
+
+
+def usage_source(agent_id, kind=None, trigger=None, exchange=None,
+                 linked=True):
+    """Which entry point paid for an agent_runs row. The rules, in order:
+
+    No work item (work_item_id NULL):
+      claire_chat           → chat       (Claire chat: Bob, Telegram, /ask)
+      screener              → screener   (the daily-screen picker itself)
+      recorder              → journal    (trade-journal prose after a fill)
+      any other agent       → agent_qa   (dashboard "ask this agent")
+    A work item (research run), by work_items.kind then trigger text:
+      kind override, or trigger "human override …"      → override
+      kind sell_review, or trigger "watcher: …"         → exit_review
+      trigger "event scan: …"                           → volume_scan
+      trigger "screener agent…" / "deterministic fallback…", or kind screen
+                         → daily_<region> (region from the ticker's exchange
+                           via autonomous.REGIONS; unknown → daily)
+      no trigger (dashboard Run button, Bob, autonomous CLI) → manual
+      any other trigger text                            → manual
+    `linked`: None = work_item_id is NULL, True = the work item exists,
+    False = work_item_id names a row that no longer exists → other."""
+    if linked is None:                       # no work item at all
+        if agent_id == "claire_chat":
+            return "chat"
+        if agent_id == "screener":
+            return "screener"
+        if agent_id == "recorder":
+            return "journal"
+        return "agent_qa"
+    if not linked:                           # dangling work_item_id
+        return "other"
+    t = (trigger or "").strip().lower()
+    if kind == "override" or t.startswith("human override"):
+        return "override"
+    if kind == "sell_review" or t.startswith("watcher:"):
+        return "exit_review"
+    if t.startswith("event scan"):
+        return "volume_scan"
+    if kind == "screen" or t.startswith("screener agent") or \
+            t.startswith("deterministic fallback"):
+        from .autonomous import REGIONS
+        for region, exchanges in REGIONS.items():
+            if exchange in exchanges:
+                return f"daily_{region}"
+        return "daily"
+    return "manual"
+
+
+def _usage_model_label(model):
+    """claude-sonnet-4-6 → Claude Sonnet 4.6; unknown ids pass through."""
+    m = str(model or "")
+    if not m.startswith("claude-"):
+        return m or "unknown"
+    words, nums = [], []
+    for part in m[len("claude-"):].split("-"):
+        if part.isdigit() and len(part) <= 2:
+            nums.append(part)
+        elif not part.isdigit():          # a date suffix is dropped
+            words.append(part.capitalize())
+    return " ".join(["Claude"] + words + ([".".join(nums)] if nums else []))
+
+
+def _usage_price(model):
+    """(in, out) $/1k from the published table, matching a dated id by
+    prefix; None for a model with no published price."""
+    if model in registry.MODEL_PRICES:
+        return registry.MODEL_PRICES[model]
+    for k in sorted(registry.MODEL_PRICES, key=len, reverse=True):
+        if str(model or "").startswith(k):
+            return registry.MODEL_PRICES[k]
+    return None
+
+
+def _usage_value(model, fresh, cwrite, cread, out):
+    """API-equivalent $ for one call — NOT billed on the subscription."""
+    p = _usage_price(model)
+    if not p:
+        return 0.0
+    cin, cout = p
+    return (fresh / 1000 * cin
+            + cwrite / 1000 * cin * registry.CACHE_WRITE_MULTIPLIER
+            + cread / 1000 * cin * registry.CACHE_READ_MULTIPLIER
+            + out / 1000 * cout)
+
+
+def _usage_bucket():
+    return {"calls": 0, "errors": 0, "input": 0, "fresh": 0, "cache_write": 0,
+            "cache_read": 0, "output": 0, "tokens": 0, "api_value": 0.0,
+            "billed": 0.0}
+
+
+def _usage_add(b, r):
+    b["calls"] += 1
+    b["errors"] += r["status"] == "error"
+    for k in ("input", "fresh", "cache_write", "cache_read", "output",
+              "tokens", "api_value", "billed"):
+        b[k] += r[k]
+
+
+def _usage_day_start(now, days_back):
+    """Local midnight `days_back` calendar days before now's day (built from
+    the date, not now - n*86400, so DST days stay whole)."""
+    from datetime import timedelta
+    d = datetime.fromtimestamp(now).date() - timedelta(days=days_back)
+    return int(datetime(d.year, d.month, d.day).timestamp())
+
+
+def bob_usage(path=None, *, now=None, days=7):
+    """Bob's own per-day token totals from ~/bob/usage.json (read-only).
+    Bob writes one bucket per local day; input_tokens there is FRESH input
+    only, so input here = fresh + cache read + cache write to match the
+    desk's convention. Bob's cost_usd is the CLI's API-equivalent estimate
+    — Bob also runs on the Max plan, so it is not billed either."""
+    from datetime import timedelta
+    path = Path(path or BOB_USAGE_FILE)
+    now = time.time() if now is None else now
+    try:
+        data = json.loads(path.read_text())
+        daily = data.get("daily") or {}
+        if not isinstance(daily, dict):
+            raise ValueError("daily is not an object")
+    except FileNotFoundError:
+        return {"available": False, "path": str(path),
+                "reason": "no usage file — Bob has not recorded any usage"}
+    except (OSError, ValueError) as e:
+        return {"available": False, "path": str(path),
+                "reason": f"unreadable usage file: {str(e)[:120]}"}
+
+    def norm(b):
+        b = b if isinstance(b, dict) else {}
+        g = lambda k: int(b.get(k) or 0)                       # noqa: E731
+        fresh, cr, cw = g("input_tokens"), g("cache_read_tokens"), \
+            g("cache_creation_tokens")
+        return {"calls": g("requests"), "fresh": fresh, "cache_read": cr,
+                "cache_write": cw, "input": fresh + cr + cw,
+                "output": g("output_tokens"),
+                "tokens": fresh + cr + cw + g("output_tokens"),
+                "api_value": float(b.get("cost_usd") or 0.0)}
+
+    today = datetime.fromtimestamp(now).date()
+
+    def window(n):
+        tot = norm({})
+        for i in range(n):
+            day = norm(daily.get((today - timedelta(days=i)).isoformat()))
+            for k in tot:
+                tot[k] += day[k]
+        return tot
+    series = [{"date": (today - timedelta(days=i)).isoformat(),
+               **norm(daily.get((today - timedelta(days=i)).isoformat()))}
+              for i in reversed(range(days))]
+    return {"available": True, "path": str(path),
+            "granularity": "per day (no per-call or per-agent detail)",
+            "last_day": max(daily) if daily else None,
+            "today": window(1), "d7": window(7), "d30": window(30),
+            "lifetime": norm(data.get("lifetime")), "series": series}
+
+
+def usage_report(conn, *, now=None, days=7, bob_path=None):
+    """Everything /api/usage returns. Read-only over desk.db."""
+    from datetime import timedelta
+    now = time.time() if now is None else now
+    days = max(1, min(int(days), 365))
+    span = max(days, 30)
+    since = _usage_day_start(now, span - 1)
+    win_start = _usage_day_start(now, days - 1)
+    starts = {"today": _usage_day_start(now, 0),
+              "d7": _usage_day_start(now, 6), "d30": _usage_day_start(now, 29)}
+    names = {r["id"]: r["display_name"] for r in conn.execute(
+        "SELECT id, display_name FROM agents")}
+    provs = {r["id"]: r["display_name"] for r in conn.execute(
+        "SELECT id, display_name FROM providers")}
+    exch = {}
+    for r in conn.execute("SELECT ticker, exchange FROM instruments"):
+        exch.setdefault(r["ticker"], r["exchange"])
+    rows = []
+    for r in conn.execute(
+            "SELECT r.id, r.agent_id, r.work_item_id, r.provider_id, r.model,"
+            " r.started_at, r.status, r.error,"
+            " COALESCE(r.tokens_in,0) ti, COALESCE(r.tokens_out,0) tout,"
+            " COALESCE(r.cache_write_tokens,0) cw,"
+            " COALESCE(r.cache_read_tokens,0) cr, COALESCE(r.cost_usd,0) cost,"
+            " w.id AS wid, w.kind, w.ticker, w.trigger, w.created_at AS wat"
+            " FROM agent_runs r LEFT JOIN work_items w ON w.id=r.work_item_id"
+            " WHERE r.started_at >= ? ORDER BY r.started_at", (since,)):
+        fresh = max(r["ti"] - r["cw"] - r["cr"], 0)
+        linked = None if r["work_item_id"] is None else bool(r["wid"])
+        src = usage_source(r["agent_id"], r["kind"], r["trigger"],
+                           exch.get(r["ticker"]), linked=linked)
+        rows.append({
+            "agent_id": r["agent_id"], "work_item_id": r["work_item_id"],
+            "provider_id": r["provider_id"], "model": r["model"],
+            "started_at": r["started_at"] or 0, "status": r["status"],
+            "error": r["error"], "source": src, "ticker": r["ticker"],
+            "kind": r["kind"], "trigger": r["trigger"], "wat": r["wat"],
+            "input": r["ti"], "fresh": fresh, "cache_write": r["cw"],
+            "cache_read": r["cr"], "output": r["tout"],
+            "tokens": r["ti"] + r["tout"], "billed": r["cost"],
+            "api_value": _usage_value(r["model"], fresh, r["cw"], r["cr"],
+                                      r["tout"])})
+
+    totals = {k: _usage_bucket() for k in starts}
+    for r in rows:
+        for k, s in starts.items():
+            if r["started_at"] >= s:
+                _usage_add(totals[k], r)
+    win = [r for r in rows if r["started_at"] >= win_start]
+
+    def group(keyfn, label):
+        out = {}
+        for r in win:
+            k = keyfn(r)
+            if k not in out:
+                out[k] = {"key": k, "label": label(r), **_usage_bucket()}
+            _usage_add(out[k], r)
+        return sorted(out.values(), key=lambda b: -b["tokens"])
+
+    by_agent = group(lambda r: r["agent_id"],
+                     lambda r: USAGE_AGENT_LABELS.get(r["agent_id"]) or
+                     names.get(r["agent_id"]) or r["agent_id"])
+    by_source = group(lambda r: r["source"],
+                      lambda r: USAGE_SOURCE_LABELS[r["source"]])
+    by_model = group(lambda r: f"{r['provider_id']}|{r['model']}",
+                     lambda r: _usage_model_label(r["model"]))
+    for b in by_model:
+        pid, model = b["key"].split("|", 1)
+        b.update(model=model, provider_id=pid,
+                 provider=provs.get(pid) or pid,
+                 priced=_usage_price(model) is not None)
+
+    today = datetime.fromtimestamp(now).date()
+    series = []
+    for i in reversed(range(days)):
+        d = today - timedelta(days=i)
+        series.append({"date": d.isoformat(), "by_source": {},
+                       **_usage_bucket()})
+    idx = {s["date"]: s for s in series}
+    for r in win:
+        s = idx.get(datetime.fromtimestamp(r["started_at"]).date().isoformat())
+        if s is None:
+            continue
+        _usage_add(s, r)
+        s["by_source"][r["source"]] = s["by_source"].get(r["source"], 0) \
+            + r["tokens"]
+
+    runs = {}
+    for r in win:
+        if not r["work_item_id"]:
+            continue
+        b = runs.setdefault(r["work_item_id"], {
+            "work_item_id": r["work_item_id"], "ticker": r["ticker"],
+            "kind": r["kind"], "trigger": r["trigger"],
+            "created_at": r["wat"] or r["started_at"], "source": r["source"],
+            "source_label": USAGE_SOURCE_LABELS[r["source"]],
+            **_usage_bucket()})
+        _usage_add(b, r)
+    top_runs = sorted(runs.values(), key=lambda b: -b["tokens"])[:10]
+
+    window = _usage_bucket()
+    for r in win:
+        _usage_add(window, r)
+    errs = [r for r in win if r["status"] == "error"]
+    return {
+        "now": int(now), "days": days, "window_start": win_start,
+        "totals": totals, "window": window,
+        "by_agent": by_agent, "by_source": by_source, "by_model": by_model,
+        "series": series, "top_runs": top_runs,
+        "errors": {"count": len(errs), "recent": [
+            {"agent_id": r["agent_id"],
+             "agent": USAGE_AGENT_LABELS.get(r["agent_id"]) or r["agent_id"],
+             "at": r["started_at"], "error": (r["error"] or "")[:200]}
+            for r in errs[-5:][::-1]]},
+        "source_labels": USAGE_SOURCE_LABELS,
+        "pricing_note": ("API-equivalent value = published per-token prices "
+                         "(registry.MODEL_PRICES; cache write x"
+                         f"{registry.CACHE_WRITE_MULTIPLIER}, cache read x"
+                         f"{registry.CACHE_READ_MULTIPLIER}). NOT billed: "
+                         "calls on the Claude Max subscription cost $0; "
+                         "'billed' is what metered API calls actually cost."),
+        "bob": bob_usage(bob_path, now=now, days=days)}
 
 
 def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
@@ -332,10 +693,13 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     "/api/agents": self._agents,
                     "/api/providers": self._providers,
                     "/api/agent-graph": self._agent_graph,
+                    "/api/live-status": self._live_status,
                     "/api/exchanges": self._exchanges,
                 }.get(u.path)
                 if route:
                     return self._send(200, route())
+                if u.path == "/api/usage":
+                    return self._send(200, self._usage(q.get("days", "7")))
                 if u.path == "/api/schedules":
                     return self._send(200, scheduler.rows_with_next(
                         conn, clock=clock))
@@ -352,11 +716,38 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 if u.path == "/api/watchlist":
                     return self._send(200, [dict(r) for r in conn.execute(
                         "SELECT * FROM watchlist ORDER BY exchange, ticker")])
+                if u.path == "/api/watchlist-data":
+                    # the Watchlist page in one call (app/watchlist.py)
+                    from . import watchlist
+                    return self._send(200, watchlist.view(
+                        conn, repo, market, env=env or {}, clock=clock,
+                        cal=cal_or_default()))
+                if u.path == "/api/price-triggers":
+                    from . import price_triggers
+                    return self._send(200, price_triggers.list_triggers(
+                        conn, status=q.get("status"),
+                        ticker=q.get("ticker")))
                 if u.path == "/api/events":
                     return self._sse()
                 if u.path == "/api/fx":
                     return self._send(200, {"rate": str(market.fx(
                         q.get("from", "USD"), q.get("to", "USD")))})
+                if u.path == SAXO_CALLBACK:
+                    return self._saxo_login_callback(q)
+                if u.path == "/api/saxo-account":
+                    # real-account balances and positions: key required even
+                    # though this is a GET — the dashboard is on the LAN
+                    if not self._paired():
+                        return self._send(403, {"error":
+                                                "dashboard not paired"})
+                    which = q.get("env", "live")
+                    if which not in ("sim", "live"):
+                        return self._send(400, {"error":
+                                                "env must be sim or live"})
+                    return self._send(200, self._saxo_account(which))
+                if u.path == "/api/levels-for-override":
+                    return self._send(200, self._override_context(
+                        q.get("id", "")))
                 if u.path == "/api/agent-activity":
                     return self._send(200, self._agent_activity(
                         q.get("id", "")))
@@ -420,6 +811,46 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     return self._ask_proxy(body, "/ask")
                 if u.path == "/api/agent-ask":
                     return self._ask_proxy(body, "/agent/ask")
+                if u.path in ("/api/trade-retry", "/api/trade-cancel"):
+                    # money path: re-checked locally, like thesis-action
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    wi = str(body.get("work_item_id") or "")
+                    try:
+                        if u.path == "/api/trade-retry":
+                            if body.get("entry"):
+                                # the human edited the levels: amend the
+                                # trade in claire-api (the graph owns it)
+                                self._amend(wi, body)
+                            out = approvals.retry_failed(
+                                conn, wi, resume_post,
+                                confirm_live=body.get("confirm_live"),
+                                changes={k: body.get(k) for k in (
+                                    "size_base", "qty", "trail_pct",
+                                    "broker")})
+                        else:
+                            out = approvals.cancel_failed(conn, wi,
+                                                          clock=clock)
+                        return self._send(200, out)
+                    except approvals.AuthError as e:
+                        return self._send(e.code, {"error": e.message})
+                if u.path == "/api/trade-check":
+                    return self._send(200, self._trade_check(body))
+                if u.path == "/api/saxo-login-start":
+                    return self._saxo_login_start(body)
+                if u.path == "/api/live-disarm":
+                    # DISARM is always one click away (§22). ARMING is
+                    # deliberately not offered here: only from a terminal on
+                    # this machine, `bin/claire live arm`.
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    from . import live_trading
+                    changed = live_trading.disarm(
+                        conn, actor="dashboard",
+                        reason=str(body.get("reason") or "disarmed from the "
+                                   "dashboard")[:200], clock=clock)
+                    return self._send(200, {"ok": True, "changed": changed,
+                                            **self._live_status()})
                 if u.path == "/api/thesis-action":
                     # money path: re-checked locally on purpose, so moving or
                     # refactoring the global gate above can never open it
@@ -451,6 +882,39 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                                           {"error": out.get("detail",
                                                             "override failed")})
                     return self._send(200, out)
+                if u.path == "/api/telegram-decision":
+                    # money path (Telegram buttons, relayed by Bob's bot):
+                    # key re-checked locally like the approval route; the
+                    # approver's Telegram user id is checked again inside
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    from . import telegram_approvals
+                    code, out = telegram_approvals.handle_decision(
+                        conn, market, body, resume_post, env=env or {},
+                        clock=clock)
+                    return self._send(code, out)
+                if u.path == "/api/price-triggers":
+                    # a trigger can become a trade — and in auto mode a
+                    # pre-approved one — so it is a money-path action: the
+                    # key is re-checked here, like thesis-action
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    from . import price_triggers
+                    try:
+                        out = price_triggers.create(
+                            conn, body, env=env or {}, clock=clock,
+                            created_by="human via the paired dashboard ("
+                            f"{self.client_address[0]})")
+                    except price_triggers.TriggerError as e:
+                        return self._send(e.code, {"error": e.message})
+                    return self._send(200, out)
+                if u.path == "/api/manual-trade":
+                    # a trade you start (the Sell button) is a money-path
+                    # action: same local re-check as thesis-action. Named so
+                    # it does not share the /api/override prefix.
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    return self._manual_trade(body)
                 if u.path == "/api/run":
                     return self._start_run(body)
                 if u.path == "/api/agent":
@@ -522,6 +986,40 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 self._send(404, {"error": "not found"})
             except (BrokenPipeError, ConnectionResetError):
                 return                           # client went away; not news
+            except HTTPError as e:
+                try:
+                    self._send(e.code, {"error": e.message})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            except Exception as e:               # noqa: BLE001
+                traceback.print_exc()
+                try:
+                    self._send(500, {"error": str(e)})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        # ── DELETE (price triggers only) ─────────────────────────────────
+        def do_DELETE(self):                     # noqa: N802
+            """Cancel an active price trigger: DELETE /api/price-triggers
+            ?id=N. Same gates as every POST — Host/Origin, then the key."""
+            try:
+                self._check_request()
+                if not self._paired():
+                    raise HTTPError(403, "dashboard not paired — enter the "
+                                    "dashboard key first")
+                u = urlparse(self.path)
+                q = {k: v[0] for k, v in parse_qs(u.query).items()}
+                if u.path != "/api/price-triggers":
+                    raise HTTPError(404, "not found")
+                from . import price_triggers
+                try:
+                    out = price_triggers.cancel(conn, q.get("id"),
+                                                actor="human", clock=clock)
+                except price_triggers.TriggerError as e:
+                    raise HTTPError(e.code, e.message) from None
+                return self._send(200, out)
+            except (BrokenPipeError, ConnectionResetError):
+                return
             except HTTPError as e:
                 try:
                     self._send(e.code, {"error": e.message})
@@ -769,12 +1267,19 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             paired = self._paired() or not dash_key
             cal = cal_or_default()
             nowdt = datetime.fromtimestamp(int(clock()), tz=timezone.utc)
-            accounts = [{
-                "id": a["id"], "broker": a["broker"],
-                "ccy": a["base_currency"],
-                "cash": repo.cash_balance(a["id"]) / 1e6,
-                "fee_model": json.loads(a["fee_model"])}
-                for a in conn.execute("SELECT * FROM broker_accounts")]
+            from . import live_trading
+            live = live_trading.status(conn, env or {})
+            accounts = [_approval_account(a, repo, env or {}, live)
+                        for a in conn.execute("SELECT * FROM broker_accounts")]
+            if not any(a["environment"] == "live" for a in accounts):
+                # always SHOW the real account, so it is obvious where it
+                # is and why it cannot be chosen yet (§22)
+                lid = (env or {}).get("SAXO_LIVE_ACCOUNT_ID") or ""
+                accounts.append({
+                    "id": "saxo-live", "broker": "saxo_live", "ccy": "",
+                    "environment": "live", "cash": 0, "fee_model": {},
+                    "label": f"Saxo LIVE {lid} — real money".strip(),
+                    "disabled": "not set up yet (bin/claire live setup)"})
             cards = []
             now = int(clock())
             for r in conn.execute(
@@ -818,7 +1323,18 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     "token": r["approval_token"] if paired else None,
                     "locked": not paired,
                     "session": session,
-                    "expires_at": r["expires_at"]})
+                    "expires_at": r["expires_at"],
+                    # a manual trade's prefill (qty / size / account)
+                    "suggested": json.loads(r["suggested_json"] or "null"),
+                    # what the desk holds per account: a sell card prefills
+                    # its share count from it, and it says exit vs short
+                    "held": {h["account_id"]: h["q"] for h in conn.execute(
+                        "SELECT l.account_id, SUM(CASE WHEN l.qty_opened<0"
+                        " THEN -l.qty_remaining ELSE l.qty_remaining END)"
+                        "/1e6 AS q FROM lots l JOIN instruments i ON"
+                        " i.id=l.instrument_id WHERE i.ticker=? AND"
+                        " l.qty_remaining>0 GROUP BY l.account_id",
+                        (r["ticker"],))}})
             # a PASS never reaches the gate, so an empty Approvals page used
             # to be the only sign a run had concluded at all
             decided = []
@@ -856,7 +1372,13 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                                     and not r["override_of"] and not ovr),
                     "overridden_by": ovr["id"] if ovr else None,
                     "trigger": r["trigger"], "at": r["updated_at"]})
-            return {"cards": cards, "accounts": accounts, "decided": decided}
+            failed = approvals.failed_approvals(conn, clock=clock)
+            return {"cards": cards, "accounts": accounts, "decided": decided,
+                    "failed": failed,
+                    "live": {"armed": live["armed"],
+                             "summary": live["summary"],
+                             "limits": live["limits"],
+                             "today": live["today"]}}
 
         def _portfolio(self):
             from . import portfolio
@@ -867,6 +1389,15 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 a["realized_pl"] = repo.realized_pl(a["id"]) / 1e6
             return data
 
+        def _usage(self, days):
+            """GET /api/usage?days=N — token usage per agent / source /
+            model / day (read-only; see usage_report)."""
+            try:
+                n = int(days)
+            except (TypeError, ValueError):
+                n = 7
+            return usage_report(conn, now=clock(), days=n)
+
         def _runs(self):
             rows = []
             for r in conn.execute(
@@ -874,6 +1405,10 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     " ORDER BY created_at DESC LIMIT 50"):
                 d = dict(r)
                 d.pop("approval_token", None)    # tokens live on cards only
+                try:                             # plain-language facts for
+                    d["story"] = self._run_story(d)   # the Trading page;
+                except Exception as e:           # noqa: BLE001 — never
+                    d["story"] = {"error": str(e)[:200]}  # break the list
                 rows.append(d)
             return rows
 
@@ -890,18 +1425,369 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 " WHERE item_id=? ORDER BY id", (wi,))]
             d["agent_runs"] = [dict(e) for e in conn.execute(
                 "SELECT agent_id, model, status, cost_usd, tokens_in,"
-                " tokens_out, started_at FROM agent_runs WHERE work_item_id=?"
-                " ORDER BY started_at", (wi,))]
+                " tokens_out, started_at, ended_at, error FROM agent_runs"
+                " WHERE work_item_id=? ORDER BY started_at", (wi,))]
             d["orders"] = [dict(o) for o in conn.execute(
                 "SELECT id, side, qty/1e6 qty, status, broker_order_id,"
-                " expires_at FROM orders WHERE work_item_id=?", (wi,))]
+                " expires_at, leg, parent_order_id FROM orders"
+                " WHERE work_item_id=?", (wi,))]
             try:
                 d["narratives"] = narratives.list(wi) if narratives else []
             except JailError:                   # malformed id → no files
                 d["narratives"] = []
             if narratives and "summary.md" in d["narratives"]:
                 d["summary"] = narratives.read(wi, "summary")
+            # plain-language layer for the Trading page (additive: every raw
+            # field above stays for the "details" disclosure)
+            d["story"] = self._run_story(d)
+            d["steps"] = self._run_steps(wi, d["narratives"], d["agent_runs"])
+            d["timeline"] = self._run_timeline(d["events"], d["story"])
             return d
+
+        # ── Trading page: runs as human-readable stories (read-only) ─────
+        _STEP_AGENTS = (("fundamental", "Research: fundamentals"),
+                        ("technical", "Research: technicals"),
+                        ("news", "Research: news"),
+                        ("bull", "Bull case"), ("bear", "Bear case"),
+                        ("arbiter", "Verdict"))
+
+        @staticmethod
+        def _friendly_error(msg):
+            """A broker / provider error as one sentence a non-developer can
+            act on; the raw text is kept alongside by every caller."""
+            raw = str(msg or "")
+            m = raw.lower()
+            if "credit balance is too low" in m:
+                return "the AI provider account ran out of credit"
+            if "not a whole multiple" in m and "lot size" in m:
+                return ("the broker only accepts whole shares, and the "
+                        "order asked for a fraction of one")
+            if "toofarfromentryorder" in m:
+                return ("the broker refused the stop/target: too far from "
+                        "the entry price")
+            if "insufficient" in m and "cash" in m:
+                return "not enough cash in the account"
+            if "rate limit" in m or "429" in m:
+                return "the AI provider was rate-limiting requests"
+            if "levels amended" in m:
+                return "you changed the levels; needs a retry to send"
+            inner = re.search(r"'message': '([^']+)'", raw)
+            text = inner.group(1) if inner else raw
+            text = re.sub(r"^(broker rejected order: )", "broker refused: ",
+                          text)
+            return text[:220]
+
+        @staticmethod
+        def _account_label(broker, env):
+            if broker == "saxo":
+                return "Saxo SIM (paper)"
+            name = {"saxo_live": "Saxo", "alpaca": "Alpaca",
+                    "moomoo": "moomoo"}.get(broker, broker or "broker")
+            if env == "live":
+                return f"{name} LIVE (real money)"
+            return f"{name} {env or ''}".strip()
+
+        def _run_story(self, d):
+            """Who started a run, what it concluded and what happened to
+            the order afterwards — derived, read-only, never money logic."""
+            wi = d["id"]
+            th = d.get("thesis")
+            if th is None and d.get("thesis_json"):
+                try:
+                    th = json.loads(d["thesis_json"])
+                except ValueError:
+                    th = None
+            th = th if isinstance(th, dict) else {}
+            inst = conn.execute(
+                "SELECT name, exchange, currency FROM instruments WHERE"
+                " ticker=? ORDER BY (name IS NULL), id LIMIT 1",
+                (d["ticker"],)).fetchone()
+            trig = d.get("trigger") or ""
+            kind = d.get("kind")
+            reason = None
+            if kind == "override" or d.get("override_of"):
+                origin = "override"
+            elif kind == "sell_review" or trig.startswith("watcher:"):
+                origin = "price_alert"
+                reason = trig.split(": ", 1)[1] if ": " in trig else trig
+            elif trig.startswith("event scan"):
+                origin = "volume_scan"
+                reason = trig.split(": ", 1)[1] if ": " in trig else None
+            elif trig.startswith("deterministic fallback"):
+                origin = "daily_screen"
+                reason = ("near the top of the most-active list (the "
+                          "screener agent was unavailable)")
+            elif trig.startswith("screener") or kind == "screen":
+                origin = "daily_screen"
+                reason = trig.split(": ", 1)[1] if ": " in trig else None
+            elif not trig:
+                origin = "you"
+            else:
+                origin = "other"
+                reason = trig
+            conv = th.get("conviction")
+            word = None
+            if isinstance(conv, (int, float)):
+                word = ("low" if conv < 0.4 else
+                        "medium" if conv < 0.7 else "high")
+            reasons = [c for c in (th.get("conditions") or [])
+                       if isinstance(c, str) and
+                       not c.startswith("HUMAN OVERRIDE")][:3]
+
+            evs = [dict(e) for e in conn.execute(
+                "SELECT ts, actor, to_state, payload FROM events"
+                " WHERE item_id=? ORDER BY id", (wi,))]
+
+            def payload(e):
+                try:
+                    p = json.loads(e["payload"] or "null")
+                except ValueError:
+                    p = None
+                return p if isinstance(p, dict) else {}
+            accts = {r["id"]: dict(r) for r in conn.execute(
+                "SELECT id, broker, environment, base_currency"
+                " FROM broker_accounts")}
+            orders = [dict(o) for o in conn.execute(
+                "SELECT id, account_id, side, qty/1e6 qty,"
+                " limit_price/1e6 limit_price, stop_loss/1e6 stop_loss,"
+                " take_profit/1e6 take_profit, status, broker_order_id,"
+                " placed_at, updated_at FROM orders WHERE work_item_id=?"
+                " ORDER BY COALESCE(created_at, updated_at)", (wi,))]
+            failed_rows = [o for o in orders if o["status"] == "rejected"
+                           and not o["broker_order_id"]]
+            real = [o for o in orders if o not in failed_rows]
+            for o in real:
+                a = accts.get(o["account_id"]) or {}
+                o["account"] = self._account_label(a.get("broker"),
+                                                   a.get("environment"))
+            approval = None
+            appr = [e for e in evs if e["to_state"] in
+                    ("approved", "approve_retry")]
+            if appr:
+                p = payload(appr[-1])
+                broker = p.get("broker")
+                acct = (accts.get(real[-1]["account_id"]) if real else None) \
+                    or next((a for a in accts.values()
+                             if a["broker"] == broker), None) or {}
+                approval = {"ts": appr[0]["ts"], "last_ts": appr[-1]["ts"],
+                            "size": p.get("size_base"), "qty": p.get("qty"),
+                            "currency": acct.get("base_currency"),
+                            "account": self._account_label(
+                                acct.get("broker") or broker,
+                                acct.get("environment"))}
+            tries, seen = [], {}
+            for e in evs:
+                if e["to_state"] != "resume_failed":
+                    continue
+                err = payload(e).get("error") or ""
+                if "levels amended" in err:
+                    continue
+                tries.append(e["ts"])
+                f = self._friendly_error(err)
+                if f not in seen:
+                    seen[f] = {"reason": f, "raw": err[:300], "count": 0}
+                seen[f]["count"] += 1
+            failure = None
+            for e in reversed(evs):
+                if e["to_state"] == "failed":
+                    p = payload(e)
+                    errs = p.get("errors") or ([p["error"]] if p.get("error")
+                                               else [])
+                    fr = list(dict.fromkeys(self._friendly_error(x)
+                                            for x in errs))
+                    failure = {"reason": "; ".join(fr) or "unknown error",
+                               "raw": [str(x)[:400] for x in errs[:6]]}
+                    break
+            ended = next((dict(payload(e), ts=e["ts"]) for e in reversed(evs)
+                          if e["to_state"] in ("rejected", "expired")), None)
+            fills = [dict(f) for f in conn.execute(
+                "SELECT side, SUM(qty)/1e6 qty,"
+                " SUM(1.0*qty*price_native)/SUM(qty)/1e6 avg_price, currency,"
+                " MAX(executed_at) at, account_id FROM executions"
+                " WHERE work_item_id=? GROUP BY side, currency, account_id",
+                (wi,))]
+            for f in fills:
+                a = accts.get(f["account_id"]) or {}
+                f["account"] = self._account_label(a.get("broker"),
+                                                   a.get("environment"))
+            overrides = [dict(r) for r in conn.execute(
+                "SELECT id, state, created_at FROM work_items"
+                " WHERE override_of=? ORDER BY created_at", (wi,))]
+            return {
+                "name": inst["name"] if inst else None,
+                "exchange": inst["exchange"] if inst else None,
+                "origin": origin, "origin_detail": reason,
+                "override_of": d.get("override_of"),
+                "overridden_by": overrides,
+                "verdict": th.get("direction"),
+                "conviction": conv, "conviction_word": word,
+                "currency": th.get("currency"),
+                "levels": {k: th.get(k) for k in (
+                    "entry_low", "entry_high", "stop_loss", "take_profit")},
+                "reasons": reasons,
+                "approval": approval,
+                "orders": real,
+                "fills": fills,
+                "failed_attempts": {
+                    "rows": len(failed_rows), "tries": len(tries),
+                    "first_ts": tries[0] if tries else None,
+                    "last_ts": tries[-1] if tries else None,
+                    "reasons": sorted(seen.values(),
+                                      key=lambda r: -r["count"])[:5]},
+                "failure": failure,
+                "ended": ended,
+            }
+
+        def _run_steps(self, wi, files, agent_runs):
+            """The pipeline as readable steps: each agent's one-line
+            conclusion and signal, parsed from its report.md."""
+            from .narrative_format import format_narrative
+            out = []
+            for agent, label in self._STEP_AGENTS:
+                runs = [a for a in agent_runs if a["agent_id"] == agent]
+                text = None
+                if narratives and f"{agent}.report.md" in (files or []):
+                    try:
+                        text = format_narrative(
+                            narratives.read(wi, f"{agent}.report"))
+                    except (OSError, JailError):
+                        text = None
+                if text is None and not runs:
+                    continue
+                step = {"agent": agent, "label": label, "signal": None,
+                        "conviction": None, "summary": None, "points": [],
+                        "has_report": text is not None,
+                        "calls": len(runs),
+                        "status": ("error" if runs and all(
+                            a["status"] == "error" for a in runs) else "ok"),
+                        "error": None}
+                errs = [a.get("error") for a in runs if a.get("error")]
+                if step["status"] == "error" and errs:
+                    step["error"] = self._friendly_error(errs[-1])
+                for line in (text or "").splitlines():
+                    s = line.strip()
+                    m = re.match(r"\*\*(?:Signal|Verdict): ([\w-]+)\*\*.*?"
+                                 r"conviction ([\d.]+)", s) or \
+                        re.match(r"\*\*(Bull|Bear) case\*\*.*?conviction "
+                                 r"([\d.]+)", s)
+                    if m:
+                        step["signal"] = m.group(1).lower()
+                        try:
+                            step["conviction"] = float(m.group(2))
+                        except ValueError:
+                            pass
+                    elif s.startswith("- "):
+                        if len(step["points"]) < 3:
+                            step["points"].append(s[2:][:400])
+                    elif s and not s.startswith(("#", "**", "_", "·")) \
+                            and step["summary"] is None:
+                        step["summary"] = s[:500]
+                if agent in ("bull", "bear") and step["signal"]:
+                    step["signal"] = None        # "bull case" is not a call
+                out.append(step)
+            return out
+
+        def _run_timeline(self, events, story):
+            """The audit trail as a few sentences; a retry loop's hundred
+            identical rows collapse into one line."""
+            out = []
+
+            def p(e):
+                try:
+                    v = json.loads(e.get("payload") or "null")
+                except ValueError:
+                    v = None
+                return v if isinstance(v, dict) else {}
+            appr = story.get("approval") or {}
+            i = 0
+            while i < len(events):
+                e = events[i]
+                st, pl = e["to_state"], p(e)
+                if st in ("approve_retry", "resume_failed") and not (
+                        st == "resume_failed" and "levels amended" in
+                        str(pl.get("error", ""))):
+                    j, fails, retries, errs = i, 0, 0, {}
+                    while j < len(events) and events[j]["to_state"] in (
+                            "approve_retry", "resume_failed"):
+                        q = p(events[j])
+                        if "levels amended" in str(q.get("error", "")):
+                            break
+                        if events[j]["to_state"] == "resume_failed":
+                            fails += 1
+                            f = self._friendly_error(q.get("error"))
+                            errs[f] = errs.get(f, 0) + 1
+                        else:
+                            retries += 1
+                        j += 1
+                    if fails:
+                        why = "; ".join(
+                            f"{k} (×{v})" if len(errs) > 1 and v > 1 else k
+                            for k, v in errs.items())
+                        out.append({"ts": e["ts"], "tone": "bad", "text":
+                                    f"Sending the order failed {fails} "
+                                    f"time{'s' if fails > 1 else ''} — "
+                                    + why})
+                    elif retries:
+                        out.append({"ts": e["ts"], "tone": "", "text":
+                                    "You retried sending the order"})
+                    i = max(j, i + 1)
+                    continue
+                text, tone = None, ""
+                if st == "running" and e.get("from_state") is None:
+                    text = "Run started"
+                elif st == "override":
+                    text = (f"You overrode the verdict: "
+                            f"{str(pl.get('direction') or '').upper()} at "
+                            f"{pl.get('entry')}, stop {pl.get('stop')}, "
+                            f"target {pl.get('target')}")
+                elif st == "awaiting_approval":
+                    text, tone = "Sent to you for approval", "warn"
+                elif st == "approved":
+                    size = pl.get("size_base")
+                    size = (f"{size:,.0f}" if isinstance(size, (int, float))
+                            else "")
+                    text = (f"You approved {size}"
+                            f" {appr.get('currency') or ''} on "
+                            f"{appr.get('account') or pl.get('broker')}")
+                    text, tone = " ".join(text.split()), "ok"
+                elif st == "amended":
+                    a, b = pl.get("from") or {}, pl.get("to") or {}
+                    text = ("You changed the levels: " + ", ".join(
+                        f"{k} {a.get(k)} → {b.get(k)}" for k in
+                        ("entry", "stop", "target")
+                        if a.get(k) != b.get(k)))
+                elif st == "resume_failed":
+                    text = None              # "levels amended": said above
+                elif st == "executing":
+                    text, tone = "Order accepted by the broker", "ok"
+                elif st == "done":
+                    text, tone = "Finished", "ok"
+                    fl = story.get("fills") or []
+                    if fl:
+                        def px(v):
+                            return f"{v:,.4f}".rstrip("0").rstrip(".")
+                        text = "Finished — " + "; ".join(
+                            ("bought" if f["side"] == "buy" else "sold")
+                            + f" {f['qty']:g} shares at "
+                            f"{px(f['avg_price'])} {f['currency']}"
+                            for f in fl)
+                elif st == "failed":
+                    f = story.get("failure") or {}
+                    text = f"Failed: {f.get('reason') or 'see details'}"
+                    tone = "bad"
+                elif st == "rejected":
+                    text = "You rejected the trade"
+                    if pl.get("reason"):
+                        text += f" ({pl['reason']})"
+                elif st == "expired":
+                    text = "Expired" + (f": {pl['reason']}"
+                                        if pl.get("reason") else "")
+                elif st and not st.startswith("authorize:"):
+                    text = str(st).replace("_", " ").capitalize()
+                if text:
+                    out.append({"ts": e["ts"], "text": text, "tone": tone})
+                i += 1
+            return out
 
         def _agents(self):
             out = []
@@ -920,6 +1806,264 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                             "system_prompt": a["system_prompt"],
                             "last_run": dict(run) if run else None})
             return out
+
+        def _override_context(self, wi):
+            """What the human needs on screen to author an override: the
+            live quote, the levels that matter (moving averages, recent
+            swing low/high, typical daily range) and what the desk holds —
+            which decides whether a sell is an exit or a short."""
+            from .tools.market import yahoo_symbol
+            r = conn.execute("SELECT w.ticker, i.exchange, i.currency FROM"
+                             " work_items w LEFT JOIN instruments i ON"
+                             " i.ticker = w.ticker WHERE w.id=?",
+                             (wi,)).fetchone()
+            if r is None:
+                return {"error": "unknown work item"}
+            sym = yahoo_symbol(r["ticker"], r["exchange"] or "NASDAQ")
+            out = {"ticker": r["ticker"], "symbol": sym,
+                   "currency": r["currency"]}
+            try:
+                q = market.quote(sym)
+                out["quote"] = {k: q.get(k) for k in (
+                    "price", "change_pct", "previous_close", "volume",
+                    "currency", "stale", "src")}
+                if out["quote"]["price"] is not None:
+                    out["quote"]["price"] = float(out["quote"]["price"])
+            except Exception as e:              # noqa: BLE001 — shown, not fatal
+                out["quote_error"] = str(e)[:200]
+            try:
+                c = market.chart(sym, "6mo", "1d")
+                out["levels"] = _levels(c)
+            except Exception as e:              # noqa: BLE001
+                out["levels_error"] = str(e)[:200]
+            held = conn.execute(
+                "SELECT l.account_id, SUM(CASE WHEN l.qty_opened < 0 THEN"
+                " -l.qty_remaining ELSE l.qty_remaining END)/1e6 AS q"
+                " FROM lots l JOIN instruments i ON i.id = l.instrument_id"
+                " WHERE i.ticker=? AND l.qty_remaining > 0"
+                " GROUP BY l.account_id", (r["ticker"],)).fetchall()
+            out["held"] = {h["account_id"]: h["q"] for h in held}
+            out["held_total"] = sum(h["q"] for h in held)
+            return out
+
+        def _amend(self, wi, body):
+            """Push edited price levels to claire-api; raises AuthError with
+            its reason (e.g. a stop on the wrong side) if refused."""
+            cur = json.loads((conn.execute(
+                "SELECT thesis_json FROM work_items WHERE id=?", (wi,))
+                .fetchone() or {"thesis_json": "{}"})["thesis_json"] or "{}")
+            want = {"entry": float(body["entry"]),
+                    "stop": float(body["stop"]) if body.get("stop") else None,
+                    "target": float(body["target"]) if body.get("target")
+                    else None}
+            if (cur.get("entry_high"), cur.get("stop_loss"),
+                    cur.get("take_profit")) == (want["entry"], want["stop"],
+                                                 want["target"]):
+                return                              # unchanged: nothing to do
+            try:
+                r = httpx.post(f"{api_base}/internal/amend",
+                               json={"work_item_id": wi, "actor": "human",
+                                     **want},
+                               headers={"x-claire-secret": secret}, timeout=30)
+            except Exception as e:                  # noqa: BLE001
+                raise approvals.AuthError(502, f"claire-api unreachable ({e})")
+            if r.status_code != 200:
+                raise approvals.AuthError(r.status_code, (r.json() or {}).get(
+                    "detail", f"amend failed ({r.status_code})"))
+
+        def _trade_check(self, body):
+            """'Check with Saxo': size the edited order exactly as execution
+            would (live quote, whole shares) and ask Saxo's precheck whether
+            it would be accepted. Places nothing. Either for a work item
+            (work_item_id) or for a trade not yet started — the Sell button
+            sends ticker, exchange, direction, entry and qty."""
+            from decimal import Decimal
+
+            from .graph.nodes_execution import FRACTION_STEP, position_qty
+            from .tools.market import yahoo_symbol
+            from .wiring import build_brokers
+            wi = str(body.get("work_item_id") or "")
+            if wi:
+                r = conn.execute("SELECT w.ticker, w.thesis_json, i.exchange"
+                                 " FROM work_items w LEFT JOIN instruments i"
+                                 " ON i.ticker=w.ticker WHERE w.id=?",
+                                 (wi,)).fetchone()
+                if r is None:
+                    raise HTTPError(404, "unknown work item")
+                ticker, exchange = r["ticker"], r["exchange"]
+                t = json.loads(r["thesis_json"] or "{}")
+            else:
+                ticker = str(body.get("ticker") or "").upper().strip()
+                exchange = str(body.get("exchange") or "").upper().strip()
+                self._check_symbol(ticker, exchange)
+                if body.get("direction") not in ("buy", "sell"):
+                    raise HTTPError(400, "direction must be buy or sell")
+                t = {"direction": body["direction"]}
+            broker = body.get("broker")
+            adapter = build_brokers(env or {}, conn).get(broker)
+            if adapter is None or not hasattr(adapter, "precheck"):
+                return {"ok": None, "note": "this account uses the built-in "
+                        "paper sim — there is no broker to ask"}
+            side = t.get("direction") or "buy"
+            try:
+                entry = float(body.get("entry") or t.get("entry_high") or 0)
+            except (TypeError, ValueError):
+                raise HTTPError(400, "entry must be a number") from None
+            if entry <= 0:
+                raise HTTPError(400, "an entry price is required")
+            sym = yahoo_symbol(ticker, exchange or "NASDAQ")
+            if side == "buy":
+                q = Decimal(str(market.quote(sym)["price"]))
+                qty = position_qty(Decimal(str(body.get("size_base") or 0)),
+                                   q, 1, FRACTION_STEP if getattr(
+                                       adapter, "fractional", True)
+                                   else Decimal(1))
+            else:
+                qty = Decimal(str(body.get("qty") or 0))
+            if qty <= 0:
+                return {"ok": False, "error": "that size buys zero shares"}
+            # an exit carries no bracket (execution strips it), so neither
+            # does its check
+            held = self._desk_held_on(broker, ticker, exchange)
+            exit_ = (side == "sell" and held > 0) or (side == "buy" and
+                                                       held < 0)
+            out = adapter.precheck(
+                symbol=sym, side=side, qty=qty, limit=entry,
+                stop_loss=None if exit_ else (float(body["stop"])
+                                              if body.get("stop") else None),
+                take_profit=None if exit_ else (
+                    float(body["target"]) if body.get("target") else None))
+            if out.get("error") and "RateLimitExceeded" in out["error"]:
+                out["error"] = "Saxo asks to slow down — wait a second and " \
+                               "check again"
+            elif out.get("error") and \
+                    "SellOrdersAlreadyExistForOwnedContracts" in out["error"] \
+                    and exit_:
+                # the protective stop/target the desk holds for these shares
+                # are what Saxo objects to — and execution cancels exactly
+                # those first (DESIGN.md §11a). Saxo cannot check past them.
+                out = {**out, "ok": None, "legs_block": True, "note":
+                       "Saxo cannot fully check this sell while the "
+                       "position's protective stop/target are working there "
+                       "— on approval the desk cancels them first, then "
+                       f"places your sell of {qty} @ {out.get('price')}; any "
+                       "shares left are re-protected at the same levels."}
+            return {**out, "qty": float(qty)}
+
+        def _desk_held_on(self, broker, ticker, exchange):
+            """Shares the desk's book holds on the account behind `broker`."""
+            r = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN l.qty_opened<0 THEN"
+                " -l.qty_remaining ELSE l.qty_remaining END),0) q FROM lots l"
+                " JOIN instruments i ON i.id=l.instrument_id JOIN"
+                " broker_accounts a ON a.id=l.account_id WHERE a.broker=? AND"
+                " i.ticker=? AND i.exchange=? AND l.qty_remaining>0",
+                (broker, ticker, exchange)).fetchone()
+            return (r["q"] or 0) / 1e6
+
+        def _manual_trade(self, body):
+            """Forward a trade you started to claire-api (/internal/manual),
+            which validates it and puts it at the approval gate."""
+            allowed = ("ticker", "exchange", "direction", "entry", "stop",
+                       "target", "note", "suggested", "source")
+            fwd = {k: body.get(k) for k in allowed if body.get(k) is not None}
+            fwd["actor"] = "human"
+            try:
+                r = httpx.post(f"{api_base}/internal/manual", json=fwd,
+                               headers={"x-claire-secret": secret}, timeout=30)
+            except Exception as e:      # noqa: BLE001
+                return self._send(502, {"error":
+                                        f"claire-api unreachable ({e})"})
+            out = r.json() if r.headers.get("content-type", "") \
+                .startswith("application/json") else {}
+            if r.status_code != 200:
+                detail = out.get("detail", "manual trade failed")
+                if isinstance(detail, list):    # pydantic 422 shape
+                    detail = "; ".join(str(d.get("msg")) for d in detail
+                                       if isinstance(d, dict)) or "invalid"
+                return self._send(r.status_code, {"error": detail})
+            return self._send(200, out)
+
+        def _saxo_login_start(self, body):
+            """Begin a Saxo sign-in from the Saxo accounts page. Needs the
+            dashboard key (every POST does), so only Richard can start one;
+            Saxo then sends the browser back to SAXO_CALLBACK on THIS server.
+            Saxo only redirects to the registered host — localhost — so the
+            button works in a browser on this PC."""
+            from .tools import saxo_live
+            which = body.get("env")
+            if which not in saxo_live.ENVS:
+                raise HTTPError(400, "env must be sim or live")
+            try:
+                cfg = saxo_live.app_config(env or {}, which)
+            except saxo_live.SaxoError as e:
+                raise HTTPError(400, str(e))
+            path = urlparse(cfg["redirect_uri"]).path or "/"
+            if path != SAXO_CALLBACK:
+                raise HTTPError(400, f"the app's redirect URL path is {path}; "
+                                     f"the dashboard listens on {SAXO_CALLBACK}")
+            redirect = (f"http://localhost:{self.server.server_address[1]}"
+                        f"{SAXO_CALLBACK}")
+            url = saxo_live.begin_login(which, redirect, env=env or {},
+                                        clock=clock)
+            return self._send(200, {"url": url})
+
+        def _saxo_login_callback(self, q):
+            from .tools import saxo_live
+            try:
+                if q.get("error"):
+                    raise saxo_live.SaxoError(q.get("error_description")
+                                              or q["error"])
+                which = saxo_live.complete_login(
+                    q.get("state"), q.get("code"), env=env or {}, clock=clock)
+                where = f"/saxo?env={which}&signin=ok"
+            except saxo_live.SaxoError as e:
+                body = (f"<meta charset=utf-8><link rel=stylesheet "
+                        f"href=/style.css><main><h1>Saxo sign-in failed</h1>"
+                        f"<p class=bad>{html_escape(str(e))}</p>"
+                        f"<p><a href=/saxo>Back to Saxo accounts</a></p></main>")
+                return self._send(400, body.encode(), "text/html; charset=utf-8")
+            self.send_response(303)
+            self.send_header("Location", where)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _saxo_account(self, which):
+            """One Saxo account straight from Saxo (read-only), plus each
+            position's share of gross exposure for the allocation bars."""
+            from .tools import saxo_live
+            out = saxo_live.summary(which, with_orders=True, env=env or {})
+            out["signin"] = saxo_live.status(which, clock=clock)
+            pos = out.get("positions") or []
+            gross = sum(abs(p.get("exposure_base") or 0) for p in pos)
+            from .tools.saxo_broker import desk_symbol
+            for p in pos:
+                p["weight_pct"] = (round(abs(p.get("exposure_base") or 0)
+                                         / gross * 100, 1) if gross else None)
+                # the desk's market-data symbol, so the page can chart it
+                p["chart_symbol"] = desk_symbol(p.get("symbol"))
+            # the Sell button is offered only for what the DESK bought on
+            # this very account; the rest is Richard's own holding
+            broker = "saxo_live" if which == "live" else "saxo"
+            from .portfolio import open_positions
+            # saxo-paper only trades AT Saxo SIM when SIM execution is on;
+            # otherwise its book lives in the in-process sim, not here
+            at_saxo = which == "live" or (
+                (env or {}).get("SAXO_SIM_EXECUTION") or "").lower() \
+                == "enabled"
+            mine = {(q["symbol"]): q for q in open_positions(conn)
+                    if q["broker"] == broker} if at_saxo else {}
+            for p in pos:
+                d = mine.get(p.get("chart_symbol"))
+                p["desk"] = {"held": d["qty"], "account_id": d["account_id"],
+                             "broker": broker, "ticker": d["ticker"],
+                             "exchange": d["exchange"]} if d else None
+            out["desk_broker"] = broker
+            return out
+
+        def _live_status(self):
+            from . import live_trading
+            return live_trading.status(conn, env or {}, clock=clock)
 
         def _agent_graph(self):
             """Every node carries a status the UI renders identically:
@@ -1417,7 +2561,11 @@ def main():
     cal = sessions.load(conn) or None
     start_watcher_thread(conn, repo, market,
                          api_base="http://127.0.0.1:7788", cal=cal)
-    bind = os.environ.get("CLAIRE_DASHBOARD_BIND", "127.0.0.1")
+    # approvals + refused trades → the owner's Telegram DM (buttons relayed
+    # back by Bob's bot to /api/telegram-decision)
+    from . import telegram_approvals
+    telegram_approvals.start_pusher_thread(conn, market, os.environ)
+    bind =os.environ.get("CLAIRE_DASHBOARD_BIND", "127.0.0.1")
     # optional extra Host names (e.g. a DNS alias for this box); the
     # loopback + hostname + LAN-IP set is always derived from `bind`
     extra = [h.strip().lower() for h in os.environ.get(

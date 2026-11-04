@@ -87,6 +87,8 @@ MIGRATIONS = [
     # the cash check and the second fill would be refused at the venue's
     # expense (the sim fills instantly, the book debits at poll time)
     "ALTER TABLE orders ADD COLUMN reserved_base INTEGER",
+    # the live-trading limits (DESIGN.md §22) measure orders in base currency
+    "ALTER TABLE orders ADD COLUMN fx_rate INTEGER",
     # M7: trailing rules belong to a POSITION (instrument, account, side), and
     # there is exactly one. The old ON CONFLICT DO NOTHING had no constraint to
     # hit, so every approval appended another row. Dedupe (keep the newest —
@@ -99,6 +101,58 @@ MIGRATIONS = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_trail_unique"
     " ON price_alerts(instrument_id, IFNULL(account_id,''), IFNULL(side,0))"
     " WHERE rule='trail_pct'",
+    # Exits & protective legs (DESIGN.md §11a). A bracket's stop-loss and
+    # take-profit rest AT THE VENUE as orders of their own; they used to live
+    # only in the adapter's memory, so a stop that filled sold shares the
+    # book never heard of, and a desk sell collided with them at Saxo
+    # (SellOrdersAlreadyExistForOwnedContracts). Each leg is now an orders
+    # row pointing at the entry it protects.
+    "ALTER TABLE orders ADD COLUMN parent_order_id TEXT",
+    "ALTER TABLE orders ADD COLUMN leg TEXT",
+    # the desk order whose placement cancelled this leg — so the shares it
+    # protected can be re-protected at the same levels if that order leaves
+    # some of the position behind
+    "ALTER TABLE orders ADD COLUMN cancelled_for TEXT",
+    # on a desk order that cancelled legs: pending → done | not_needed |
+    # failed. An unprotected position must never be silent.
+    "ALTER TABLE orders ADD COLUMN protect_state TEXT",
+    "ALTER TABLE orders ADD COLUMN protect_note TEXT",
+    "ALTER TABLE orders ADD COLUMN protect_alerted_at INTEGER",
+    "CREATE INDEX IF NOT EXISTS idx_orders_parent ON orders(parent_order_id)",
+    # what the approval card should prefill for a manual trade (qty, size,
+    # account, trailing floor) — the Sell button's "all 9 shares on Saxo SIM"
+    "ALTER TABLE work_items ADD COLUMN suggested_json TEXT",
+    # price triggers (DESIGN.md §15a). schema.sql creates the table on every
+    # init; this copy keeps the migration list a complete record of what a
+    # pre-existing desk.db gains, and is a no-op where the table exists.
+    # Keep the two definitions identical.
+    "CREATE TABLE IF NOT EXISTS price_triggers ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " ticker TEXT NOT NULL, exchange TEXT NOT NULL,"
+    " direction TEXT NOT NULL CHECK(direction IN ('buy','sell')),"
+    " kind TEXT NOT NULL CHECK(kind IN ('buy','exit','short')),"
+    " condition TEXT NOT NULL CHECK(condition IN ('lte','gte')),"
+    " trigger_price INTEGER NOT NULL CHECK(trigger_price > 0),"
+    " limit_price INTEGER NOT NULL CHECK(limit_price > 0),"
+    " qty INTEGER CHECK(qty IS NULL OR qty > 0),"
+    " amount_base INTEGER CHECK(amount_base IS NULL OR amount_base > 0),"
+    " stop_loss INTEGER, take_profit INTEGER, trail_pct REAL,"
+    " broker TEXT NOT NULL, account_id TEXT NOT NULL,"
+    " mode TEXT NOT NULL DEFAULT 'ask' CHECK(mode IN ('ask','auto')),"
+    " note TEXT,"
+    " status TEXT NOT NULL DEFAULT 'active'"
+    "  CHECK(status IN ('active','fired','cancelled','expired','failed')),"
+    " status_reason TEXT,"
+    " created_at INTEGER NOT NULL, created_by TEXT NOT NULL,"
+    " expires_at INTEGER NOT NULL,"
+    " fired_at INTEGER, fired_price INTEGER, work_item_id TEXT,"
+    " outcome TEXT,"
+    " last_checked_at INTEGER, last_price INTEGER, last_error TEXT,"
+    " updated_at INTEGER NOT NULL,"
+    " CHECK((qty IS NULL) <> (amount_base IS NULL)),"
+    " CHECK(NOT (mode = 'auto' AND broker = 'saxo_live')))",
+    "CREATE INDEX IF NOT EXISTS idx_price_triggers_status"
+    " ON price_triggers(status, ticker, exchange)",
 ]
 
 
@@ -111,39 +165,58 @@ def init(conn) -> None:
             if "duplicate column" not in str(e):
                 raise
     _widen_provider_kinds(conn)
+    _widen_account_environments(conn)
 
 
 def _widen_provider_kinds(conn) -> None:
     """Databases created before the Claude Agent SDK provider have a CHECK
-    on providers.kind that rejects 'claude_sdk'. SQLite cannot alter a CHECK,
-    so rebuild the table in place (create-copy-drop-rename; no indexes or
-    triggers hang off this table). Rows and ids are preserved, so the
-    agents/provider_models references stay valid."""
+    on providers.kind that rejects 'claude_sdk'."""
+    _widen_check(conn, "providers", "'anthropic','openai_compatible'",
+                 "'anthropic','claude_sdk','openai_compatible'", "claude_sdk")
+
+
+def _widen_account_environments(conn) -> None:
+    """broker_accounts.environment used to reject 'live' outright. It must be
+    representable so the live-trading switch (DESIGN.md §22) can refuse it
+    by name; creating such an account still needs `bin/claire live setup`."""
+    _widen_check(conn, "broker_accounts", "IN ('paper','sim'))",
+                 "IN ('paper','sim','live'))",
+                 # the marker must be the CHECK itself: the old table's
+                 # comment ("-- no 'live'") contains the bare word
+                 "'sim','live'")
+
+
+def _widen_check(conn, table, old, new, marker) -> None:
+    """SQLite cannot alter a CHECK, so rebuild the table in place
+    (create-copy-drop-rename). Rows and ids are preserved, so every foreign
+    key pointing at the table stays valid. legacy_alter_table keeps the
+    rename from re-validating views that reference the table mid-swap."""
     row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
-                       " AND name='providers'").fetchone()
-    if row is None or "claude_sdk" in row[0]:
+                       " AND name=?", (table,)).fetchone()
+    if row is None or marker in row[0]:
         return
-    new_sql = row[0].replace("'anthropic','openai_compatible'",
-                             "'anthropic','claude_sdk','openai_compatible'")
-    if "claude_sdk" not in new_sql:
-        raise RuntimeError("providers table has an unexpected kind CHECK; "
-                           "migrate it by hand")
-    for old in ("CREATE TABLE IF NOT EXISTS providers", "CREATE TABLE providers"):
-        if new_sql.startswith(old):
-            new_sql = "CREATE TABLE providers_new" + new_sql[len(old):]
+    new_sql = row[0].replace(old, new)
+    if marker not in new_sql:
+        raise RuntimeError(f"{table} has an unexpected CHECK; migrate it by "
+                           "hand")
+    for prefix in (f"CREATE TABLE IF NOT EXISTS {table}",
+                   f"CREATE TABLE {table}"):
+        if new_sql.startswith(prefix):
+            new_sql = f"CREATE TABLE {table}_new" + new_sql[len(prefix):]
             break
     conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("PRAGMA legacy_alter_table=ON")
     try:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
-                           " AND name='providers'").fetchone()
-        if "claude_sdk" in cur[0]:          # another process won the race
+                           " AND name=?", (table,)).fetchone()
+        if marker in cur[0]:                    # another process won the race
             conn.execute("COMMIT")
             return
         conn.execute(new_sql)
-        conn.execute("INSERT INTO providers_new SELECT * FROM providers")
-        conn.execute("DROP TABLE providers")
-        conn.execute("ALTER TABLE providers_new RENAME TO providers")
+        conn.execute(f"INSERT INTO {table}_new SELECT * FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
         bad = conn.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
             raise RuntimeError(f"foreign key check failed: {list(bad)[:3]}")
@@ -152,4 +225,5 @@ def _widen_provider_kinds(conn) -> None:
         conn.execute("ROLLBACK")
         raise
     finally:
+        conn.execute("PRAGMA legacy_alter_table=OFF")
         conn.execute("PRAGMA foreign_keys=ON")

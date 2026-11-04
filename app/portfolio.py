@@ -125,6 +125,22 @@ def levels_for(conn, position, fills) -> dict:
     return out
 
 
+def legs_for(conn, account_id, instrument_id) -> list[dict]:
+    """The protective orders resting at the venue for this position (the
+    bracket's stop-loss / take-profit, DESIGN.md §11a) — what will actually
+    sell it if the price gets there, as opposed to the thesis levels."""
+    return [{"leg": r["leg"], "side": r["side"],
+             "qty": float(_d(r["qty"])),
+             "price": float(_d(r["stop_loss"] if r["leg"] == "stop"
+                               else r["limit_price"])),
+             "status": r["status"], "venue_order": r["broker_order_id"]}
+            for r in conn.execute(
+                "SELECT * FROM orders WHERE account_id=? AND instrument_id=?"
+                " AND leg IS NOT NULL AND status IN ('placed',"
+                "'partially_filled') ORDER BY leg", (account_id,
+                                                     instrument_id))]
+
+
 def realized_for(conn, account_id, instrument_id) -> float:
     (pl,) = conn.execute(
         "SELECT COALESCE(SUM(c.realized_pl_base),0) FROM lot_closures c"
@@ -180,6 +196,7 @@ def build(conn, market, *, clock, cal=None) -> dict:
                                           p["instrument_id"])
         p["fills"] = fills_for(conn, p["account_id"], p["instrument_id"])
         p["levels"] = levels_for(conn, p, p["fills"])
+        p["legs"] = legs_for(conn, p["account_id"], p["instrument_id"])
         p["holding_days"] = (int(clock()) - (p["opened_at"] or
                                              int(clock()))) // 86400
         try:

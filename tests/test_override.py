@@ -197,3 +197,61 @@ def test_decided_runs_carry_full_agent_evidence(tmp_path):
         assert card["reports"][0]["agent"] == "arbiter"
     finally:
         srv.shutdown()
+
+
+# ── stops: required for a buy or a short, not for an exit ────────────────
+def _hold(conn, repo, shares="10"):
+    from app.accounting.money import to_micro
+    repo.create_account("a", "alpaca", "paper", "USD",
+                        fee_model={"type": "flat", "per_trade": "0"}, ts=T0)
+    repo.deposit("a", to_micro("10000"), ts=T0)
+    repo.create_order(id="o", account_id="a", instrument_id="NASDAQ:SBUX",
+                      side="buy", qty=to_micro(shares),
+                      limit_price=to_micro("100"), status="placed",
+                      expires_at=T0 + 3600, ts=T0)
+    repo.record_fill("o", broker_fill_id="f", qty=to_micro(shares),
+                     price_native=to_micro("100"), fx_rate=to_micro("1"),
+                     ts=T0)
+
+
+def test_a_buy_without_a_stop_is_refused(tmp_path):
+    _, _, desk = _desk(tmp_path)
+    with pytest.raises(ValueError, match="stop below"):
+        desk.override("wi_pass", direction="buy", entry=100.0, stop=None,
+                      background=False)
+
+
+def test_a_sell_with_nothing_held_is_a_short_and_needs_a_stop(tmp_path):
+    _, _, desk = _desk(tmp_path)
+    with pytest.raises(ValueError, match="SHORT"):
+        desk.override("wi_pass", direction="sell", entry=100.0, stop=None,
+                      background=False)
+    # with a stop above the entry it is accepted
+    assert desk.override("wi_pass", direction="sell", entry=100.0,
+                         stop=106.0, target=90.0, background=False)
+
+
+def test_an_exit_of_held_shares_needs_no_stop(tmp_path):
+    conn, repo, desk = _desk(tmp_path)
+    _hold(conn, repo)
+    assert desk.desk_held("SBUX") == 10
+    wi = desk.override("wi_pass", direction="sell", entry=104.0, stop=None,
+                       background=False)
+    t = json.loads(conn.execute("SELECT thesis_json FROM work_items WHERE"
+                                " id=?", (wi,)).fetchone()[0])
+    assert t["direction"] == "sell" and t["stop_loss"] is None
+
+
+def test_reference_levels_for_the_override_form():
+    from app.dashboards import _levels
+    # 30 bars: high = close + 1, low = close - 1, close rising by 1 a day
+    closes = [100 + i for i in range(30)]
+    c = {"close": closes, "high": [x + 1 for x in closes],
+         "low": [x - 1 for x in closes]}
+    L = _levels(c)
+    assert L["sma20"] == sum(closes[-20:]) / 20
+    assert L["low20"] == closes[-20] - 1 and L["high20"] == closes[-1] + 1
+    # true range each day = max(2, |h-pc|=2, |l-pc|=0) = 2 → ATR 2
+    assert L["atr14"] == 2.0
+    assert L["sma50"] is None                       # not enough bars
+    assert _levels({"close": [1, 2], "high": [1, 2], "low": [1, 2]}) == {}

@@ -129,17 +129,22 @@ def build_tools(conn, repo, desk, market):
         return json.dumps({"thesis": row and row["thesis_json"]}, default=str)
 
     @tool
-    def saxo_live_positions() -> str:
-        """Richard's REAL Saxo account (read-only): cash, total value and open
-        positions with P/L. This is his actual money, separate from the
-        desk's paper book — never mix the two up, and there is no way to
-        trade it from here."""
+    def saxo_account(account: str = "live") -> str:
+        """Richard's Saxo accounts, read-only: cash, total value, open
+        positions with P/L, and working orders. account="live" is his REAL
+        money account (SAXO_LIVE_ACCOUNT_ID); account="sim" is his Saxo paper account
+        (SAXO_SIM_ACCOUNT_ID). Both are separate from the desk's own paper book — say
+        which one you are describing, and never mix real and simulated
+        figures. There is no way to trade from here."""
         from ..tools import saxo_live
-        return json.dumps(saxo_live.summary(), default=str)
+        if account not in ("live", "sim"):
+            return json.dumps({"error": "account must be 'live' or 'sim'"})
+        return json.dumps(saxo_live.summary(account, with_orders=True),
+                          default=str)
 
     return [run_pipeline, pipeline_status, list_pending_approvals,
             portfolio_summary, share_pl, broker_metrics, market_quote,
-            market_chart, market_search, explain_thesis, saxo_live_positions]
+            market_chart, market_search, explain_thesis, saxo_account]
 
 
 class Claire:

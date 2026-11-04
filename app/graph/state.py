@@ -126,7 +126,7 @@ class Approval(BaseModel):
     qty: float | None = Field(default=None, gt=0)        # sells: shares to close
     trail_pct: float | None = Field(default=None, gt=0, le=90)
     """Trailing floor: how far below entry the watcher's stop-alert sits."""
-    broker: Literal["alpaca", "saxo", "moomoo"] | None = None
+    broker: Literal["alpaca", "saxo", "moomoo", "saxo_live"] | None = None
     actor: str                                           # "human" | "reaper"
     token: str
     at: datetime
@@ -134,7 +134,9 @@ class Approval(BaseModel):
 
 class PipelineState(BaseModel):
     work_item_id: str
-    kind: Literal["pipeline", "sell_review", "override"] = "pipeline"
+    # manual: a trade YOU started (the Sell button, later price triggers) —
+    # no analysis of its own, same gate and execution as everything else
+    kind: Literal["pipeline", "sell_review", "override", "manual"] = "pipeline"
     ticker: str
     instrument: Instrument
     # why this run exists — the screener's rationale or the watcher's breach.

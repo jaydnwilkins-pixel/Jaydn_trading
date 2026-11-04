@@ -6,6 +6,7 @@ token verified against the DB, single-use enforced here. It is not a tool any
 agent can call.
 """
 import hmac
+import json
 import time
 from typing import Literal
 
@@ -37,16 +38,42 @@ class ResumeBody(BaseModel):
     size_base: float | None = None
     qty: float | None = None
     trail_pct: float | None = None
-    broker: Literal["alpaca", "saxo", "moomoo"] | None = None
+    broker: Literal["alpaca", "saxo", "moomoo", "saxo_live"] | None = None
 
 
 class OverrideBody(BaseModel):
     work_item_id: str                       # the PASS being overturned
     direction: Literal["buy", "sell"]
     entry: float = Field(gt=0)              # a pass thesis carries no prices,
-    stop: float = Field(gt=0)               # so the human must author them
+    # a buy or a short must carry a stop; a sell that only EXITS shares the
+    # desk holds needs none (desk.override decides which it is)
+    stop: float | None = Field(default=None, gt=0)
     target: float | None = Field(default=None, gt=0)
     note: str | None = None
+    actor: str
+
+
+class ManualBody(BaseModel):
+    """A trade you started (desk.manual_trade). See that docstring for the
+    rules; this only shapes the request."""
+    ticker: str
+    exchange: str
+    direction: Literal["buy", "sell"]
+    entry: float = Field(gt=0)              # the limit price
+    stop: float | None = Field(default=None, gt=0)
+    target: float | None = Field(default=None, gt=0)
+    note: str | None = Field(default=None, max_length=200)
+    # prefill for the approval card: {qty, size_base, broker, trail_pct}
+    suggested: dict | None = None
+    source: str = "manual"
+    actor: str
+
+
+class AmendBody(BaseModel):
+    work_item_id: str
+    entry: float = Field(gt=0)
+    stop: float | None = Field(default=None, gt=0)
+    target: float | None = Field(default=None, gt=0)
     actor: str
 
 
@@ -156,6 +183,22 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
                      " updated_at=? WHERE id=?", (now, body.work_item_id))
         return {"ok": True, "state": desk.work_item(body.work_item_id)["state"]}
 
+    @app.post("/internal/amend")
+    def internal_amend(body: AmendBody, request: Request):
+        """Edit the levels of a refused, approved trade before a retry. Same
+        trust boundary as /internal/resume; places nothing by itself."""
+        _guard(request)
+        if body.actor != "human":
+            raise HTTPException(403, "an amendment requires a human actor")
+        try:
+            th = desk.amend(body.work_item_id, entry=body.entry,
+                            stop=body.stop, target=body.target)
+        except ValidationError as e:
+            raise HTTPException(422, str(e.errors()[0].get("msg"))[:300])
+        except ValueError as e:
+            raise HTTPException(409, str(e)[:300])
+        return {"ok": True, "thesis": json.loads(th.model_dump_json())}
+
     @app.post("/internal/override")
     def internal_override(body: OverrideBody, request: Request):
         """Overturn a PASS. Same trust boundary as /internal/resume — the
@@ -176,6 +219,30 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
         except ValueError as e:                     # wrong state, already done
             raise HTTPException(409, str(e)) from e
         return {"ok": True, "work_item_id": wi}
+
+    @app.post("/internal/manual")
+    def internal_manual(body: ManualBody, request: Request):
+        """Start a trade you decided on (the Sell button; later, price
+        triggers). Same trust boundary as /internal/override: it places
+        nothing — it puts the trade in front of the human at the gate."""
+        from .desk import Conflict
+        _guard(request)
+        if body.actor != "human":
+            raise HTTPException(403, "a manual trade requires a human actor")
+        try:
+            wi = desk.manual_trade(
+                body.ticker, body.exchange, body.direction, body.entry,
+                stop=body.stop, target=body.target, note=body.note,
+                suggested=body.suggested, source=body.source)
+        except ValidationError as e:            # incoherent levels
+            raise HTTPException(400, str(e)[:300]) from e
+        except Conflict as e:                   # already in flight
+            raise HTTPException(409, str(e)[:300]) from e
+        except ValueError as e:                 # bad input
+            raise HTTPException(400, str(e)[:300]) from e
+        row = desk.work_item(wi)
+        return {"ok": True, "work_item_id": wi,
+                "state": row["state"] if row else None}
 
     @app.post("/api/run")
     def start_run(body: RunBody):

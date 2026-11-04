@@ -55,7 +55,7 @@ def build_world():
 
     market = build_market()
     narratives = Narratives(var / "narratives")
-    brokers = wiring.build_brokers()
+    brokers = wiring.build_brokers(conn=conn)
     deps = wiring.build_deps(conn, repo, narratives, market, brokers=brokers)
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
     serde = JsonPlusSerializer(allowed_msgpack_modules=[
@@ -71,7 +71,7 @@ def build_world():
 def build_custodian(conn, repo, brokers, market, secret):
     """In-process custodian (fills need the broker adapters this process
     owns); cadence comes from the schedules table via the Scheduler."""
-    from .. import sessions
+    from .. import alerts, sessions
     from ..approvals import default_resume_post
     from ..custodian import Custodian, _account_broker_from_db
 
@@ -80,7 +80,10 @@ def build_custodian(conn, repo, brokers, market, secret):
                                                      secret),
                      account_broker=_account_broker_from_db(conn),
                      fx_rate_for=make_fx_rate_for(conn, market),
-                     cal=sessions.load(conn) or None)
+                     cal=sessions.load(conn) or None,
+                     # an unprotected position reaches Richard on Telegram,
+                     # not only as a flag on a dashboard tile (§11a)
+                     alert=alerts.send)
 
 
 class FxUnavailable(RuntimeError):
@@ -230,6 +233,21 @@ def start_scheduler(conn, repo, desk, market, custodian):
                 "skipped_invalid": rejected,
                 "picker": "event scan (unusual volume)"}
 
+    def run_price_triggers(spec):
+        """Watchlist price triggers (DESIGN.md §15a). Runs here because
+        claire-api owns the desk: a hit becomes desk.manual_trade, and a
+        pre-approved (paper-only) rule is approved through the same
+        token-checked resume as a click on the card."""
+        from .. import alerts, price_triggers
+        from ..approvals import default_resume_post
+        return price_triggers.run_once(
+            conn, desk, market,
+            resume_post=default_resume_post(
+                "http://127.0.0.1:7788",
+                os.environ.get("CLAIRE_INTERNAL_SECRET", "")),
+            alert=alerts.send, cal=sessions.load(conn) or None,
+            env=os.environ, require_open=spec.get("require_open", True))
+
     sched = scheduler.Scheduler(conn, {
         "custodian": lambda spec: custodian.run_once(),
         "reconcile": run_reconcile,
@@ -237,6 +255,7 @@ def start_scheduler(conn, repo, desk, market, custodian):
         "analysis_eu": run_analysis,
         "analysis_us": run_analysis,
         "event_scan": run_event_scan,
+        "price_triggers": run_price_triggers,
     })
     sched.start()
     # keep the read-only Saxo LIVE sign-in alive (refresh tokens rotate and

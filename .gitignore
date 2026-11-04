@@ -9,4 +9,4 @@ __pycache__/
 # ~/voice symlinks) — never committed
 voice/
 # real-account Saxo sign-in tokens (bin/saxo login) — never committed
-etc/saxo_live_token*
+etc/saxo_*_token*

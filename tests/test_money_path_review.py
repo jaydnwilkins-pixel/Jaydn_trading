@@ -424,6 +424,9 @@ def api_world():
 
     def execute(state):
         script.calls.append("execute")
+        script.theses = getattr(script, "theses", []) + [
+            (state.thesis.entry_high, state.thesis.stop_loss,
+             state.thesis.take_profit)]
         if fail["n"]:
             fail["n"] -= 1
             raise RuntimeError("venue down")
@@ -758,3 +761,56 @@ def test_one_bad_pick_does_not_stop_the_others():
     assert d.started == ["SGX:D05"]
     assert [s["ticker"] for s in skipped] == ["BAD", "X"]
     assert started[0]["work_item"] == "wi_D05"
+
+
+def test_a_refused_trade_can_be_amended_then_retried(api_world):
+    """Saxo refused a bracket as TooFarFromEntryOrder (2026-11-04); the human
+    edits the levels and retries. Execution must see the NEW levels — it
+    reads the thesis from the graph state, not desk.db."""
+    from app.approvals import AuthError, thesis_action
+    conn, repo, script, resume_post, wi = api_world
+    with pytest.raises(AuthError):
+        thesis_action(conn, {"work_item_id": wi, "action": "approve",
+                             "size_base": 1000.0, "broker": "alpaca",
+                             "token": _row(conn, wi)["approval_token"]},
+                      resume_post, clock=lambda: T0)
+    seen = script.theses
+    assert seen and seen[-1][1] is not None
+    entry = seen[-1][0]
+    code, out = amend_post(resume_post, wi, entry=entry, stop=entry * 0.95,
+                           target=entry * 1.08)
+    assert code == 200, out
+    code, _ = resume_post({"work_item_id": wi, "status": "approved",
+                           "actor": "human",
+                           "token": _row(conn, wi)["approval_token"],
+                           "size_base": 1000.0, "broker": "alpaca"})
+    assert code == 200
+    assert script.theses[-1] == (entry, entry * 0.95, entry * 1.08)
+    t = json.loads(_row(conn, wi)["thesis_json"])
+    assert t["stop_loss"] == entry * 0.95
+    events = [r[0] for r in conn.execute(
+        "SELECT to_state FROM events WHERE item_id=? ORDER BY id", (wi,))]
+    assert "amended" in events
+
+
+def test_amend_refuses_incoherent_levels_and_unrefused_trades(api_world):
+    conn, repo, script, resume_post, wi = api_world
+    code, _ = amend_post(resume_post, wi, entry=100, stop=95)
+    assert code == 409                       # still awaiting approval
+    from app.approvals import AuthError, thesis_action
+    with pytest.raises(AuthError):
+        thesis_action(conn, {"work_item_id": wi, "action": "approve",
+                             "size_base": 1000.0, "broker": "alpaca",
+                             "token": _row(conn, wi)["approval_token"]},
+                      resume_post, clock=lambda: T0)
+    code, _ = amend_post(resume_post, wi, entry=100, stop=105)   # buy: stop above
+    assert code == 422
+
+
+def amend_post(resume_post, wi, **levels):
+    """POST /internal/amend through the same TestClient as resume_post."""
+    client = resume_post.__closure__[0].cell_contents
+    r = client.post("/internal/amend",
+                    json={"work_item_id": wi, "actor": "human", **levels},
+                    headers={"x-claire-secret": SECRET})
+    return r.status_code, r.json()

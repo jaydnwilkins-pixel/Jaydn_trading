@@ -53,6 +53,12 @@ DEFAULTS = [
      "(no LLM; wakes the pipeline only on a real move)", "claire-api",
      {"type": "interval", "minutes": 60, "require_open": True,
       "threshold": 3.0, "max_runs": 1}),
+    # price triggers (DESIGN.md §15a): one-shot "buy/sell when price ≤/≥ X"
+    # rules from the Watchlist page. Deterministic; evaluated only while
+    # each rule's market is open, so an overnight quote never fires one.
+    ("price_triggers", "Price triggers from the Watchlist (one-shot buy/sell"
+     " rules; card, or pre-approved paper order)", "claire-api",
+     {"type": "interval", "minutes": 2, "require_open": True}),
 ]
 
 
@@ -67,6 +73,8 @@ JOB_INVOKES = {
     "reconcile": {"agent": None, "then": None},
     "watcher": {"agent": None, "then": "sell_review pipeline on breach"},
     "event_scan": {"agent": None, "then": "full pipeline on a volume spike"},
+    "price_triggers": {"agent": None,
+                       "then": "approval card (or pre-approved paper order)"},
 }
 
 
@@ -229,7 +237,15 @@ class Scheduler:
     def tick(self):
         now = int(self.clock())
         fired = []
-        for r in self.conn.execute("SELECT * FROM schedules WHERE enabled=1"):
+        # fetchall FIRST: iterating the cursor kept a read snapshot open on
+        # this connection while jobs ran. A job that makes ANOTHER connection
+        # write (the custodian's resume retry → claire-api's request thread)
+        # left that snapshot stale, SQLite refused to upgrade it to a write
+        # ("database is locked", immediately — busy_timeout does not apply),
+        # last_run_at was never saved, and the job re-fired on every 20 s tick.
+        rows = self.conn.execute(
+            "SELECT * FROM schedules WHERE enabled=1").fetchall()
+        for r in rows:
             job = r["job"]
             if job not in self.runners:
                 continue

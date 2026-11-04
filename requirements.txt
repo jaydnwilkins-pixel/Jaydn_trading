@@ -24,6 +24,15 @@ pytest==9.1.1
 # pinned, so a fresh install would break every run_python call
 numpy==2.5.2
 pandas==3.0.5
+# Telegram approval charts (app/chart_png.py, Agg backend, no display) —
+# matplotlib plus the dependencies it pulled in, pinned as installed
+matplotlib==3.11.2
+contourpy==1.4.0
+cycler==0.12.1
+fonttools==4.68.0
+kiwisolver==1.5.1
+pillow==13.0.0
+pyparsing==3.3.3
 # dev-only:
 pyflakes==3.4.0
 # optional, install when activating IBKR market data (see app/tools/ibkr.py):

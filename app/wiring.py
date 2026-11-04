@@ -24,16 +24,63 @@ def account_for_broker(conn):
     return account_for
 
 
-def build_brokers(env=os.environ):
-    """The sim venue is always available; real MCP venues activate only when
-    their credentials exist (honest degradation, §1.7)."""
+def build_brokers(env=os.environ, conn=None):
+    """The in-process sim is the default venue for every paper account.
+    Real Saxo venues activate only when explicitly configured:
+
+    - saxo (SIM): SAXO_SIM_EXECUTION=enabled + SAXO_SIM_TOKEN +
+      SAXO_SIM_ACCOUNT_KEY route the saxo-paper account to Saxo's SIM
+      environment — real Saxo order handling, simulated money.
+    - saxo_live (REAL MONEY): only when CLAIRE_LIVE_TRADING=enabled AND a
+      live account exists (`bin/claire live setup`). Even then every
+      placement passes the live switch (DESIGN.md §22) in submit_order, and
+      the adapter re-checks that the desk is armed as a second lock."""
     brokers = {"alpaca": PaperSimBroker(fill_mode="instant"),
                "saxo": PaperSimBroker(fill_mode="instant"),
                "moomoo": PaperSimBroker(fill_mode="instant")}
-    # TODO(step 12+): swap PaperSimBroker for MCP adapters per venue when
-    # ALPACA_PAPER_KEY / SAXO_SIM_TOKEN / OpenD are present (tools/brokers.py
-    # MCP_BROKERS carries the launch config).
+    from .tools.saxo_broker import SaxoBroker
+    if (env.get("SAXO_SIM_EXECUTION") or "").lower() == "enabled" and \
+            env.get("SAXO_SIM_ACCOUNT_KEY"):
+        token = sim_token_source(env)
+        if token is not None:
+            brokers["saxo"] = SaxoBroker(
+                "sim", token=token, account_key=env["SAXO_SIM_ACCOUNT_KEY"])
+    from . import live_trading
+    if conn is not None and live_trading.env_enabled(env):
+        acct = conn.execute("SELECT * FROM broker_accounts WHERE"
+                            " broker='saxo_live' AND environment='live'"
+                            ).fetchone()
+        from .tools import saxo_live
+        # bound to the LIVE sign-in only: a SIM token can never drive it
+        if acct is not None and acct["external_ref"]:
+
+            def armed_guard():
+                st = live_trading.status(conn, env)
+                if not st["armed"]:
+                    raise live_trading.LiveTradingBlocked(st["summary"])
+            brokers["saxo_live"] = SaxoBroker(
+                "live", token=saxo_live.token_source("live"),
+                account_key=acct["external_ref"], guard=armed_guard)
     return brokers
+
+
+def sim_token_source(env=os.environ):
+    """Where Saxo SIM trading gets its login, best first:
+
+    1. the SIM OAuth sign-in (`bin/saxo login sim`) — renewed by
+       claire-api's keepalive, alerts on Telegram when it lapses, and
+       exercises exactly the path live trading uses;
+    2. a pasted 24-hour developer-portal token (SAXO_SIM_TOKEN) — legacy,
+       dies after a day with no renewal.
+
+    Returns a () -> token callable, or None when neither is available. It is
+    always bound to SIM: the live sign-in can never serve SIM trading."""
+    from .tools import saxo_live
+    if saxo_live.token_file("sim").exists():
+        return saxo_live.token_source("sim")
+    if env.get("SAXO_SIM_TOKEN"):
+        return lambda: env["SAXO_SIM_TOKEN"]
+    return None
 
 
 def make_prepare(repo):

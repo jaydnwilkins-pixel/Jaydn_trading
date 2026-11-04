@@ -218,3 +218,33 @@ def test_local_tz_falls_back_to_etc_localtime(monkeypatch):
     # transitions, not a frozen datetime.timezone offset
     from datetime import timezone
     assert not isinstance(tz, timezone)
+
+
+def test_a_job_that_causes_other_writes_still_records_its_run(tmp_path):
+    """Regression (2026-11-04): the custodian's retry made claire-api write
+    from another connection while tick() still held its SELECT cursor open;
+    the stale read snapshot could not be upgraded, the last_run_at UPDATE
+    failed with 'database is locked', and the job re-fired every 20 s."""
+    import sqlite3
+    from app.accounting import db as desk_db
+    from app.scheduler import Scheduler
+    path = tmp_path / "d.db"
+    conn = desk_db.connect(path)
+    desk_db.init(conn)
+    scheduler.seed(conn)
+    # as on the live desk: several jobs enabled, the custodian NOT the last
+    # row — so the SELECT cursor is still open while it runs
+    conn.execute("UPDATE schedules SET enabled = job IN ('custodian',"
+                 " 'watcher', 'event_scan')")
+
+    def custodian_like(spec):
+        other = sqlite3.connect(path, isolation_level=None)   # e.g. claire-api
+        other.execute("INSERT INTO service_health (service, checked_at, ok)"
+                      " VALUES ('x', 1, 'ok')")
+        other.close()
+        return {"ok": True}
+    s = Scheduler(conn, {"custodian": custodian_like}, clock=lambda: 1_800_000_000)
+    assert s.tick() == ["custodian"]
+    assert conn.execute("SELECT last_run_at FROM schedules WHERE"
+                        " job='custodian'").fetchone()[0] == 1_800_000_000
+    assert s.tick() == []                       # not due again 0 s later

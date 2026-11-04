@@ -1,6 +1,7 @@
 <meta charset="utf-8"><title>Claire — Portfolio</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script src="/charts.js"></script>
+<script src="/sell.js"></script>
 <script>nav('/portfolio')</script>
 <main>
   <h1>Portfolio</h1>
@@ -8,7 +9,11 @@
   <div class="exchcols" id="cols"></div>
   <div id="empty"></div>
 
-  <h2>Accounts</h2>
+  <h2>Saxo LIVE — your real account at the broker</h2>
+  <div id="saxolive"><p class="muted">loading…</p></div>
+
+  <h2>Accounts <span class="muted" style="font-size:.8rem">the desk's own
+    paper book</span></h2>
   <div id="accounts"></div>
 
   <h2>Closed in the last 30 days</h2>
@@ -28,7 +33,64 @@ async function refresh() {
   if (typing()) return;
   DATA = await api('/api/portfolio');
   renderStrip(); renderCols(); renderRest();
+  sellRestore();                      // an open Sell form survives refresh
   startClocks();
+  renderSaxoLive();                   // independent: a Saxo hiccup never
+}                                     // blanks the rest of the page
+
+/* Real money, read-only, straight from Saxo (same data as /saxo?env=live).
+   Kept visibly apart from the desk's paper book above and below it. */
+async function renderSaxoLive() {
+  const el = document.getElementById('saxolive');
+  let d;
+  try { d = await api('/api/saxo-account?env=live'); }
+  catch (e) {
+    el.innerHTML = `<div class="card"><p class="muted">${esc(e.message)} —
+      this section needs the dashboard key (🔑) because it shows your real
+      account.</p></div>`;
+    return;
+  }
+  const link = `<a href="/saxo?env=live">Saxo accounts page →</a>`;
+  if (d.error) {
+    el.innerHTML = `<div class="card" style="border:2px solid var(--bad)">
+      <b class="bad">⚠ REAL MONEY</b> · account ${esc(d.account_id || '')} ·
+      <span class="muted">${esc(d.error)}</span> · ${link}
+      (sign in there)</div>`;
+    return;
+  }
+  const b = d.balance || {}, ccy = b.Currency || '', pos = d.positions || [];
+  const m = v => v == null ? '—' : fmt(v, 2) + ' ' + esc(ccy);
+  const sgn = (v, c) => v == null ? '—' :
+    `<span class="${v > 0 ? 'ok' : v < 0 ? 'bad' : ''}">${v > 0 ? '+' : ''}${
+      fmt(v, 2)}${c ? ' ' + esc(c) : ''}</span>`;
+  const upl = pos.some(p => p.pnl_base != null)
+    ? pos.reduce((s, p) => s + (p.pnl_base || 0), 0)
+    : b.UnrealizedMarginProfitLoss;
+  const rows = pos.length ? pos.map(p => `<tr>
+      <td><a href="/saxo?env=live&pos=${encodeURIComponent(p.symbol || '')}"
+        title="open its chart on the Saxo accounts page">
+        <b>${esc(p.symbol)}</b></a><br><span class="muted">${esc(p.name || '')}</span></td>
+      <td style="text-align:right">${fmt(p.amount, 0)}</td>
+      <td style="text-align:right">${fmt(p.avg_open_price, 2)}</td>
+      <td style="text-align:right">${fmt(p.current_price, 2)}</td>
+      <td style="text-align:right">${sgn(p.pnl, p.currency)}</td>
+      <td style="text-align:right">${p.pnl_pct == null ? '—'
+        : sgn(p.pnl_pct).replace('</span>', '%</span>')}</td>
+      <td style="text-align:right">${p.weight_pct == null ? '—'
+        : fmt(p.weight_pct, 1) + '%'}</td></tr>`).join('')
+    : `<tr><td colspan="7" class="muted">No open positions.</td></tr>`;
+  el.innerHTML = `<div class="card" style="border:2px solid var(--bad)">
+    <p><b class="bad">⚠ REAL MONEY</b> · Saxo account
+      ${esc(d.account_id || '')} · read-only · ${link}</p>
+    <p>Total value <b>${m(b.TotalValue)}</b> · cash <b>${m(b.CashBalance)}</b>
+      · unrealised P/L <b>${sgn(upl, ccy)}</b> · available to trade
+      <b>${m(b.MarginAvailableForTrading)}</b></p>
+    <table><thead><tr><th>Instrument</th><th style="text-align:right">Qty</th>
+      <th style="text-align:right">Avg cost</th>
+      <th style="text-align:right">Price</th>
+      <th style="text-align:right">P/L</th><th style="text-align:right">P/L %</th>
+      <th style="text-align:right">Allocation</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
 }
 
 function renderStrip() {
@@ -93,6 +155,16 @@ function posCard(p) {
       <span>${fmt(m.week52_high)} high</span></div>`;
   }
   const volRatio = m.volume && m.avg_volume ? m.volume / m.avg_volume : null;
+  // the Sell button: only for a LONG the desk itself holds (it can only sell
+  // what it bought); keyed by account too — one name can sit in two
+  const sk = p.account_id + '|' + id;
+  if (p.qty > 0) sellRegister(sk, {ticker: p.ticker, exchange: p.exchange,
+    broker: p.broker, account_id: p.account_id, label: p.account_id,
+    held: p.qty, price: m.price, currency: m.currency || p.currency,
+    whole: String(p.broker).startsWith('saxo'), source: 'portfolio'});
+  const legs = (p.legs || []).map(l => `${l.leg === 'stop' ? 'stop'
+    : 'target'} <b class="${l.leg === 'stop' ? 'bad' : 'ok'}">${fmt(l.price)}</b>
+    ×${fmt(l.qty, 4)}`).join(' · ');
   return `<div class="poscard ${p.is_open ? '' : 'closedmkt'}" id="pc-${esc(id)}">
     <div class="poshead">
       <div><span class="tk">${esc(p.ticker)}</span>
@@ -130,7 +202,14 @@ function posCard(p) {
         : ''}${lv.take_profit ? ` · target <b class="ok">${
         fmt(lv.take_profit)}</b>` : ''}${lv.alert ? ` · ${lv.alert_rule
         } at <b class="warn">${fmt(lv.alert)}</b>` : ''}
+      ${legs ? `<br><span title="orders resting at the broker that will sell
+        this position if the price gets there">at the venue: ${legs}</span>`
+        : ''}
     </div>
+    ${p.qty > 0 ? `<div class="row" style="margin:.1rem 0 .4rem;gap:.5rem">
+      ${sellButton(sk)}<span class="muted" style="font-size:.7rem">goes to
+      Approvals first — nothing sells until you approve</span></div>
+      <div id="sellbox-${esc(sk)}"></div>` : ''}
 
     <div class="row" style="justify-content:space-between;margin-bottom:.3rem">
       <div class="tabs" style="margin:0">${RANGES.map(([r, lbl]) =>

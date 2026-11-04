@@ -23,6 +23,12 @@ class PlacedOrder:
     broker_order_id: str
     status: str                     # accepted | rejected
     detail: str = ""
+    # protective orders the venue created WITH this one and holds on its own
+    # (Saxo's related stop-loss / take-profit): [{"leg": "stop"|"target",
+    # "order_id": venue id, "price": venue price, "verified": bool}].
+    # submit_order persists each as an orders row (DESIGN.md §11a); a venue
+    # that keeps no separate leg orders (the in-process sim) returns [].
+    legs: list = field(default_factory=list)
 
 
 @dataclass

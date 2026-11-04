@@ -4,7 +4,9 @@ An AI trading desk: specialist LLM agents research a stock, a bull and a bear
 debate it, an arbiter issues a typed verdict, and **nothing executes without
 explicit human approval verified by a single-use token**. Execution and
 accounting are deterministic Python — no LLM ever touches money. Paper/SIM
-only, enforced in code and schema.
+by default; real-money trading on Saxo exists but is OFF behind a four-lock
+switch (DESIGN.md §22, `bin/claire live`). Saxo how-to — signing in, the
+Saxo accounts page, SIM and live trading: [docs/SAXO.md](docs/SAXO.md).
 
 Full specification: [DESIGN.md](DESIGN.md). Build status: **all §20 steps
 implemented**. On this machine `CLAIRE_INTERNAL_SECRET` is already set in

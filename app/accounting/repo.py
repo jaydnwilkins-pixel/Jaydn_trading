@@ -34,14 +34,20 @@ class Repo:
 
     # ── setup ────────────────────────────────────────────────────────────
     def create_account(self, id, broker, environment, base_currency,
-                       fee_model: dict, risk_limits: dict | None = None, *, ts):
-        if environment not in ("paper", "sim"):
+                       fee_model: dict, risk_limits: dict | None = None, *, ts,
+                       allow_live=False, external_ref=None):
+        # A live account is created ONLY by `bin/claire live setup`, which
+        # passes allow_live after checking the machine-local switch
+        # (DESIGN.md §22). Every other caller still cannot make one.
+        if environment not in ("paper", "sim") and not (
+                environment == "live" and allow_live):
             raise LedgerError(f"live trading is unrepresentable: {environment!r}")
         self.conn.execute(
             "INSERT INTO broker_accounts (id, broker, environment, base_currency,"
-            " fee_model, risk_limits, opened_at) VALUES (?,?,?,?,?,?,?)",
+            " fee_model, risk_limits, external_ref, opened_at)"
+            " VALUES (?,?,?,?,?,?,?,?)",
             (id, broker, environment, base_currency, json.dumps(fee_model),
-             json.dumps(risk_limits or {}), ts))
+             json.dumps(risk_limits or {}), external_ref, ts))
 
     def add_instrument(self, id, ticker, exchange, currency, name=None):
         self.conn.execute(
@@ -132,12 +138,40 @@ class Repo:
             "INSERT INTO orders (id, work_item_id, account_id, instrument_id, side,"
             " qty, limit_price, stop_loss, take_profit, status, broker_order_id,"
             " expires_at, placed_at, updated_at, client_order_id, submitted_at,"
-            " created_at, reserved_base)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " created_at, reserved_base, fx_rate)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (id, work_item_id, account_id, instrument_id, side, qty, limit_price,
              stop_loss, take_profit, status, broker_order_id,
              expires_at, ts if status == "placed" else None, ts,
-             client_order_id or id, submitted_at, ts, reserved_base))
+             client_order_id or id, submitted_at, ts, reserved_base, fx_rate))
+        return id
+
+    def create_leg_order(self, *, id, parent_order_id, leg, account_id,
+                         instrument_id, side, qty, broker_order_id, ts,
+                         expires_at, work_item_id=None, limit_price=None,
+                         stop_loss=None, fx_rate=None):
+        """A protective leg already resting at the venue (DESIGN.md §11a).
+
+        Deliberately NOT create_order: a stop-loss or take-profit only ever
+        reduces risk, so it skips check_risk, reserves no cash and does not
+        count toward max_trades_per_day — refusing to record a stop because
+        the day's trade cap was hit would leave the book blind to an order
+        that IS at the venue. It is born `placed` (the venue already holds
+        it) and claimed (submitted_at), so nothing will ever place it again."""
+        if leg not in ("stop", "target"):
+            raise LedgerError(f"unknown leg {leg!r}")
+        if qty <= 0:
+            raise LedgerError("leg qty must be positive")
+        self.conn.execute(
+            "INSERT INTO orders (id, work_item_id, account_id, instrument_id,"
+            " side, qty, limit_price, stop_loss, take_profit, status,"
+            " broker_order_id, expires_at, placed_at, updated_at,"
+            " client_order_id, submitted_at, created_at, reserved_base,"
+            " fx_rate, parent_order_id, leg)"
+            " VALUES (?,?,?,?,?,?,?,?,NULL,'placed',?,?,?,?,?,?,?,NULL,?,?,?)",
+            (id, work_item_id, account_id, instrument_id, side, qty,
+             limit_price, stop_loss, broker_order_id, expires_at, ts, ts, id,
+             ts, ts, fx_rate, parent_order_id, leg))
         return id
 
     def mark_order(self, order_id, status, *, ts, broker_order_id=None):
@@ -253,9 +287,11 @@ class Repo:
             # moment it is decided, so queued pending_session orders count
             # too (they used to be invisible until placed)
             start, end = self._local_day(instrument_id, ts)
+            # protective legs are not trades the desk decided: one bracket is
+            # one trade, not three, and a re-protection is not a new one
             (n,) = self.conn.execute(
                 "SELECT COUNT(*) FROM orders WHERE account_id=?"
-                " AND status != 'rejected'"
+                " AND status != 'rejected' AND leg IS NULL"
                 " AND COALESCE(created_at, placed_at, updated_at) >= ?"
                 " AND COALESCE(created_at, placed_at, updated_at) < ?",
                 (account_id, start, end)).fetchone()

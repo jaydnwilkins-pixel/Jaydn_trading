@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Read-only view of the REAL Saxo account (app/tools/saxo_live.py).
-#   bin/saxo login       sign in once in the browser (OAuth + PKCE)
-#   bin/saxo status      is the sign-in alive, and for how long
-#   bin/saxo positions   cash + open positions
+# Read-only views of the two Saxo accounts (app/tools/saxo_live.py).
+#   bin/saxo login sim|live        sign in (OAuth + PKCE, browser on this PC)
+#   bin/saxo status                both sign-ins: alive, and for how long
+#   bin/saxo positions [sim|live]  cash, positions, working orders
+#   bin/saxo test-alert            send a test Telegram/desktop alert
 # Nothing here can place, change or cancel an order.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

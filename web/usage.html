@@ -1,0 +1,264 @@
+<!doctype html>
+<meta charset="utf-8"><title>Claire — Usage</title>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
+<script>nav('/usage')</script>
+<style>
+.ubar rect { cursor:default; }
+.uswatch { display:inline-block; width:9px; height:9px; border-radius:2px;
+  margin-right:.35rem; vertical-align:middle; }
+td.num, th.num { text-align:right; font-family:var(--mono); }
+.uchart { background:var(--panel); border:1px solid var(--line);
+  border-radius:12px; padding:.7rem .9rem; }
+.uchart svg { display:block; width:100%; height:auto; }
+</style>
+<main>
+  <h1>Usage</h1>
+  <p class="muted">LLM tokens used by every agent and entry point. Claire's
+  calls run on the Claude Max subscription through the Claude Agent SDK, so
+  nothing is billed per call — "API-equivalent value" is only what the same
+  tokens would cost at published API prices (what the plan is absorbing).
+  Input tokens include cached prompt tokens.</p>
+
+  <div class="tiles" id="tiles">loading…</div>
+
+  <div class="row" style="justify-content:space-between;margin-top:1rem">
+    <h2 style="margin:0">Tokens per day, by source</h2>
+    <div class="row">
+      <select id="days" onchange="load()">
+        <option value="7">last 7 days</option>
+        <option value="14">last 14 days</option>
+        <option value="30">last 30 days</option>
+        <option value="90">last 90 days</option>
+      </select>
+      <button class="ghost" id="viewbtn" onclick="toggleView()">table view</button>
+    </div>
+  </div>
+  <div id="chart" class="uchart" style="margin-top:.5rem">loading…</div>
+  <div id="daytable" style="display:none;margin-top:.5rem"></div>
+
+  <h2>By source (what started the work)</h2>
+  <div id="sources">loading…</div>
+  <h2>By agent</h2>
+  <div id="agents">loading…</div>
+  <h2>By model</h2>
+  <div id="models">loading…</div>
+  <h2>Top research runs by tokens</h2>
+  <div id="runs">loading…</div>
+  <h2>Errors</h2>
+  <div id="errors">loading…</div>
+
+  <h2>Bob (separate assistant, also on the Max plan)</h2>
+  <div id="bob">loading…</div>
+  <p class="muted" id="note" style="font-size:.75rem;margin-top:1rem"></p>
+</main>
+<script>
+/* fixed colours per source key — keys are looked up, never rendered */
+const SRC_COLORS = {
+  daily_asia: '#26a69a', daily_eu: '#1f8f84', daily_us: '#5fd3c7',
+  daily: '#2bb5a8', volume_scan: 'var(--warn)', exit_review: 'var(--bad)',
+  override: 'var(--purple)', manual: 'var(--blue)', chat: 'var(--accent)',
+  agent_qa: '#e0b050', screener: '#4da3ff', journal: '#8aa0b8',
+  other: '#5d7590'};
+const colorOf = k => SRC_COLORS[k] || '#5d7590';
+let DATA = null, TABLE = false;
+
+/* 1234567 → 1.2M, 45678 → 45.7K */
+function tok(n) {
+  n = Number(n || 0);
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
+}
+const usd = v => '$' + fmt(v || 0, 2);
+
+function toggleView() {
+  TABLE = !TABLE;
+  document.getElementById('chart').style.display = TABLE ? 'none' : '';
+  document.getElementById('daytable').style.display = TABLE ? '' : 'none';
+  document.getElementById('viewbtn').textContent =
+    TABLE ? 'chart view' : 'table view';
+}
+
+function tiles(d) {
+  const t = d.totals, b = d.bob;
+  const tile = (label, v, sub) =>
+    `<div class="tile"><span>${esc(label)}</span><b>${esc(v)}</b>
+     <span style="text-transform:none">${esc(sub)}</span></div>`;
+  return [
+    tile('Today', tok(t.today.tokens) + ' tokens',
+      fmt(t.today.calls, 0) + ' calls'),
+    tile('Last 7 days', tok(t.d7.tokens) + ' tokens',
+      fmt(t.d7.calls, 0) + ' calls'),
+    tile('Last 30 days', tok(t.d30.tokens) + ' tokens',
+      fmt(t.d30.calls, 0) + ' calls'),
+    tile('30d input / output', tok(t.d30.input) + ' / ' + tok(t.d30.output),
+      tok(t.d30.cache_read) + ' cache reads'),
+    tile('30d API-equivalent', usd(t.d30.api_value),
+      'not billed · actually billed ' + usd(t.d30.billed)),
+    tile('Errors (' + d.days + 'd)', fmt(d.errors.count, 0),
+      'failed calls'),
+  ].join('') + (b && b.available ? tile('Bob, last 30 days',
+      tok(b.d30.tokens) + ' tokens', fmt(b.d30.calls, 0) + ' requests') : '');
+}
+
+function chart(d) {
+  const s = d.series;
+  const keys = d.by_source.map(b => b.key);       // biggest first
+  const W = 900, H = 240, padL = 52, padR = 10, padT = 10, padB = 26;
+  const max = Math.max(1, ...s.map(x => x.tokens));
+  const n = s.length, bw = Math.max(3, (W - padL - padR) / n * 0.7);
+  const x = i => padL + (W - padL - padR) * (i + 0.5) / n;
+  const y = v => padT + (H - padT - padB) * (1 - v / max);
+  let svg = `<svg viewBox="0 0 ${W} ${H}">`;
+  for (let g = 0; g <= 4; g++) {
+    const v = max * g / 4, yy = y(v);
+    svg += `<line x1="${padL}" y1="${yy}" x2="${W - padR}" y2="${yy}"
+      stroke="var(--line)" stroke-dasharray="3 4"/>
+      <text x="4" y="${yy + 4}" fill="var(--dim)" font-size="11">${esc(tok(v))}</text>`;
+  }
+  const every = Math.ceil(n / 14);
+  s.forEach((day, i) => {
+    let base = 0;
+    keys.forEach(k => {
+      const v = day.by_source[k] || 0;
+      if (!v) return;
+      const y1 = y(base + v), y0 = y(base);
+      svg += `<rect x="${x(i) - bw / 2}" y="${y1}" width="${bw}"
+        height="${Math.max(0.5, y0 - y1)}" fill="${colorOf(k)}"><title>${
+        esc(day.date)} · ${esc(d.source_labels[k] || k)}: ${
+        esc(tok(v))} tokens</title></rect>`;
+      base += v;
+    });
+    if (i % every === 0 || i === n - 1)
+      svg += `<text x="${x(i)}" y="${H - 8}" fill="var(--dim)" font-size="10"
+        text-anchor="middle">${esc(day.date.slice(5))}</text>`;
+  });
+  svg += '</svg>';
+  const legend = '<div class="legend">' + d.by_source.map(b =>
+    `<span><b class="uswatch" style="background:${colorOf(b.key)}"></b>${
+      esc(b.label)}</span>`).join('') + '</div>';
+  return (d.window.tokens ? svg : '<p class="muted">No model calls in this ' +
+    'window.</p>') + legend;
+}
+
+function dayTable(d) {
+  const keys = d.by_source.map(b => b.key);
+  return '<table><tr><th>day</th><th class="num">calls</th>' +
+    '<th class="num">tokens</th>' + d.by_source.map(b =>
+      `<th class="num">${esc(b.label)}</th>`).join('') +
+    '<th class="num">API-equivalent</th></tr>' +
+    d.series.slice().reverse().map(day => `<tr><td>${esc(day.date)}</td>
+      <td class="num">${fmt(day.calls, 0)}</td>
+      <td class="num">${esc(tok(day.tokens))}</td>` +
+      keys.map(k => `<td class="num">${
+        day.by_source[k] ? esc(tok(day.by_source[k])) : '—'}</td>`).join('') +
+      `<td class="num">${esc(usd(day.api_value))}</td></tr>`).join('') +
+    '</table>';
+}
+
+/* one table shape for agents / sources / models */
+function breakdown(rows, first, extra) {
+  if (!rows.length) return '<p class="muted">No calls in this window.</p>';
+  const total = rows.reduce((a, b) => a + b.tokens, 0) || 1;
+  return `<table><tr><th>${esc(first)}</th>${extra ? '<th>' +
+    esc(extra.head) + '</th>' : ''}<th class="num">calls</th>
+    <th class="num">input</th><th class="num">of which cached</th>
+    <th class="num">output</th><th class="num">total</th>
+    <th class="num">share</th><th class="num">API-equivalent</th>
+    <th class="num">errors</th></tr>` + rows.map(b => `<tr>
+    <td>${b.swatch ? `<b class="uswatch" style="background:${
+      colorOf(b.key)}"></b>` : ''}<b>${esc(b.label)}</b></td>
+    ${extra ? '<td class="muted">' + esc(extra.cell(b)) + '</td>' : ''}
+    <td class="num">${fmt(b.calls, 0)}</td>
+    <td class="num">${esc(tok(b.input))}</td>
+    <td class="num muted">${esc(tok(b.cache_read + b.cache_write))}</td>
+    <td class="num">${esc(tok(b.output))}</td>
+    <td class="num"><b>${esc(tok(b.tokens))}</b></td>
+    <td class="num muted">${fmt(100 * b.tokens / total, 0)}%</td>
+    <td class="num">${esc(usd(b.api_value))}</td>
+    <td class="num ${b.errors ? 'bad' : 'muted'}">${fmt(b.errors, 0)}</td>
+    </tr>`).join('') + '</table>';
+}
+
+function topRuns(d) {
+  if (!d.top_runs.length)
+    return '<p class="muted">No research runs in this window.</p>';
+  return '<table><tr><th>run</th><th>started by</th><th>date</th>' +
+    '<th class="num">calls</th><th class="num">tokens</th>' +
+    '<th class="num">API-equivalent</th></tr>' + d.top_runs.map(r => `<tr>
+    <td><a href="/trading#${esc(encodeURIComponent(r.work_item_id))}"
+      title="${esc(r.work_item_id)}"><b>${esc(r.ticker || '?')}</b></a>
+      <span class="muted">${esc(r.kind || '')}</span></td>
+    <td><b class="uswatch" style="background:${colorOf(r.source)}"></b>${
+      esc(r.source_label)}<br><span class="muted" style="font-size:.75rem">${
+      esc(r.trigger || '')}</span></td>
+    <td class="muted">${esc(ts(r.created_at))}</td>
+    <td class="num">${fmt(r.calls, 0)}</td>
+    <td class="num"><b>${esc(tok(r.tokens))}</b></td>
+    <td class="num">${esc(usd(r.api_value))}</td></tr>`).join('') +
+    '</table>';
+}
+
+function errors(d) {
+  if (!d.errors.count)
+    return `<p class="muted">No failed calls in the last ${d.days} days.</p>`;
+  return `<p class="bad">${fmt(d.errors.count, 0)} failed calls.</p>` +
+    '<table><tr><th>agent</th><th>when</th><th>error</th></tr>' +
+    d.errors.recent.map(e => `<tr><td>${esc(e.agent)}</td>
+      <td class="muted">${esc(ago(e.at))}</td>
+      <td class="muted" style="font-size:.75rem">${esc(e.error)}</td>
+      </tr>`).join('') + '</table>';
+}
+
+function bob(b) {
+  if (!b || !b.available)
+    return `<p class="muted">Bob's usage is not available: ${
+      esc((b && b.reason) || 'no data')} (${esc((b && b.path) || '')}).</p>`;
+  const row = (label, u) => `<tr><td><b>${esc(label)}</b></td>
+    <td class="num">${fmt(u.calls, 0)}</td>
+    <td class="num">${esc(tok(u.input))}</td>
+    <td class="num muted">${esc(tok(u.cache_read + u.cache_write))}</td>
+    <td class="num">${esc(tok(u.output))}</td>
+    <td class="num"><b>${esc(tok(u.tokens))}</b></td>
+    <td class="num">${esc(usd(u.api_value))}</td></tr>`;
+  const days = b.series.filter(x => x.calls).reverse();
+  return `<p class="muted">Read-only from ${esc(b.path)} — ${
+    esc(b.granularity)}. Last recorded day: ${esc(b.last_day || 'never')}.
+    Bob's dollar figure is the CLI's API-equivalent estimate; it is not
+    billed either.</p>
+    <table><tr><th>period</th><th class="num">requests</th>
+    <th class="num">input</th><th class="num">of which cached</th>
+    <th class="num">output</th><th class="num">total</th>
+    <th class="num">API-equivalent</th></tr>` +
+    row('Today', b.today) + row('Last 7 days', b.d7) +
+    row('Last 30 days', b.d30) + row('Lifetime', b.lifetime) +
+    days.map(x => row(x.date, x)).join('') + '</table>';
+}
+
+async function load() {
+  const days = document.getElementById('days').value;
+  try {
+    DATA = await api('/api/usage?days=' + encodeURIComponent(days));
+  } catch (e) {
+    toast('usage: ' + e.message, false);
+    return;
+  }
+  const d = DATA;
+  document.getElementById('tiles').innerHTML = tiles(d);
+  document.getElementById('chart').innerHTML = chart(d);
+  document.getElementById('daytable').innerHTML = dayTable(d);
+  document.getElementById('sources').innerHTML = breakdown(
+    d.by_source.map(b => ({...b, swatch: true})), 'source');
+  document.getElementById('agents').innerHTML = breakdown(d.by_agent, 'agent');
+  document.getElementById('models').innerHTML = breakdown(d.by_model, 'model',
+    {head: 'provider', cell: b => b.provider + (b.priced ? '' :
+      ' (no published price)')});
+  document.getElementById('runs').innerHTML = topRuns(d);
+  document.getElementById('errors').innerHTML = errors(d);
+  document.getElementById('bob').innerHTML = bob(d.bob);
+  document.getElementById('note').textContent = d.pricing_note;
+}
+load();
+setInterval(load, 60000);
+</script>

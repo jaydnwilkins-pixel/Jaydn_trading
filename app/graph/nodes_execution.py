@@ -12,6 +12,7 @@ from decimal import Decimal
 from .. import sessions
 from ..accounting.money import from_micro, mul_micro, to_micro
 from ..accounting.repo import InsufficientCash
+from ..tools.brokers import PlacedOrder
 from ..tools.market import yahoo_symbol
 # Entry limit vs live quote: beyond this the thesis was priced for something
 # else (another stock, a stale quote, pence vs pounds) — refuse, don't trade.
@@ -20,6 +21,12 @@ from .pipeline import PRICE_BAND
 
 
 FRACTION_STEP = Decimal("0.1")   # venues that allow fractions: 1/10th share
+
+
+def _fractional(adapter) -> bool:
+    """Whether a venue fills fractions of a share. Adapters say so with a
+    `fractional` attribute; the in-process sim does, Saxo does not."""
+    return bool(getattr(adapter, "fractional", True))
 
 
 def position_qty(size_base: Decimal, price_base: Decimal, lot_size: int,
@@ -35,6 +42,12 @@ def position_qty(size_base: Decimal, price_base: Decimal, lot_size: int,
         return Decimal(lots * lot_size)
     return (raw / step).to_integral_value(rounding="ROUND_FLOOR") * step
 
+
+# Saxo may take a moment to retire a leg it has just accepted a cancel for;
+# a sell sent in that moment is refused as if the leg still rested. One
+# retry after this pause (patched to 0 in tests).
+LEG_SETTLE_S = 2.0
+_settle_sleep = time.sleep
 
 # How long a placement claim may sit without a venue acknowledgement before
 # the custodian treats its outcome as unknown (the process died mid-call).
@@ -86,13 +99,91 @@ def submit_order(repo, adapter, order_id, *, symbol, ts, claimed=False):
               else None)
     if _accepts_client_id(adapter):
         kw["client_order_id"] = o["client_order_id"] or o["id"]
+    live = _live_gate(repo, o, ts)               # None unless a live account
+    if isinstance(live, PlacedOrder):            # refused: definitive
+        repo.mark_order(order_id, "rejected", ts=ts)
+        return live
+    # Protective legs resting at the venue for this position must go first
+    # (DESIGN.md §11a): Saxo refuses a new sell while they rest, and if it
+    # did not, the stop could sell the same shares again. A cancel the venue
+    # will not confirm refuses THIS order — definitively, nothing was sent.
+    from .. import protection
+    try:
+        cancelled = protection.cancel_for(repo, adapter, o, ts=ts)
+    except protection.LegCancelRefused as e:
+        repo.mark_order(order_id, "rejected", ts=ts)
+        _reprotect_now(repo, adapter, order_id, symbol, ts)
+        return PlacedOrder("", "rejected", str(e))
     placed = adapter.place_bracket(**kw)
+    if cancelled and placed.status != "accepted" and \
+            "SellOrdersAlreadyExist" in (placed.detail or ""):
+        # the refusal is about the legs we have just cancelled: give the
+        # venue a moment, then try once more under a fresh request id (the
+        # first attempt was refused, so there is nothing to deduplicate)
+        _settle_sleep(LEG_SETTLE_S)
+        if "client_order_id" in kw:
+            kw["client_order_id"] = f"{kw['client_order_id']}-r1"
+        placed = adapter.place_bracket(**kw)
     if placed.status == "accepted":
         repo.mark_order(order_id, "placed", ts=ts,
                         broker_order_id=placed.broker_order_id)
+        if placed.legs:
+            # the bracket's stop/target are orders of their own at the venue
+            protection.persist_legs(
+                repo, parent=repo.order(order_id), legs=placed.legs,
+                side=protection.leg_side(o["side"]), qty=o["qty"], ts=ts)
+        if live is not None:
+            from .. import live_trading
+            live_trading.record_placed(repo.conn, account_id=o["account_id"],
+                                       order_id=order_id,
+                                       notional_base_micro=live,
+                                       clock=lambda: ts)
     else:
         repo.mark_order(order_id, "rejected", ts=ts)
+        if cancelled:
+            # the venue refused the sell AFTER its legs were cancelled: the
+            # whole position is bare right now, so restore it at once
+            _reprotect_now(repo, adapter, order_id, symbol, ts)
     return placed
+
+
+def _reprotect_now(repo, adapter, order_id, symbol, ts):
+    """Put back the legs a refused order had cancelled. Failure is left on
+    the row (protect_state='failed'), where the custodian flags and alerts
+    on it — this path has no alert channel of its own."""
+    from .. import protection
+    if repo.order(order_id)["protect_state"] == "pending":
+        protection.reprotect(repo, adapter, order_id, symbol=symbol, ts=ts)
+
+
+def _live_gate(repo, o, ts):
+    """The live-trading switch (DESIGN.md §22), applied HERE because this is
+    the one function that sends any order to any venue — so an order queued
+    while the market was shut is re-checked when the custodian places it,
+    not only when it was approved. Returns None for non-live accounts, the
+    order's base-currency notional (micro) when allowed, or a rejected
+    PlacedOrder carrying the reason."""
+    import os
+
+    from .. import live_trading
+    acct = repo.account(o["account_id"])
+    if acct["environment"] != "live":
+        return None
+    limit, rate = o["limit_price"], o["fx_rate"]
+    if limit and not rate:
+        return PlacedOrder("", "rejected", "live trading: order has no FX "
+                           "rate, so its size in base currency is unknown")
+    notional = mul_micro(mul_micro(o["qty"], limit), rate) if limit else 0
+    held, _, _ = repo.position(o["account_id"], o["instrument_id"])
+    try:
+        live_trading.check_order(
+            repo.conn, os.environ, account_id=o["account_id"], side=o["side"],
+            qty_micro=o["qty"], limit_micro=limit,
+            notional_base_micro=notional, desk_held_micro=held,
+            clock=lambda: ts)
+    except live_trading.LiveTradingBlocked as e:
+        return PlacedOrder("", "rejected", f"live trading: {e}")
+    return notional
 
 
 def build_execute(repo, brokers: dict, market, *, account_for,
@@ -109,10 +200,13 @@ def build_execute(repo, brokers: dict, market, *, account_for,
 
         # Re-running execute (a retried approval whose first attempt raised,
         # M5) must not order twice: the work item's live order IS the order.
+        # (protective legs share the entry's work item but are not "the
+        # order" — a filled entry's resting stop must not look like one)
         prior = repo.conn.execute(
-            "SELECT * FROM orders WHERE work_item_id=? AND status NOT IN"
-            " ('rejected','cancelled','expired') ORDER BY created_at DESC,"
-            " rowid DESC LIMIT 1", (state.work_item_id,)).fetchone() \
+            "SELECT * FROM orders WHERE work_item_id=? AND leg IS NULL AND"
+            " status NOT IN ('rejected','cancelled','expired') ORDER BY"
+            " created_at DESC, rowid DESC LIMIT 1",
+            (state.work_item_id,)).fetchone() \
             if state.work_item_id else None
         if prior is not None:
             if prior["status"] != "pending_session" or not is_open:
@@ -132,12 +226,23 @@ def build_execute(repo, brokers: dict, market, *, account_for,
         _pre_checks(repo, account_id, inst, th, qty, ref_native, rate,
                     reserve, ts)
         oid = f"ord_{uuid.uuid4().hex[:12]}"
+        # An order that CLOSES a position carries no bracket: a stop and
+        # target belong to the position an order opens. On an exit sell they
+        # would be BUY legs resting at Saxo after the shares are gone — the
+        # "stop" would open a fresh long. (An exit's own protection is the
+        # limit; the old legs are cancelled and, if shares remain,
+        # re-protected — DESIGN.md §11a.)
+        held_now, _, _ = repo.position(account_id, inst.id)
+        closing = (th.direction == "sell" and held_now > 0) or \
+            (th.direction == "buy" and held_now < 0)
         repo.create_order(
             id=oid, account_id=account_id, instrument_id=inst.id,
             side=th.direction, qty=to_micro(qty),
             limit_price=to_micro(str(th.entry_high)) if th.entry_high else None,
-            stop_loss=to_micro(str(th.stop_loss)) if th.stop_loss else None,
-            take_profit=to_micro(str(th.take_profit)) if th.take_profit else None,
+            stop_loss=to_micro(str(th.stop_loss))
+            if th.stop_loss and not closing else None,
+            take_profit=to_micro(str(th.take_profit))
+            if th.take_profit and not closing else None,
             # persisted BEFORE the venue call (M4); while the session is
             # closed it simply rests here for the custodian (checks re-run
             # at fill). When open, the row is born already claimed, so the
@@ -183,13 +288,21 @@ def build_execute(repo, brokers: dict, market, *, account_for,
             held, _, _ = repo_.position(account_id, inst.id)
             held_shares = Decimal(held) / 1_000_000
             qty = Decimal(str(ap.qty)) if ap.qty else held_shares
-            if kind == "sell_review":
-                # an exit review closes a position — it never flips short
+            if kind == "sell_review" or (kind == "manual" and held > 0):
+                # an exit review — or your own sell of shares the desk holds
+                # (the Sell button) — closes a position; it never flips short
                 qty = min(qty, held_shares)
+            if not _fractional(brokers.get(ap.broker)):
+                qty = qty.to_integral_value(rounding="ROUND_FLOOR")
             return qty, ref_native, rate, None
         price_base = quote * rate_q
+        # Saxo (and any whole-share venue) cannot fill 9.6 shares: size in
+        # whole shares there, rounding DOWN so the spend never exceeds the
+        # approved amount. The in-process sim keeps 0.1-share fractions.
         qty = position_qty(Decimal(str(ap.size_base)), price_base,
-                           inst.lot_size)
+                           inst.lot_size,
+                           FRACTION_STEP if _fractional(brokers.get(ap.broker))
+                           else Decimal(1))
         # a limit buy fills at or below its limit: reserve the worse of the
         # limit and the quote, so the cash promised covers any fill
         worst = max(price_base, Decimal(str(th.entry_high)) * rate_i

@@ -8,6 +8,7 @@
 CREATE TABLE IF NOT EXISTS work_items (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,                      -- pipeline | sell_review | screen | override
+                                           -- | manual (a trade you started: Sell button)
   ticker TEXT NOT NULL,
   state TEXT NOT NULL,                     -- running | awaiting_approval | approved
                                            -- | executing | done | rejected
@@ -31,7 +32,9 @@ CREATE INDEX IF NOT EXISTS idx_events_item ON events(item_id);
 -- ── brokers & instruments ─────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS broker_accounts (
   id TEXT PRIMARY KEY, broker TEXT NOT NULL,
-  environment TEXT NOT NULL CHECK(environment IN ('paper','sim')),  -- no 'live'
+  -- 'live' is representable ONLY so the switch in app/live_trading.py can
+  -- refuse it explicitly; a live account exists only via `bin/claire live setup`
+  environment TEXT NOT NULL CHECK(environment IN ('paper','sim','live')),
   base_currency TEXT NOT NULL,
   fee_model TEXT NOT NULL,                 -- JSON: {type, per_trade, pct, min}
   risk_limits TEXT NOT NULL DEFAULT '{}',  -- JSON: max_order_base, max_position_pct,
@@ -70,8 +73,20 @@ CREATE TABLE IF NOT EXISTS orders (        -- broker order lifecycle; FILLS ARE 
   -- given, submitted_at is the single-placer claim (NULL = not yet sent)
   client_order_id TEXT, submitted_at INTEGER,
   created_at INTEGER,                      -- decision time → max_trades_per_day
-  reserved_base INTEGER                    -- cash held back for an open buy, so
+  reserved_base INTEGER,                   -- cash held back for an open buy, so
                                            -- two approvals can't spend it twice
+  fx_rate INTEGER,                         -- instrument ccy → base ×1e6 at decision;
+                                           -- the live limits measure in base ccy
+  -- protective legs (§11a): a stop-loss / take-profit resting at the venue is
+  -- a row of its own, pointing at the entry it protects. Legs skip the risk
+  -- caps and the trade count (they reduce risk) and never expire on the
+  -- desk's clock (GTC at the venue).
+  parent_order_id TEXT,                    -- entry this leg protects
+  leg TEXT,                                -- 'stop' | 'target' | NULL (not a leg)
+  cancelled_for TEXT,                      -- desk order that cancelled this leg
+  protect_state TEXT,                      -- on that desk order: pending | done
+                                           -- | not_needed | failed
+  protect_note TEXT, protect_alerted_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS executions (    -- IMMUTABLE; ONE ROW PER FILL —
                                            -- partial fills are multiple rows;
@@ -286,3 +301,59 @@ CREATE TABLE IF NOT EXISTS agent_runs (    -- per-LLM-call telemetry
 CREATE TABLE IF NOT EXISTS provider_health (
   provider_id TEXT, checked_at INTEGER, ok INTEGER, latency_ms INTEGER, error TEXT
 );
+
+-- ── live trading switch (DESIGN.md §22) — off by default ──────────────────
+CREATE TABLE IF NOT EXISTS live_trading (
+  id INTEGER PRIMARY KEY CHECK(id = 1),    -- singleton
+  armed INTEGER NOT NULL DEFAULT 0,
+  armed_at INTEGER, armed_by TEXT,
+  disarmed_at INTEGER, disarm_reason TEXT,
+  limits TEXT NOT NULL DEFAULT '{}'        -- JSON, base currency of the account
+);
+CREATE TABLE IF NOT EXISTS live_trading_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL, actor TEXT NOT NULL, event TEXT NOT NULL, payload TEXT
+);
+-- every live order that actually reached Saxo — feeds the daily limits
+CREATE TABLE IF NOT EXISTS live_order_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL, account_id TEXT NOT NULL REFERENCES broker_accounts(id),
+  order_id TEXT NOT NULL, notional_base INTEGER NOT NULL
+);
+
+-- ── price triggers (DESIGN.md §15a) — "buy 50 when it falls to 5.00" ─────
+-- One-shot rules the owner sets on the Watchlist page. Prices are micro-units
+-- in the instrument's currency, qty micro-shares, amount_base micro-units of
+-- the account's base currency (a buy is sized EITHER by qty OR by amount).
+-- kind is what the rule was at creation: a buy, an EXIT (sell of shares the
+-- desk holds on that account) or a SHORT (sell of shares it does not hold).
+-- mode 'auto' is a pre-approval given by the human when the rule was made;
+-- it is refused for real-money accounts both here (CHECK) and in code.
+CREATE TABLE IF NOT EXISTS price_triggers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticker TEXT NOT NULL, exchange TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('buy','sell')),
+  kind TEXT NOT NULL CHECK(kind IN ('buy','exit','short')),
+  condition TEXT NOT NULL CHECK(condition IN ('lte','gte')),
+  trigger_price INTEGER NOT NULL CHECK(trigger_price > 0),
+  limit_price INTEGER NOT NULL CHECK(limit_price > 0),
+  qty INTEGER CHECK(qty IS NULL OR qty > 0),
+  amount_base INTEGER CHECK(amount_base IS NULL OR amount_base > 0),
+  stop_loss INTEGER, take_profit INTEGER, trail_pct REAL,
+  broker TEXT NOT NULL, account_id TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'ask' CHECK(mode IN ('ask','auto')),
+  note TEXT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK(status IN ('active','fired','cancelled','expired','failed')),
+  status_reason TEXT,
+  created_at INTEGER NOT NULL, created_by TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  fired_at INTEGER, fired_price INTEGER, work_item_id TEXT,
+  outcome TEXT,                              -- card | placed | refused: …
+  last_checked_at INTEGER, last_price INTEGER, last_error TEXT,
+  updated_at INTEGER NOT NULL,
+  CHECK((qty IS NULL) <> (amount_base IS NULL)),
+  CHECK(NOT (mode = 'auto' AND broker = 'saxo_live'))
+);
+CREATE INDEX IF NOT EXISTS idx_price_triggers_status
+  ON price_triggers(status, ticker, exchange);

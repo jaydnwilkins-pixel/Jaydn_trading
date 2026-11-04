@@ -30,6 +30,49 @@ TICKER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.&-]{0,19}")
 EXCHANGE_RE = re.compile(r"[A-Z][A-Z0-9]{1,9}")
 
 
+# What a manual trade may ask its approval card to prefill. Suggestions,
+# never decisions: the human still sees, edits and approves every one, and
+# thesis_action re-checks whatever is finally sent.
+SUGGEST_KEYS = ("qty", "size_base", "broker", "trail_pct")
+BROKERS = ("alpaca", "saxo", "moomoo", "saxo_live")
+SOURCE_RE = re.compile(r"[a-z][a-z0-9_-]{0,23}")
+
+
+class Conflict(ValueError):
+    """The request is well-formed but clashes with the desk's state (e.g. the
+    same manual trade is already in flight) — HTTP 409, not 400."""
+
+
+def clean_suggested(s):
+    """Validate a manual trade's prefill: {qty, size_base, broker, trail_pct},
+    all optional. Unknown keys are refused rather than stored, so a typo in
+    a caller is loud."""
+    import math
+    if s is None:
+        return None
+    if not isinstance(s, dict):
+        raise ValueError("suggested must be an object")
+    bad = set(s) - set(SUGGEST_KEYS)
+    if bad:
+        raise ValueError(f"unknown suggested field(s) {sorted(bad)}")
+    out = {}
+    for k in ("qty", "size_base", "trail_pct"):
+        v = s.get(k)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or \
+                not math.isfinite(v) or v <= 0 or v > 1e9:
+            raise ValueError(f"suggested {k} must be a positive number")
+        if k == "trail_pct" and v > 90:
+            raise ValueError("suggested trail_pct must be at most 90")
+        out[k] = float(v)
+    if s.get("broker") is not None:
+        if s["broker"] not in BROKERS:
+            raise ValueError(f"suggested broker must be one of {BROKERS}")
+        out["broker"] = s["broker"]
+    return out or None
+
+
 def validate_symbol(ticker, exchange):
     """Raise ValueError unless ticker/exchange look like real venue codes.
     Importable by the API layer so RunBody can 422 before a run exists."""
@@ -161,6 +204,17 @@ class Desk:
             raise ValueError(f"already overridden by {prior['id']} "
                              f"({prior['state']})")
 
+        if direction == "buy" and not stop:
+            raise ValueError("a buy needs a stop below the entry")
+        if direction == "sell" and not stop:
+            # no stop is only coherent for an EXIT: selling shares already
+            # held. Selling what is not held is a short, whose loss has no
+            # ceiling — that must carry a stop above the entry.
+            held = self.desk_held(origin["ticker"])
+            if held <= 0:
+                raise ValueError("the desk holds no shares of "
+                                 f"{origin['ticker']}, so this sell is a "
+                                 "SHORT — it needs a stop ABOVE the entry")
         # raises if the levels are incoherent — that guard is the point
         thesis = Thesis(ticker=origin["ticker"], direction=direction,
                         conviction=old.get("conviction") or 0.0,
@@ -205,6 +259,163 @@ class Desk:
             return
         self._sync(wi)
 
+    # ── a trade YOU start (the Sell button; later, price triggers) ────────
+    def manual_trade(self, ticker, exchange, direction, entry, stop=None,
+                     target=None, note=None, suggested=None, *,
+                     source="manual", background=True):
+        """Put a trade you decided on in front of the approval gate — no
+        analysis, no PASS to overturn. Same money path as every other trade
+        from the gate on: a minted token, the dashboard card, the cash and
+        risk checks, the live-trading locks, and execution's leg handling.
+
+        Levels go through the same Thesis validator as an agent's: a buy
+        needs a stop below the entry; a sell of shares the desk holds is an
+        EXIT and needs none (execution sells at most what is held); a sell of
+        shares it does NOT hold is a SHORT and must carry a stop above the
+        entry. The instrument is resolved by the graph's own `prepare` step
+        (currency, board lot), exactly as for a screened run.
+
+        `suggested` prefills the card (qty, size_base, broker, trail_pct);
+        `source` says where the trade came from (portfolio, saxo, watchlist,
+        trigger) and is shown on the card. Returns the work-item id.
+        Raises ValueError (bad input), pydantic ValidationError (incoherent
+        levels) or Conflict (the same trade is already in flight)."""
+        from ..tools.market import currency_for, yahoo_symbol
+        validate_symbol(ticker, exchange)
+        if direction not in ("buy", "sell"):
+            raise ValueError("direction must be buy or sell")
+        if not isinstance(source, str) or not SOURCE_RE.fullmatch(source):
+            raise ValueError("invalid source")
+        if note is not None and (not isinstance(note, str) or len(note) > 200):
+            raise ValueError("note must be text of at most 200 characters")
+        for name, v in (("entry", entry), ("stop", stop), ("target", target)):
+            if v is not None and (isinstance(v, bool) or
+                                  not isinstance(v, (int, float)) or v <= 0):
+                raise ValueError(f"{name} must be a positive price")
+        if entry is None:
+            raise ValueError("an entry (limit) price is required")
+        suggested = clean_suggested(suggested)
+        inst_row = self.conn.execute(
+            "SELECT * FROM instruments WHERE ticker=? AND exchange=? LIMIT 1",
+            (ticker, exchange)).fetchone()
+        held = self._held_instrument(inst_row["id"]) if inst_row else 0.0
+        if direction == "buy" and not stop:
+            raise ValueError("a buy needs a stop below the entry")
+        if direction == "sell" and not stop and held <= 0:
+            raise ValueError(f"the desk holds no shares of {ticker}, so this "
+                             "sell is a SHORT — it needs a stop ABOVE the "
+                             "entry")
+        what = ("EXIT (sell shares the desk holds)"
+                if direction == "sell" and held > 0 else
+                "SHORT" if direction == "sell" else "BUY")
+        ccy = currency_for(yahoo_symbol(ticker, exchange))
+        ccy = "GBP" if ccy == "GBp" else ccy
+        thesis = Thesis(ticker=ticker, direction=direction, conviction=0.0,
+                        entry_low=entry, entry_high=entry, stop_loss=stop,
+                        take_profit=target, currency=ccy,
+                        conditions=[f"MANUAL {what} — you started this from "
+                                    f"{source}" + (f": {note}" if note
+                                                   else "")])
+        dup = self.conn.execute(
+            "SELECT id, state FROM work_items WHERE kind='manual' AND ticker=?"
+            " AND state IN ('running','awaiting_approval','approved',"
+            "'executing') AND thesis_json LIKE ? ORDER BY created_at DESC"
+            " LIMIT 1", (ticker, f'%"direction":"{direction}"%')).fetchone()
+        if dup:                         # a double click is not two trades
+            raise Conflict(f"a manual {direction} of {ticker} is already "
+                           f"{dup['state']} ({dup['id']})")
+        inst = Instrument(id=inst_row["id"] if inst_row else
+                          f"{exchange}:{ticker}", ticker=ticker,
+                          exchange=exchange, currency=ccy,
+                          name=inst_row["name"] if inst_row else None)
+        ts = int(self.clock())
+        day = time.strftime("%Y-%m-%d", time.gmtime(ts))
+        wi = f"wi_{day}_{ticker}_man_{secrets.token_hex(2)}"
+        trigger = f"manual {direction} from {source}" + (
+            f": {note}" if note else "")
+        self.repo.create_work_item(wi, "manual", ticker, ts=ts)
+        prior = self._prior_analysis(ticker)[0] if what.startswith("EXIT") \
+            else ""
+        self.conn.execute(
+            "UPDATE work_items SET trigger=?, thesis_json=?, suggested_json=?,"
+            " prior_run=? WHERE id=?",
+            (trigger, thesis.model_dump_json(),
+             json.dumps(suggested) if suggested else None, prior or None, wi))
+        self.repo._event(wi, ts, "human", "created", "manual",
+                         payload={"source": source, "direction": direction,
+                                  "entry": entry, "stop": stop,
+                                  "target": target, "note": note,
+                                  "suggested": suggested})
+        state = PipelineState(work_item_id=wi, kind="manual", trigger=trigger,
+                              ticker=ticker, instrument=inst, thesis=thesis)
+        if background:
+            threading.Thread(target=self._run_override, args=(wi, state),
+                             daemon=True, name=f"man-{wi}").start()
+        else:
+            self._run_override(wi, state)
+        return wi
+
+    def _held_instrument(self, instrument_id) -> float:
+        r = self.conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN qty_opened < 0 THEN -qty_remaining"
+            " ELSE qty_remaining END), 0) AS q FROM lots WHERE"
+            " instrument_id=? AND qty_remaining > 0",
+            (instrument_id,)).fetchone()
+        return (r["q"] or 0) / 1e6
+
+    def amend(self, wi, *, entry, stop=None, target=None, actor="human"):
+        """Change the levels of an approved trade whose placement was
+        REFUSED, before the human retries it (e.g. Saxo's
+        TooFarFromEntryOrder: the stop or target sits too far from the
+        entry). Only a parked, refused approval can be amended; the new
+        levels pass the same Thesis validator as any agent's or override's,
+        and the change is written to the graph's own state — execution reads
+        the thesis from there, not from desk.db."""
+        from .. import approvals
+        row = self.work_item(wi)
+        if row is None:
+            raise ValueError("unknown work item")
+        if row["state"] != "approved" or row["token_state"] != \
+                "pending_resume" or approvals.last_event(self.conn, wi) != \
+                "resume_failed":
+            raise ValueError("only a refused, approved trade can be edited")
+        graph, cfg = self._pipeline_for(wi), self.cfg(wi)
+        snap = graph.get_state(cfg)
+        if tuple(snap.next) != ("execute",):
+            raise ValueError(f"trade is not waiting to execute ({snap.next})")
+        old = snap.values["thesis"]
+        data = old.model_dump()
+        data.update(entry_low=entry, entry_high=entry, stop_loss=stop,
+                    take_profit=target)
+        if data["direction"] == "buy" and not stop:
+            raise ValueError("a buy needs a stop below the entry")
+        new = Thesis.model_validate(data)            # same guards as always
+        # as the gate: the graph's next step stays `execute`, which re-runs
+        # with these levels when the human retries
+        graph.update_state(cfg, {"thesis": new}, as_node="gate")
+        ts = int(self.clock())
+        self.conn.execute("UPDATE work_items SET thesis_json=?, updated_at=?"
+                          " WHERE id=?", (new.model_dump_json(), ts, wi))
+        self.repo._event(wi, ts, actor, "approved", "amended",
+                         payload={"from": {"entry": old.entry_high,
+                                           "stop": old.stop_loss,
+                                           "target": old.take_profit},
+                                  "to": {"entry": entry, "stop": stop,
+                                         "target": target}})
+        # still a refused approval, waiting for the human's retry
+        self.repo._event(wi, ts, "system", "approved", "resume_failed",
+                         payload={"error": "levels amended — retry to send"})
+        return new
+
+    def desk_held(self, ticker) -> float:
+        """Shares the desk's book holds in `ticker`, net, across accounts."""
+        r = self.conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN l.qty_opened < 0 THEN"
+            " -l.qty_remaining ELSE l.qty_remaining END), 0) AS q"
+            " FROM lots l JOIN instruments i ON i.id = l.instrument_id"
+            " WHERE i.ticker=? AND l.qty_remaining > 0", (ticker,)).fetchone()
+        return (r["q"] or 0) / 1e6
+
     def _instrument(self, ticker, currency):
         r = self.conn.execute(
             "SELECT * FROM instruments WHERE ticker=? LIMIT 1",
@@ -225,7 +436,7 @@ class Desk:
             return self.pipeline
         if row["kind"] == "sell_review":
             return self.sell_pipeline
-        if row["override_of"]:
+        if row["override_of"] or row["kind"] == "manual":
             return self.override_pipeline
         return self.pipeline
 

@@ -58,9 +58,16 @@ Confirmed working on the target machine before this design was frozen:
 
 ## 1. Design principles (non-negotiable)
 
-1. **Paper/simulation only.** Broker adapters refuse anything but paper/SIM
-   environments — in code, not in prompts. The DB schema cannot even represent
-   a live account (`CHECK(environment IN ('paper','sim'))`).
+1. **Paper/simulation by default; live money only behind the switch.**
+   Out of the box every account is paper/SIM and nothing can place a
+   real-money order. Live trading on Saxo exists (§22) but is OFF, and turning
+   it on takes four independent locks — a machine-local env flag, arming from
+   a terminal on this machine, a per-trade human approval that types LIVE,
+   and small live-only limits checked at the moment of placement. All of it
+   is enforced in code, never in prompts, and no LLM, agent, chat tool or
+   remote dashboard action can arm it. A live account can only be created by
+   `bin/claire live setup`; every other code path still refuses
+   `environment='live'`.
 2. **Human approval gate, server-authorized.** LangGraph's `interrupt()`
    provides the pause; **our server decides whether a resume is legitimate**
    via a single-use token. The framework will resume for any caller — the
@@ -405,6 +412,7 @@ transaction.
 CREATE TABLE work_items (
   id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,                      -- pipeline | sell_review | override | screen
+                                           -- | manual (a trade you started, §11a)
   ticker TEXT NOT NULL,
   state TEXT NOT NULL,                     -- running | awaiting_approval | approved
                                            -- | executing | done | rejected
@@ -426,7 +434,8 @@ CREATE TABLE events (                      -- append-only audit trail
 -- ── brokers & instruments ─────────────────────────────────────────────────
 CREATE TABLE broker_accounts (
   id TEXT PRIMARY KEY, broker TEXT NOT NULL,
-  environment TEXT NOT NULL CHECK(environment IN ('paper','sim')),  -- no 'live'
+  environment TEXT NOT NULL CHECK(environment IN ('paper','sim','live')),
+                                 -- 'live' only via bin/claire live setup (§22)
   base_currency TEXT NOT NULL,
   fee_model TEXT NOT NULL,                 -- JSON: {type, per_trade, pct, min}
   risk_limits TEXT NOT NULL DEFAULT '{}',  -- JSON: max_order_base, max_position_pct,
@@ -460,7 +469,12 @@ CREATE TABLE orders (                      -- broker order lifecycle; FILLS ARE 
                                            -- | filled | cancelled | expired | rejected
   broker_order_id TEXT UNIQUE,
   expires_at INTEGER NOT NULL,             -- order TTL: cancel at broker if unfilled
-  placed_at INTEGER, updated_at INTEGER NOT NULL
+  placed_at INTEGER, updated_at INTEGER NOT NULL,
+  parent_order_id TEXT, leg TEXT,          -- protective legs (§11a): 'stop' |
+                                           -- 'target' rows pointing at their entry
+  cancelled_for TEXT,                      -- the desk order that cancelled a leg
+  protect_state TEXT, protect_note TEXT    -- on that order: pending | done |
+                                           -- not_needed | failed (re-protection)
 );
 CREATE TABLE executions (                  -- IMMUTABLE; ONE ROW PER FILL —
                                            -- partial fills are simply multiple rows;
@@ -698,6 +712,11 @@ terminal — approvals must never silently vanish.
 
 ---
 
+**Live money (§22).** Approving onto broker `saxo_live` is refused unless
+live trading is armed, and the request must carry `confirm_live: "LIVE"`,
+typed by the human on the card. The live account is not even offered in the
+broker list while disarmed.
+
 ## 11. Deterministic execution
 
 ```python
@@ -744,10 +763,123 @@ def execute_node(state):
 
 ---
 
+**Live money (§22).** `submit_order` is the single function that sends any
+order to any venue; for a live account it runs `live_trading.check_order`
+(enabled, armed, limit-only, desk-held sells only, live limits) first and
+records the placement in `live_order_log`. A refusal is a definitive
+rejection, never an "unknown".
+
+## 11a. Exits & protective legs
+
+A Saxo bracket is **three orders at Saxo**: the entry limit plus a
+`StopIfTraded` stop-loss and a `Limit` take-profit, GTC, which become a
+one-cancels-other pair once the entry fills (a partial entry fill arms them
+for the filled amount). They rest at the venue on their own — and until
+2026-11-04 the book knew only the entry. Two failures followed from that,
+both now designed out:
+
+- a stop that filled at Saxo sold shares the book never heard of;
+- any desk sell collided with the resting legs. Saxo refuses a new sell
+  while sell orders already exist for owned shares
+  (`SellOrdersAlreadyExistForOwnedContracts`, verified on SIM), and had it
+  accepted one, the stop could have sold the same shares a second time.
+
+**Legs are orders rows.** When a bracket is accepted, `submit_order`
+persists each leg (`PlacedOrder.legs`) as its own `orders` row:
+`parent_order_id` = the entry, `leg` = `stop`|`target`, side opposite the
+entry, status `placed`, `broker_order_id` = the leg's Saxo id, the venue's
+(tick-rounded) price in `stop_loss` or `limit_price`, `expires_at` far in the
+future (GTC), same work item. Which id is the stop is read back from Saxo's
+audit trail — the placement response lists ids, not types, and on SIM the
+target came back with the lower id. Leg rows (`repo.create_leg_order`) skip
+`check_risk` and cash reservation, do not count toward `max_trades_per_day`
+or the live daily limits (they are not trades the desk decided; they only
+ever reduce risk), are never placed or expired by the custodian, and are
+never "the order" of a work item (execute's retry lookup ignores them).
+
+**Leg fills are fills.** The custodian polls legs like any working order: a
+stop or target fill is booked with `record_fill` on the leg row — a SELL
+against the position, FIFO closures, cash — and partial fills are just
+several rows. `protection.sync_from_venue` then reflects the venue: an OCO
+sibling Saxo cancelled (or a leg cancelled with its entry) becomes
+`cancelled`; a leg Saxo reports done becomes `filled`; type, price and
+working amount are corrected from Saxo, which is presumed right.
+
+**Cancel before any desk order that reduces the position.** `submit_order`
+— still the only function that sends orders — first cancels, at the venue,
+every working leg on the same side as the order (a sell against a protected
+long, a buy-to-cover against a protected short), marking them `cancelled`
+with `cancelled_for` = the order and the order `protect_state='pending'`. A
+cancel that errors is checked against the venue (Saxo may already have
+retired an OCO sibling by itself); if any leg is still working — or filled
+meanwhile — the order is **not sent**: it is marked rejected with a clear
+reason, so the approval parks on Approvals ("Approved but not placed").
+An order that closes a position carries no bracket of its own: an exit
+sell's stop and target would rest at Saxo as BUY legs after the shares are
+gone. If Saxo refuses the sell with `SellOrdersAlreadyExist…` right after
+the cancels, it is retried once after a short pause.
+
+**Re-protect what is left.** When a desk order that cancelled legs is
+terminal (filled, expired, cancelled, or refused by the venue) and shares
+remain, `protection.reprotect` places a standalone OCO — Saxo's "two orders
+in the `Orders` array with no parent" (`SaxoBroker.place_oco`) — for the
+remaining whole shares at the original stop and target, GTC, and persists
+it as leg rows of the original entry. It waits for the order to be
+terminal: while a sell still works, Saxo would refuse a second resting sell,
+and the two together could sell more than is held. A refused sell restores
+protection at once. Levels the wrong way round (a mislabelled leg) are
+refused rather than placed. **A failure is never silent**: the order keeps
+`protect_state='failed'` with the reason, the custodian flags it every run
+while shares remain (plus the UNPROTECTED flag below) and sends one
+Telegram/desktop alert (`app.alerts.send`). **On the live account the desk
+never re-protects by itself** — placing sell orders on real money is
+Richard's decision; it flags and alerts instead, and the flag disarms live
+trading (§22.3).
+
+**UNPROTECTED and drift understand legs.** Where the book tracks legs for a
+position, it is UNPROTECTED when its working stop legs cover fewer shares
+than are held (the old opening-order test still applies to venues that keep
+no leg orders, like the in-process sim). `_leg_drift` compares Saxo's
+working orders with the book: a leg the book thinks works that Saxo no
+longer lists, and an order at Saxo on the exit side of a desk position that
+the book does not track (it could sell the desk's shares), are flagged —
+never corrected.
+
+**Backfill.** `bin/claire legs-backfill [--dry-run] [--yes]` adopts the
+legs of brackets placed before this existed: an entry's legs are taken from
+Saxo's audit trail (`RelatedOrders`) and adopted only if each is working,
+same instrument, exit side, amount = what the entry filled, and priced
+within 0.5% of the desk's level for that leg type. Idempotent; read-only at
+Saxo.
+
+**Manual trades (the Sell button).** `Desk.manual_trade(ticker, exchange,
+direction, entry, stop=None, target=None, note=None, suggested=None,
+source=…)` puts a trade you decided on in front of the gate — work-item
+kind `manual`, no analysis, no PASS needed. The Thesis validator applies as
+for an override: a buy needs a stop below the entry; a sell of shares the
+desk holds is an EXIT and needs none (execution sells at most what is
+held); a sell of shares it does not hold is a SHORT and needs a stop above
+the entry. It runs the override graph (`prepare` → gate → execute → record),
+so the instrument, currency and board lot are resolved exactly as for a
+screened run, and from the gate on it is an ordinary approval. A second
+identical manual trade while one is in flight is refused (409).
+`suggested` (`{qty, size_base, broker, trail_pct}`, stored in
+`work_items.suggested_json`) prefills the approval card — shares and account
+for a sell; for a buy, size = qty × entry in the account currency.
+Entry points: `POST :7788/internal/manual` (secret-guarded, like
+`/internal/override`) and the keyed dashboard route `POST
+:7787/api/manual-trade`; `/api/trade-check` also checks a trade not yet
+started (ticker, exchange, direction, entry, qty) and explains Saxo's
+objection to resting legs instead of calling it a refusal.
+
 ## 12. The custodian
 
 `custodian.py`, systemd timer every 5 minutes, deterministic:
 
+- **Legs (§11a):** protective legs are polled with every other order (a
+  stop fill is a desk sell), never expired or placed; a desk order that
+  cancelled legs is re-protected when it finishes; failures and leg drift
+  are flagged, and an unprotected position is alerted on Telegram.
 - **Fills:** poll every non-terminal order at its broker; record one execution
   row per new fill (idempotent on `(broker_order_id, broker_fill_id)`), open /
   close lots and write cash as fills land; cancel orders past their TTL; place
@@ -786,6 +918,8 @@ The custodian **cannot** approve or execute: `/internal/resume` accepts only
 | `/portfolio` | positions from `v_positions`, per-share P&L from `v_share_pl` (multi-lot detail), equity curve, cash + top-up/withdraw per account, alerts panel, broker-metrics comparison |
 | `/agent/<id>` | drill-down: reports, run history with cost; **Model & Provider panel** — provider dropdown (incompatible greyed with reason), model list refreshed from the provider, fallback, temperature, a **Test button** (canned prompt → latency, cost, structured-output pass/fail *before* committing), prompt editor with version rollback |
 | `/providers` | add/enable providers, key present/absent (never the value), health, cost config |
+| `/watchlist` | watched names with quote, levels, holdings, legs; chart with trigger lines; Buy now / Sell now (approval cards) and price triggers (§15a) |
+| `/saxo` | both Saxo accounts (SIM 11111111, LIVE 99999999) straight from Saxo, read-only: value, cash, P/L, positions with allocation, working orders (§22.4a); key required |
 | `/approvals` (cards also on `/` and `/agent/arbiter`) | the typed thesis, **editable size with live share-count + fee + FX preview**, broker choice, market-open/closed badge with next-open time, ✔ Approve / ✖ Reject (the card carries the single-use token — §10) |
 
 Charts: lightweight-charts from vendored JS (single file, no CDN dependency at
@@ -866,6 +1000,82 @@ Deterministic loop in the dashboards process (no LLM cost), every 10 minutes:
 Fire-and-forget HTTP from the watcher uses a **short timeout** (~10 s): a
 long-timeout call from an alert loop piles up blocked threads when several
 alerts land together.
+
+---
+
+## 15a. Watchlist & price triggers
+
+`/watchlist` (dashboard; data from one call, `GET /api/watchlist-data` →
+`app/watchlist.py`) lists the names in the `watchlist` table — which the
+screener still treats as candidates — with the live quote (one batch spark
+call), the day's range, SMA20/50, the 20-day low/high and ATR14 (the
+override form's `_levels`), what the desk holds there (shares, average cost,
+P/L, the stop/target legs resting at the venue) and the name's price
+triggers. Clicking a row opens the chart (`drawChart`) with the trigger
+lines, the average cost and the resting legs, and three forms: **Buy now**
+(shares or an amount, limit = last price, stop/target with the stated
+2 × ATR / 2:1 suggestion, account, Check with Saxo → `POST
+/api/manual-trade`), **Sell now** (`web/sell.js`, only where the desk holds
+shares) and **Add trigger**. Buy now and Sell now only create approval
+cards.
+
+**A price trigger** (`price_triggers` table, `app/price_triggers.py`) is a
+one-shot rule: *buy X shares (or an amount) when the price is ≤ / ≥ Y*, or
+*sell X shares when the price is ≥ / ≤ Y*. It carries the order's limit
+(default: the trigger price, refused if more than the 25% execution band
+away), stop/target, account, trailing floor, expiry (default 30 days, max
+365), a note and a **mode**. Validation is up front and mirrors
+`Desk.manual_trade`: a buy needs a stop below the limit; a sell of shares
+the desk holds **on that account** is an EXIT (no stop/target, at most what
+is held); a sell when the desk holds none is a SHORT (stop above the limit;
+never on the live account); a sell on an account other than the one that
+holds the shares is refused rather than turned into a short. Prices are
+micro-units in the instrument's currency.
+
+Lifecycle: `active` → `fired` (→ `work_item_id`, `outcome` = `card` |
+`placed` | `refused: …`) | `cancelled` (owner, `DELETE
+/api/price-triggers?id=`) | `expired` | `failed` (`status_reason`). A trigger
+fires once.
+
+**The engine** is the `price_triggers` schedule (claire-api, every 2 min,
+`require_open`; disabled/enabled from the schedule UI like every job). Each
+pass: expire what is past `expires_at` (open market or not); skip every rule
+whose exchange is closed (`sessions.is_open`) — an overnight quote is
+yesterday's close and must never fire one; batch-quote the rest (falling
+back to one quote per symbol so one bad name cannot blind the others);
+ignore quotes flagged `stale`; on a hit **claim the rule atomically**
+(`UPDATE … SET status='fired' WHERE id=? AND status='active'`; only the
+caller whose update matched fires) and call `desk.manual_trade(…,
+source="trigger", suggested={qty | size_base, broker, trail_pct})`. A
+sell whose shares are gone by then fails with the reason; a short whose
+name the desk now holds fails; if the same manual trade is already in
+flight (409) the rule goes back to `active` and retries next pass. Errors
+are per rule and never stop the others. Every outcome sends a short
+`app.alerts.send` ("STVN hit 4.98 (your trigger ≤ 5.00) — approval card
+ready" / "— order placed automatically"); the card itself reaches Telegram
+like any other.
+
+**Modes — the pre-approval rule.** *Ask me* (default): the hit only creates
+the card; nothing trades until the owner approves it (§10). *Place it
+automatically*: the owner approves the order **when creating the rule**;
+on the hit the engine approves the card through `approvals.thesis_action`
+with the card's own single-use token and actor `human`, after writing an
+event `pre_approved` (actor `human`, payload: who created the rule — "human
+via the paired dashboard (ip)" — when, the rule, the fired price). It is a
+human approval given in advance, not an agent's; no LLM can create one (the
+route is keyed, like every POST). Everything downstream is unchanged: cash
+check, risk caps, price band, whole-share sizing on Saxo (a share-count buy
+is sent as qty + ½ share × the quote it fired on, so execution's floor
+gives back exactly that count), legs. A refusal leaves the card on
+Approvals (or under "Approved but not placed") and alerts.
+
+**Never automatic on real money.** Auto mode is allowed only on paper
+accounts — the built-in sim and Saxo SIM. It is refused for `saxo_live` /
+any `live` account three times over: at creation (403 with the reason), by
+a `CHECK` on the table, and again at fire time (the account is re-read; a
+non-paper account gets the card only). Even past all three, `thesis_action`
+refuses `saxo_live` without the typed `confirm_live: "LIVE"`, which the
+engine never sends. A live trigger can only ever create an approval card.
 
 ---
 
@@ -1041,7 +1251,150 @@ runnable offline in under a second.
   search API for news work; a Tavily key is the recommended upgrade.
 - Corporate-action *detection* is manual at first (the schema and adjustment
   path exist; the automatic split-watcher ships later).
-- Saxo SIM tokens expire every 24 h and need manual refresh until OAuth
-  refresh is added.
+- Saxo SIM tokens from the developer portal expire every 24 h. The LIVE
+  account uses OAuth + PKCE with automatic refresh (§22), but Saxo's refresh
+  window is ~40 min: if claire-api is down longer than that, `bin/saxo login`
+  must be run again before live orders (or the live view) work. The
+  keepalive alerts Richard on Telegram (Bob's bot) and the desktop when the
+  refresh starts failing with <15 min left, when the sign-in lapses
+  (re-reminding every 12 h), and when it is restored (`SignInWatch`,
+  `app/alerts.py`; `bin/saxo test-alert` checks delivery). An alert cannot
+  be sent while the PC itself is off or asleep; the lapse is reported when
+  the desk comes back.
+- Saxo instrument coverage depends on the account's market permissions; a
+  symbol with no EXACT Saxo match is refused, never approximated (the SIM
+  account seen on 2026-11-03 had no SGX/HKEX/TSE listings).
 - `exchange_sessions` holidays are a hand-maintained yearly list; a missed
   holiday delays a queued order by a day, nothing more.
+
+---
+
+## 22. Live trading on Saxo (off by default)
+
+Claire can place REAL orders on Richard's Saxo account. It ships disabled,
+and the design goal is that turning it on is a deliberate, local, reversible
+act — and that turning it off is instant and possible from anywhere.
+
+### 22.1 The four locks
+
+A live order reaches Saxo only if ALL hold, re-checked at the moment of
+placement (`nodes_execution.submit_order` → `live_trading.check_order`), so
+an order queued while the market was shut is checked again when the
+custodian places it, not only when it was approved:
+
+| # | Lock | Where | Who can change it |
+|---|------|-------|-------------------|
+| 1 | **Enabled**: `CLAIRE_LIVE_TRADING=enabled` | `etc/claire.env` (0600), read at process start | someone with a shell on this machine; restart required |
+| 2 | **Armed** | `live_trading` row in desk.db | ARM: only `bin/claire live arm` — interactive terminal, typed phrase `ARM LIVE TRADING`. DISARM: anyone, any time (`bin/claire live disarm`, the Approvals page button, the custodian automatically) |
+| 3 | **Human-approved** | the §10 token gate | the approval names broker `saxo_live` AND carries `confirm_live: "LIVE"`, typed on the card; refused unless armed |
+| 4 | **Within live limits** | `live_trading.limits`, account base ccy | `bin/claire live limits k=v` (terminal) |
+
+Lock 1 caps the blast radius of everything else: a desk.db that says "armed"
+means nothing without the file flag. Arming is not offered by the dashboards,
+Claire's chat, Bob, or any agent tool — deliberately, because those are
+reachable from the network or by an LLM.
+
+### 22.2 Live limits (defaults; deliberately small)
+
+| limit | default | meaning |
+|---|---|---|
+| `max_order_base` | 1000 | one order's notional, account base currency |
+| `max_orders_per_day` | 2 | orders that actually reached Saxo, per Singapore day |
+| `max_daily_notional_base` | 2000 | sum of today's placed live notionals |
+
+Always, regardless of limits:
+- **Limit orders only.** No market orders on real money.
+- **No shorting, and no selling what Richard holds himself.** A live sell
+  may only reduce a position the DESK opened (its own lots in desk.db).
+  Positions held at Saxo before setup are not on the desk's book, so the
+  desk cannot sell them.
+- The per-account `risk_limits` (§7) and cash reservation still apply on top.
+- **No automatic trades.** A price trigger (§15a) on the live account only
+  ever creates an approval card; its "place automatically" mode is refused
+  for real money at creation, in the table and at fire time.
+
+### 22.3 Self-disarm
+
+The custodian disarms live trading (`actor='custodian'`) when any flag it
+raises concerns a live order: a fill the book could not record, an order
+Saxo does not know, a placement whose outcome is unknown. Real money waits
+for a human whenever the book and the broker might disagree. Every arm and
+disarm is written to `live_trading_events`.
+
+### 22.4 The Saxo adapter (`app/tools/saxo_broker.py`)
+
+Same interface as `PaperSimBroker` (`place_bracket`, `order_status`,
+`cancel`, `snapshot`), for Saxo's SIM or LIVE gateway:
+- **Instrument resolution never guesses.** The desk symbol (`D05.SI`,
+  `AAPL`) maps to Saxo's `TICKER:mic` (`D05:xses`, `AAPL:xnas`); the search
+  result must match exactly or the order is refused.
+- **Prices are rounded onto Saxo's tick grid in the safe direction** (a buy
+  limit never rounds up, a sell limit never rounds down; stops likewise),
+  using the instrument's `TickSizeScheme` and `OrderDecimals`.
+- **Brackets in one request:** entry limit + `StopIfTraded` stop-loss +
+  limit take-profit, so the protective legs exist the moment the entry can
+  fill. `ManualOrder: false`. Day order for the entry, GTC for the legs.
+- **Duplicate protection:** the order row's `client_order_id` is sent as
+  `x-request-id`, which Saxo uses to refuse a replay of the same order.
+- **Outcomes:** a Saxo 4xx is a definitive rejection (row → `rejected`); a
+  5xx/network failure is UNKNOWN — the claim stays and the custodian flags it
+  for reconciliation (which, on a live account, disarms — §22.3).
+- **Fills** are rebuilt from `/cs/v1/audit/orderactivities`: Saxo reports a
+  cumulative `FilledAmount` and running `AveragePrice`; each fill's own
+  price is recovered from the change in avg × filled.
+- **Legs (§11a):** `place_bracket` returns the legs' ids, typed from the
+  audit trail; `place_oco` places a standalone stop + target pair to
+  re-protect a position; `working_orders` lists everything working (legs
+  included); order calls are spaced ~1.1 s apart because Saxo throttles the
+  order endpoints and a desk sell is three of them (two cancels, a place).
+- The live adapter re-checks "armed" itself before every placement (second
+  lock, independent of `submit_order`). Cancels are always allowed.
+- Validated against Saxo SIM's `/trade/v2/orders/precheck` on 2026-11-03
+  (limit buy + both legs: `PreCheckResult: Ok`).
+
+The read-only views (`app/tools/saxo_live.py`, `bin/saxo`) are separate
+and stay GET-only; the adapters borrow only their OAuth tokens.
+
+### 22.4a Two Saxo accounts, two independent sign-ins
+
+| env | Saxo account | desk account | OAuth app config | sign-in file |
+|---|---|---|---|---|
+| `sim` | 11111111 (paper) | `saxo-paper` (broker `saxo`) | `SAXO_SIM_APP_KEY` | `etc/saxo_sim_token.json` |
+| `live` | 99999999 (real money) | `saxo-live` (broker `saxo_live`) | `SAXO_LIVE_APP_KEY` | `etc/saxo_live_token.json` |
+
+Each has its own PKCE app (redirect `http://localhost/claire-saxo` on both),
+its own `bin/saxo login sim|live`, its own keepalive and Telegram alerts.
+Token sources are BOUND to one environment (`saxo_live.token_source`): the
+SIM adapter can only ever get a SIM token and the live adapter a live one.
+
+On the approval card both accounts are named by number. The live one is
+always listed, but disabled with the reason ("not set up" / "live trading
+OFF") until it is set up and armed — the server enforces the same rule.
+
+`/saxo` (dashboard) shows each account straight from Saxo, read-only: value,
+cash, unrealised P/L, positions with P/L % and an allocation bar (share of
+gross exposure), and working orders including the protective legs. Because
+it shows the real account, its API (`/api/saxo-account`) requires the
+dashboard key even for GET.
+
+### 22.5 Going live — the procedure
+
+1. Test on SIM first: register a SIM app (PKCE), set `SAXO_SIM_APP_KEY`
+   and `SAXO_SIM_ACCOUNT_ID`, run `bin/saxo login sim`; then
+   `SAXO_SIM_EXECUTION=enabled` + `SAXO_SIM_ACCOUNT_KEY` route the `saxo`
+   paper account to Saxo SIM (real order handling, simulated money), logged
+   in through that OAuth sign-in — the same renewal and alert path live will
+   use (`wiring.sim_token_source`; a pasted 24 h `SAXO_SIM_TOKEN` is only a
+   fallback). Run several approvals end to end. SIM and live sign-ins are
+   independent (§22.4a), so SIM testing continues after live is set up.
+2. Register the LIVE app on developer.saxo (grant type PKCE, redirect
+   `http://localhost/claire-saxo`), set `SAXO_LIVE_APP_KEY` and
+   `SAXO_LIVE_ACCOUNT_ID`, restart, run `bin/saxo login live`.
+3. Set `CLAIRE_LIVE_TRADING=enabled`, then `bin/claire live setup` (creates
+   `saxo-live` from the Saxo account, syncing opening cash) and
+   `bin/claire restart`.
+4. `bin/claire live arm` when ready. Approvals now offer `saxo_live`
+   (marked ⚠ LIVE MONEY) and require typing LIVE.
+5. To stop: `bin/claire live disarm` or the button on Approvals. To remove
+   entirely: delete the env flag and restart.
+

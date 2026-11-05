@@ -216,3 +216,66 @@ def test_old_databases_accept_the_sdk_kind(tmp_path):
     kinds = {r["id"]: r["kind"] for r in c.execute("SELECT * FROM providers")}
     assert kinds["anthropic"] == "anthropic"
     assert kinds["claude_max"] == "claude_sdk"
+
+
+def _refusing_claire(conn, monkeypatch, refuse):
+    """Claire whose stream_chat refuses for the models in `refuse` (by
+    name), and for any call carrying the old history when 'history' is in
+    `refuse`. Returns (claire, calls)."""
+    from app.graph.claire_agent import Claire
+    calls = []
+
+    def fake_stream(chat, system, prompt, tools):
+        calls.append((chat.model, prompt))
+        if chat.model in refuse or ("history" in refuse and "old" in prompt):
+            raise RuntimeError("API Error: Opus 5's safeguards flagged this "
+                               "message")
+        yield ("text", "Desk is fine.")
+        yield ("done", "Desk is fine.")
+    monkeypatch.setattr(claude_sdk, "stream_chat", fake_stream)
+    claire = Claire(conn, repo=None, desk=None, market=None)
+    claire._ensure_agent()
+    _, system, tools = claire._sdk_chat
+    claire._sdk_chat = (claude_sdk.SdkChat("claude-opus-5",
+                                           fallback_model="claude-sonnet-5"),
+                        system, tools)
+    claire._histories["t"] = [{"role": "user", "content": "old question"},
+                              {"role": "assistant", "content": "old answer"}]
+    return claire, calls
+
+
+def test_a_refused_chat_retries_on_the_backup_model(conn, monkeypatch):
+    claire, calls = _refusing_claire(conn, monkeypatch, {"claude-opus-5"})
+    out = [json.loads(x) for x in claire.ask_stream("status?", "t")]
+    assert [c[0] for c in calls] == ["claude-opus-5", "claude-sonnet-5"]
+    assert {"kind": "text", "text": "Desk is fine."} in out
+    assert not any(o["kind"] == "error" for o in out)
+    assert len(claire._histories["t"]) == 4         # history kept
+
+
+def test_a_thread_that_keeps_being_refused_starts_fresh(conn, monkeypatch):
+    claire, calls = _refusing_claire(conn, monkeypatch, {"history"})
+    out = [json.loads(x) for x in claire.ask_stream("status?", "t")]
+    assert len(calls) == 3 and "old" not in calls[-1][1]
+    assert any("fresh conversation" in (o.get("text") or "") for o in out)
+    assert claire._histories["t"] == [
+        {"role": "user", "content": "status?"},
+        {"role": "assistant", "content": "Desk is fine."}]
+
+
+def test_other_errors_are_not_retried(conn, monkeypatch):
+    from app.graph.claire_agent import Claire
+    calls = []
+
+    def boom(chat, system, prompt, tools):
+        calls.append(chat.model)
+        raise RuntimeError("network down")
+        yield  # noqa — generator
+    monkeypatch.setattr(claude_sdk, "stream_chat", boom)
+    claire = Claire(conn, repo=None, desk=None, market=None)
+    claire._ensure_agent()
+    _, system, tools = claire._sdk_chat
+    claire._sdk_chat = (claude_sdk.SdkChat("a", fallback_model="b"),
+                        system, tools)
+    out = [json.loads(x) for x in claire.ask_stream("hi", "t2")]
+    assert calls == ["a"] and out[0]["kind"] == "error"

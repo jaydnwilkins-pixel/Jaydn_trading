@@ -1,5 +1,6 @@
 function nav(active) {
   const items = [["/", "Mission Control"], ["/approvals", "Approvals"],
+    ["/orders", "Orders"], ["/trades", "Trades"],
     ["/markets", "Markets"], ["/watchlist", "Watchlist"],
     ["/claire", "Claire"], ["/trading", "Trading"],
     ["/portfolio", "Portfolio"], ["/saxo", "Saxo accounts"], ["/agents", "Agents & Schedule"],
@@ -98,4 +99,67 @@ function feeFor(model, notional) {
   if (model.type === 'pct')
     return Math.max(notional * Number(model.pct || 0), Number(model.min || 0));
   return Number(model.per_trade || 0);
+}
+
+/* ── live updates, ONE stream for every Claire tab ────────────────────
+   Each tab used to open its own EventSource. Chrome allows only 6
+   connections per site, so a few open tabs (each holding a stream for up to
+   15 min) left a new tab stuck on "connecting…" until a slot freed.
+   Now one tab (the holder of a Web Lock) keeps the stream and relays each
+   event to the others over a BroadcastChannel; when it closes, another tab
+   takes over. Where Web Locks are unavailable (http:// from another device
+   is not a secure context) each tab falls back to its own stream.
+   onState(state): 'live' | 'polling'. */
+function liveEvents(onEvent, onState) {
+  const st = s => { try { onState && onState(s); } catch {} };
+  const own = () => {
+    const es = new EventSource('/api/events');
+    es.onopen = () => st('live');
+    es.onerror = () => st('polling');
+    es.onmessage = ev => { try { onEvent(JSON.parse(ev.data)); } catch {} };
+    return es;
+  };
+  if (!('locks' in navigator) || typeof BroadcastChannel === 'undefined') { own(); return; }
+  const bc = new BroadcastChannel('claire-events');
+  let lastBeat = 0;
+  bc.onmessage = m => {
+    const d = m.data || {};
+    if (d.t === 'beat') { lastBeat = Date.now(); st(d.ok ? 'live' : 'polling'); }
+    else if (d.t === 'ev') { lastBeat = Date.now(); try { onEvent(d.ev); } catch {} }
+  };
+  bc.postMessage({t: 'hello'});                  // ask the holder for a beat now
+  navigator.locks.request('claire-events-leader', () => new Promise(() => {
+    /* this tab holds the stream until it closes (the lock then passes on) */
+    let ok = false;
+    const es = new EventSource('/api/events');
+    es.onopen = () => { ok = true; st('live'); bc.postMessage({t: 'beat', ok}); };
+    es.onerror = () => { ok = false; st('polling'); bc.postMessage({t: 'beat', ok}); };
+    es.onmessage = ev => {
+      let e; try { e = JSON.parse(ev.data); } catch { return; }
+      try { onEvent(e); } catch {}
+      bc.postMessage({t: 'ev', ev: e});
+    };
+    const lead = new BroadcastChannel('claire-events');
+    lead.onmessage = m => { if ((m.data || {}).t === 'hello') lead.postMessage({t: 'beat', ok}); };
+    setInterval(() => lead.postMessage({t: 'beat', ok}), 10000);
+  }));
+  /* a follower that hears nothing for 30 s says so */
+  setInterval(() => { if (lastBeat && Date.now() - lastBeat > 30000) st('polling'); }, 10000);
+}
+/* the header pill: green as soon as the page's data has loaded; "live" once
+   updates arrive the moment they happen */
+function connPill(state) {
+  const dot = document.getElementById('conn');
+  if (!dot) return;
+  if (state === 'live') { dot.textContent = '● live'; dot.className = 'pill ok'; dot.dataset.live = '1'; }
+  else if (state === 'loaded') {
+    if (dot.dataset.live) return;
+    dot.textContent = '● loaded ' + new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+    dot.className = 'pill ok';
+    dot.title = 'data loaded — instant updates are connecting; it also refreshes on its own';
+  } else if (state === 'polling') {
+    delete dot.dataset.live;
+    dot.textContent = '○ auto-refresh'; dot.className = 'pill warn';
+    dot.title = 'instant updates are not connected; the page still refreshes on its own';
+  } else if (state === 'error') { delete dot.dataset.live; dot.textContent = '✖ cannot reach Claire'; dot.className = 'pill bad'; }
 }

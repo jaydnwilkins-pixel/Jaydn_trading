@@ -51,9 +51,10 @@
   <div id="detail"></div>
 
   <h2>Price triggers</h2>
-  <p class="muted small" style="margin-top:-.3rem">Active rules, and those that
-  fired, expired, failed or were cancelled in the last 7 days. A trigger fires
-  once, only while its market is open, and never on a stale price.</p>
+  <p class="muted small" style="margin-top:-.3rem">Your active triggers. A
+  trigger fires once, only while its market is open, and never on a stale
+  price. Ones that fired, expired or were cancelled are on
+  <a href="/orders">Orders</a>.</p>
   <div id="triggers"></div>
 </main>
 <script>
@@ -73,6 +74,7 @@ const EX_ALIAS = {NASDAQ: 'NASDAQ', NMS: 'NASDAQ', NGM: 'NASDAQ', NCM: 'NASDAQ',
   NSI: 'NSE', LSE: 'LSE', LON: 'LSE', LONDON: 'LSE'};
 
 let DATA = {rows: [], accounts: [], triggers: []}, SEL = null, PANEL = null;
+let EDITING = null;          /* id of the trigger the form is editing, else null */
 let CHART = {key: null, data: null, range: '6mo'};
 const FX = {};
 const keyOf = r => r.ticker + ':' + r.exchange;
@@ -108,6 +110,8 @@ async function refresh(force) {
   }
   renderTable();
   renderTriggers();
+  const want = decodeURIComponent((location.hash.match(/^#trigger=(.+)$/) || [])[1] || '');
+  if (want && rowBy(want)) { history.replaceState(null, '', '/watchlist'); openAction(want, 'trigger'); }
   if (SEL && !rowBy(SEL)) { SEL = null; document.getElementById('detail').innerHTML = ''; }
   if (SEL) { renderDetailInfo(); redrawChart(); }
 }
@@ -130,8 +134,9 @@ function heldCell(r) {
   }).join('');
 }
 function trigChip(t) {
-  return `<span class="chip ${t.direction === 'buy' ? 'buy' : 'sell'}" title="${esc(t.rule)}${
-    t.mode === 'auto' ? ' — places automatically' : ' — asks you'}">#${esc(t.id)}
+  return `<span class="chip ${t.direction === 'buy' ? 'buy' : 'sell'}" style="cursor:pointer"
+    onclick="event.stopPropagation();editTrigger(${jsArg(t.id)})" title="${esc(t.rule)}${
+    t.mode === 'auto' ? ' — places automatically' : ' — asks you'} · click to edit">#${esc(t.id)}
     ${esc(t.kind === 'exit' ? 'sell' : t.kind)} ${COND[t.condition] || ''} ${px(t.trigger_price)}${
     t.mode === 'auto' ? ' ⚡' : ''}</span>`;
 }
@@ -142,7 +147,7 @@ function renderTable() {
     el.innerHTML = '<p class="muted">Your watchlist is empty — search for a stock above.</p>';
     return;
   }
-  el.innerHTML = `<table class="wl"><tr><th>Stock</th><th>Last</th><th>Today</th>
+  el.innerHTML = `<table class="wl"><tr><th>Stock</th><th>Current price</th><th>Today</th>
     <th>Day range</th><th>SMA 20 / 50</th><th>20-day low / high</th>
     <th title="average true range: the typical daily move">ATR 14</th>
     <th>Desk holds</th><th>Triggers</th><th></th></tr>${rows.map(r => {
@@ -182,6 +187,7 @@ function select(k) {
 }
 function openAction(k, which) {
   const changed = SEL !== k;
+  if (!changed && which === 'trigger' && EDITING) stopEditing();
   SEL = k; PANEL = which;
   if (changed) { renderTable(); buildDetail(); } else showPanel(which);
   document.getElementById('detail').scrollIntoView({behavior: 'smooth', block: 'start'});
@@ -193,6 +199,7 @@ function accountOptions(id, onchange) {
   ).join('')}</select>`;
 }
 function buildDetail() {
+  EDITING = null;
   const r = rowBy(SEL), el = document.getElementById('detail');
   if (!r) { el.innerHTML = ''; return; }
   el.innerHTML = `<div class="card">
@@ -232,7 +239,7 @@ function renderDetailInfo() {
   const q = r.quote || {}, L = r.levels || {};
   el.innerHTML = `<h3 style="font-size:1rem">${esc(r.ticker)} <span class="muted">${esc(r.exchange)}
     · ${esc(r.name || '')}</span></h3>
-    <p class="small">Last <b>${px(q.price)} ${esc(q.currency || '')}</b> ${chg(q)}
+    <p class="small">Current price <b>${px(q.price)} ${esc(q.currency || '')}</b> ${chg(q)}
       ${q.stale ? '<span class="warn">⚠ stale price</span>' : ''}
       · ${r.is_open ? '<span class="ok">market open</span>' : 'market closed — next open ' + esc(r.next_open || '?')}
       · ATR ${px(L.atr14)} · 20-day ${px(L.low20)} – ${px(L.high20)}
@@ -285,17 +292,41 @@ function redrawChart() {
 
 /* suggestion: a stated rule, never filled in silently — stop 2 × ATR from
    the entry, target twice the risk (2:1), as on the Approvals override form */
-function suggest(r, entry, kind) {
+/* Saxo refuses a bracket whose stop or target is more than 25% from the
+   entry (TooFarFromEntryOrder — measured on SIM 2026-11-05: +25% accepted,
+   +26% refused, both sides). Suggestions for a Saxo account stay inside 24%. */
+const SAXO_MAX_PCT = 25, SAXO_CAP = 0.24;
+function isSaxo(broker) { return String(broker || '').startsWith('saxo'); }
+function suggest(r, entry, kind, broker) {
   const atr = ((r || {}).levels || {}).atr14;
   if (!entry || !atr || kind === 'exit') return null;
-  const risk = 2 * atr;
-  return kind === 'short' ? {stop: rp(entry + risk), target: rp(entry - 2 * risk)}
-    : {stop: rp(entry - risk), target: rp(entry + 2 * risk)};
+  let risk = 2 * atr, reward = 2 * risk, capped = false;
+  if (isSaxo(broker)) {
+    const cap = entry * SAXO_CAP;
+    if (risk > cap) { risk = cap; capped = true; }
+    if (reward > cap) { reward = cap; capped = true; }
+  }
+  const out = kind === 'short' ? {stop: rp(entry + risk), target: rp(entry - reward)}
+    : {stop: rp(entry - risk), target: rp(entry + reward)};
+  out.capped = capped;
+  return out;
 }
-function levelsHint(kind, entry, stop, tgt, s, r) {
+function saxoTooFar(entry, stop, tgt, broker) {
+  if (!isSaxo(broker) || !entry) return '';
+  const far = [['stop', stop], ['target', tgt]].filter(([, v]) =>
+    v && Math.abs(v - entry) / entry * 100 > SAXO_MAX_PCT).map(([k]) => k);
+  return far.length ? `<b class="bad">Saxo will refuse this: the ${far.join(' and ')}
+    ${far.length > 1 ? 'are' : 'is'} more than ${SAXO_MAX_PCT}% from the limit price
+    (TooFarFromEntryOrder). Bring ${far.length > 1 ? 'them' : 'it'} within ${SAXO_MAX_PCT}%.</b>` : '';
+}
+function levelsHint(kind, entry, stop, tgt, s, r, broker) {
   const parts = [];
   if (s) parts.push(`<span class="muted">Suggestion: stop <b>${s.stop}</b> (2 × daily move
-    ${px(r.levels.atr14)}) · target <b>${s.target}</b> (2:1 reward:risk)</span>`);
+    ${px(r.levels.atr14)}) · target <b>${s.target}</b> (2:1 reward:risk)${s.capped
+    ? ` — <b>held within ${Math.round(SAXO_CAP * 100)}% of the entry</b>, the most Saxo accepts`
+    : ''}</span>`);
+  const far = saxoTooFar(entry, stop, tgt, broker);
+  if (far) parts.push(far);
   if (entry && stop) {
     const wrong = kind === 'short' ? stop <= entry : stop >= entry;
     parts.push(wrong ? `<b class="bad">the stop must sit ${kind === 'short' ? 'ABOVE' : 'BELOW'}
@@ -350,7 +381,7 @@ function defaultsBuy() {
 }
 function buyLast() { defaultsBuy(); }
 function buySuggest() {
-  const r = rowBy(SEL), s = suggest(r, num('b-px'), 'buy');
+  const r = rowBy(SEL), s = suggest(r, num('b-px'), 'buy', val('b-acct'));
   if (!s) return;
   document.getElementById('b-stop').value = s.stop;
   document.getElementById('b-tgt').value = s.target;
@@ -363,10 +394,10 @@ async function updBuy() {
   document.getElementById('b-qty').style.display = amtMode ? 'none' : '';
   document.getElementById('b-amt').style.display = amtMode ? '' : 'none';
   const a = acctOf(val('b-acct')), entry = num('b-px');
-  const s = suggest(r, entry, 'buy');
+  const s = suggest(r, entry, 'buy', val('b-acct'));
   document.getElementById('b-stop').placeholder = s ? 'suggest ' + s.stop : 'below the limit';
   document.getElementById('b-tgt').placeholder = s ? 'suggest ' + s.target : 'optional';
-  const parts = [levelsHint('buy', entry, num('b-stop'), num('b-tgt'), s, r)];
+  const parts = [levelsHint('buy', entry, num('b-stop'), num('b-tgt'), s, r, val('b-acct'))];
   const ccy = (r.quote || {}).currency;
   if (entry && !amtMode && num('b-qty'))
     parts.push(`≈ ${fmt(num('b-qty') * entry, 2)} ${esc(ccy || '')} before fees`);
@@ -462,7 +493,8 @@ function renderSell() {
 
 /* ── Add trigger ──────────────────────────────────────────────────── */
 function triggerForm(r) {
-  return `<h3>Add a price trigger for ${esc(r.ticker)}</h3>
+  return `<h3 id="t-head">Add a price trigger for ${esc(r.ticker)}</h3>
+    <p id="t-editnote" class="small warn" style="display:none;margin:.2rem 0"></p>
     <div class="row" style="gap:.5rem">
       <select id="t-dir" onchange="dirChanged()"><option value="buy">Buy</option>
         <option value="sell">Sell</option></select>
@@ -498,7 +530,8 @@ function triggerForm(r) {
         <b>Place it automatically when it hits</b> — you approve it now, in advance; paper accounts only</label>
     </div>
     <p id="t-hint" class="small" style="margin:.4rem 0"></p>
-    <div class="row"><button type="button" onclick="trigCreate()">Create trigger</button></div>
+    <div class="row"><button type="button" id="t-go" onclick="trigCreate()">Create trigger</button>
+      <button type="button" id="t-stopedit" class="ghost" style="display:none" onclick="stopEditing()">Stop editing — start a new trigger</button></div>
     <p id="t-msg" class="small" style="margin:.3rem 0"></p>`;
 }
 function heldOnAcct(r, broker) {
@@ -537,7 +570,7 @@ function acctChanged() {
   updTrig();
 }
 function trigSuggest() {
-  const r = rowBy(SEL), entry = num('t-lim') || num('t-px'), s = suggest(r, entry, trigKind(r));
+  const r = rowBy(SEL), entry = num('t-lim') || num('t-px'), s = suggest(r, entry, trigKind(r), val('t-acct'));
   if (!s) return;
   document.getElementById('t-stop').value = s.stop;
   document.getElementById('t-tgt').value = s.target;
@@ -585,7 +618,7 @@ function updTrig() {
   document.getElementById('t-levels').style.display = v.kind === 'exit' ? 'none' : 'contents';
   document.getElementById('t-stoplbl').firstChild.textContent =
     v.kind === 'short' ? 'stop (above) ' : 'stop (below) ';
-  const s = suggest(r, v.limit, v.kind);
+  const s = suggest(r, v.limit, v.kind, val('t-acct'));
   document.getElementById('t-stop').placeholder = s ? 'suggest ' + s.stop : 'required';
   document.getElementById('t-tgt').placeholder = s ? 'suggest ' + s.target : 'optional';
   /* auto placement is a paper-only privilege; the server refuses it too */
@@ -602,7 +635,7 @@ function updTrig() {
     ${esc(r.ticker)}, so selling borrows shares. A stop ABOVE the limit is required.`);
   else if (v.kind === 'elsewhere') parts.push('<b class="bad">The desk holds this name on another account — choose that account to sell it.</b>');
   else if (r.held_total > 0) parts.push(`<span class="muted">The desk already holds ${fmt(r.held_total, 4)} — a fill adds to the position.</span>`);
-  if (v.kind !== 'exit') parts.push(levelsHint(v.kind === 'short' ? 'short' : 'buy', v.limit, v.stop, v.target, s, r));
+  if (v.kind !== 'exit') parts.push(levelsHint(v.kind === 'short' ? 'short' : 'buy', v.limit, v.stop, v.target, s, r, val('t-acct')));
   if (v.trig && last != null) {
     const now = v.condition === 'lte' ? last <= v.trig : last >= v.trig;
     if (now) parts.push(`<b class="warn">⚠ the price (${px(last)}) already satisfies this —
@@ -613,6 +646,13 @@ function updTrig() {
   if (v.mode === 'auto') parts.push(`<b class="warn">Automatic:</b> when it hits, the desk
     approves this order for you on ${esc(a.label || v.broker)} — the usual checks (price band,
     cash, risk limits${a.whole_shares ? ', whole shares' : ''}) still apply.`);
+  {
+    const ccy = esc((r.quote || {}).currency || '');
+    if (v.qty && v.limit) parts.push(`≈ <b>${fmt(v.qty * v.limit, 2)} ${ccy}</b>
+      <span class="muted">(${fmt(v.qty, 4)} shares × limit ${fmt(v.limit, 2)}, before fees)</span>`);
+    else if (v.amount && v.limit) parts.push(`≈ <b>${fmt(Math.floor(v.amount / v.limit), 0)} shares</b>
+      <span class="muted">for ${fmt(v.amount, 2)} at limit ${fmt(v.limit, 2)}</span>`);
+  }
   if (!r.is_open) parts.push(`<span class="muted">Market closed — it is checked from the next open (${esc(r.next_open || '?')}).</span>`);
   hint.innerHTML = parts.filter(Boolean).join('<br>');
 }
@@ -629,17 +669,21 @@ async function trigCreate() {
     ? '\n\nAUTOMATIC: you are approving this order NOW. When the price hits, the desk ' +
       'places it without asking again (paper account).'
     : '\n\nWhen it hits you get an approval card (and a Telegram message); nothing trades until you approve.';
-  if (!confirm('Create trigger: ' + what + how)) return;
+  if (!confirm((EDITING ? `Replace trigger #${EDITING} with: ` : 'Create trigger: ') + what + how)) return;
   const body = {ticker: v.r.ticker, exchange: v.r.exchange, direction: v.dir,
     condition: v.condition, trigger_price: v.trig, limit_price: v.limit,
     stop: v.stop, target: v.target, broker: v.broker, mode: v.mode,
     expires_in_days: v.days, note: v.note};
   if (v.qty) body.qty = v.qty; else body.amount = v.amount;
   if (v.trail && v.dir === 'buy') body.trail_pct = v.trail;
+  if (EDITING) body.replace = EDITING;
   try {
     const t = await api('/api/price-triggers', body);
-    msg.innerHTML = `<b class="ok">✔ trigger #${esc(t.id)} active</b> — ${esc(t.rule)}`;
-    toast('trigger created ✓');
+    msg.innerHTML = EDITING
+      ? `<b class="ok">✔ trigger #${esc(EDITING)} replaced by #${esc(t.id)}</b> — ${esc(t.rule)}`
+      : `<b class="ok">✔ trigger #${esc(t.id)} active</b> — ${esc(t.rule)}`;
+    toast(EDITING ? 'trigger updated ✓' : 'trigger created ✓');
+    if (EDITING) { EDITING = t.id; setEditing(t); }
     refresh(true);
   } catch (e) { msg.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
 }
@@ -656,8 +700,8 @@ function statusCell(t) {
     <br><span class="small">${esc(t.status_reason || '')}</span>${wi}`;
 }
 function renderTriggers() {
-  const ts_ = DATA.triggers || [], el = document.getElementById('triggers');
-  if (!ts_.length) { el.innerHTML = '<p class="muted">No triggers yet — use “Add trigger” on a row.</p>'; return; }
+  const ts_ = (DATA.triggers || []).filter(t => t.status === 'active'), el = document.getElementById('triggers');
+  if (!ts_.length) { el.innerHTML = '<p class="muted">No active triggers — use “Add trigger” on a row.</p>'; return; }
   el.innerHTML = `<table class="wl"><tr><th>#</th><th>Rule</th><th>Account</th><th>When it hits</th>
     <th>Status</th><th>Created</th><th>Expires</th><th></th></tr>${ts_.map(t => `<tr>
     <td>${esc(t.id)}</td>
@@ -670,12 +714,71 @@ function renderTriggers() {
     <td>${statusCell(t)}</td>
     <td class="small">${ts(t.created_at)}</td>
     <td class="small">${ts(t.expires_at)}</td>
-    <td>${t.status === 'active' ? `<button class="ghost" onclick="cancelTrigger(${jsArg(t.id)})">Cancel</button>` : ''}</td>
+    <td style="white-space:nowrap">${t.status === 'active' ? `<button class="ghost" onclick="editTrigger(${jsArg(t.id)})">✎ Edit</button>
+      <button class="ghost" onclick="cancelTrigger(${jsArg(t.id)})">Cancel</button>` : ''}</td>
   </tr>`).join('')}</table>`;
+}
+/* edit = load the trigger into the form above; saving REPLACES it (the old
+   one is cancelled in the same step, and nothing changes if the new rule is
+   refused) */
+function editTrigger(id) {
+  const t = (DATA.triggers || []).find(x => String(x.id) === String(id));
+  if (!t) return;
+  if (t.status !== 'active') { toast(`trigger #${t.id} is ${t.status} — it can no longer be edited`, false); return; }
+  const k = t.ticker + ':' + t.exchange;
+  if (!rowBy(k)) {
+    /* the stock was removed from the watchlist: edit it on the Orders page */
+    location.href = '/orders';
+    return;
+  }
+  if (SEL !== k) { SEL = k; PANEL = 'trigger'; renderTable(); buildDetail(); }
+  else showPanel('trigger');
+  const set = (i, v) => { const el = document.getElementById(i); if (el) el.value = v ?? ''; };
+  set('t-dir', t.direction);
+  set('t-acct', t.broker);
+  set('t-cond', t.condition);
+  set('t-px', t.trigger_price);
+  set('t-lim', t.limit_price === t.trigger_price ? '' : t.limit_price);
+  if (t.qty != null) { set('t-size', 'qty'); set('t-qty', t.qty); set('t-amt', ''); }
+  else { set('t-size', 'amt'); set('t-amt', t.amount_base); set('t-qty', ''); }
+  set('t-stop', t.stop_loss);
+  set('t-tgt', t.take_profit);
+  set('t-trail', t.trail_pct);
+  set('t-days', Math.max(1, Math.ceil((t.expires_at - Date.now() / 1000) / 86400)));
+  set('t-note', t.note);
+  const radio = document.querySelector(`input[name="t-run"][value="${t.mode === 'auto' ? 'auto' : 'ask'}"]`);
+  if (radio) radio.checked = true;
+  EDITING = t.id;
+  setEditing(t);
+  updTrig();
+  document.getElementById('t-msg').innerHTML = '';
+  document.getElementById('p-trigger').scrollIntoView({behavior: 'smooth', block: 'center'});
+}
+function setEditing(t) {
+  const r = rowBy(SEL);
+  document.getElementById('t-head').textContent = EDITING
+    ? `Edit trigger #${EDITING} for ${r ? r.ticker : ''}` : `Add a price trigger for ${r ? r.ticker : ''}`;
+  const note = document.getElementById('t-editnote');
+  note.style.display = EDITING ? '' : 'none';
+  note.innerHTML = EDITING ? `Editing <b>#${esc(EDITING)}</b> — ${esc(t ? t.rule : '')}. Saving replaces it with a
+    new trigger (same checks as a new one); if the change is refused, #${esc(EDITING)} stays as it is.` : '';
+  document.getElementById('t-go').textContent = EDITING ? `Save changes to #${EDITING}` : 'Create trigger';
+  document.getElementById('t-stopedit').style.display = EDITING ? '' : 'none';
+  const tab = document.getElementById('tab-trigger');
+  if (tab) tab.textContent = EDITING ? `Edit trigger #${EDITING}` : 'Add trigger';
+}
+function stopEditing() {
+  EDITING = null;
+  setEditing(null);
+  document.getElementById('t-msg').innerHTML = '';
+  defaultsTrigger();
 }
 async function cancelTrigger(id) {
   if (!confirm(`Cancel trigger #${id}?`)) return;
-  try { await apiDelete('/api/price-triggers?id=' + encodeURIComponent(id)); toast('trigger cancelled'); }
+  try {
+    await apiDelete('/api/price-triggers?id=' + encodeURIComponent(id)); toast('trigger cancelled');
+    if (String(EDITING) === String(id)) stopEditing();
+  }
   catch (e) { toast(e.message, false); }
   refresh(true);
 }

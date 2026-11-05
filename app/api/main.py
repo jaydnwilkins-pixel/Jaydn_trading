@@ -39,6 +39,10 @@ class ResumeBody(BaseModel):
     qty: float | None = None
     trail_pct: float | None = None
     broker: Literal["alpaca", "saxo", "moomoo", "saxo_live"] | None = None
+    # the stop / target you set on the approval card (validated by the
+    # dashboard before it resumes; applied by the gate). None = keep the plan
+    levels: dict | None = None
+    order_type: Literal["limit", "market"] | None = None
 
 
 class OverrideBody(BaseModel):
@@ -95,8 +99,19 @@ class RunBody(BaseModel):
         return self
 
 
+class OrderControlBody(BaseModel):
+    work_item_id: str
+    actor: str = "human"
+    action: Literal["cancel", "edit"]
+    entry: float | None = None
+    stop: float | None = None
+    target: float | None = None
+    qty: float | None = None
+
+
 def create_app(desk, conn, secret: str, *, clock=time.time,
-               ask_handler=None, agent_ask_handler=None) -> FastAPI:
+               ask_handler=None, agent_ask_handler=None,
+               brokers=None) -> FastAPI:
     app = FastAPI(title="claire-api")
 
     def _guard(request: Request):
@@ -161,7 +176,8 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
         payload = {"status": body.status, "size_base": body.size_base,
                    "qty": body.qty, "trail_pct": body.trail_pct,
                    "broker": body.broker, "actor": body.actor,
-                   "token": body.token,
+                   "token": body.token, "levels": body.levels,
+                   "order_type": body.order_type or "limit",
                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))}
         try:
             desk.resume(body.work_item_id, payload)
@@ -198,6 +214,32 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
         except ValueError as e:
             raise HTTPException(409, str(e)[:300])
         return {"ok": True, "thesis": json.loads(th.model_dump_json())}
+
+    @app.post("/internal/order")
+    def internal_order(body: OrderControlBody, request: Request):
+        """Cancel or edit an approved order before it fills. Same trust
+        boundary as /internal/resume (the dashboard checked the key)."""
+        from .. import order_control
+        _guard(request)
+        if body.actor != "human":
+            raise HTTPException(403, "only a human cancels or edits an order")
+        ts = int(clock())
+        try:
+            if body.action == "cancel":
+                return order_control.cancel(desk.repo, brokers or {},
+                                            body.work_item_id, ts=ts)
+            if not body.entry:
+                raise HTTPException(422, "an edit needs a limit price")
+            return order_control.edit(
+                desk.repo, desk, brokers or {}, body.work_item_id,
+                entry=body.entry, stop=body.stop, target=body.target,
+                qty=body.qty, ts=ts)
+        except order_control.OrderControlError as e:
+            raise HTTPException(e.status, str(e)[:300])
+        except ValidationError as e:
+            raise HTTPException(422, str(e.errors()[0].get("msg"))[:300])
+        except ValueError as e:
+            raise HTTPException(409, str(e)[:300])
 
     @app.post("/internal/override")
     def internal_override(body: OverrideBody, request: Request):

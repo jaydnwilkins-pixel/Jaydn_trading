@@ -53,9 +53,23 @@ def accounts(conn, repo, env):
     return out, live
 
 
+def _fix_suffixed(conn):
+    """Rows stored as "APC.DE" on XETRA (see market.desk_ticker) → "APC"."""
+    from .tools.market import desk_ticker
+    for r in conn.execute("SELECT ticker, exchange FROM watchlist").fetchall():
+        t = desk_ticker(r["ticker"], r["exchange"])
+        if t != r["ticker"]:
+            conn.execute("UPDATE OR IGNORE watchlist SET ticker=? WHERE"
+                         " ticker=? AND exchange=?",
+                         (t, r["ticker"], r["exchange"]))
+            conn.execute("DELETE FROM watchlist WHERE ticker=? AND"
+                         " exchange=?", (r["ticker"], r["exchange"]))
+
+
 def view(conn, repo, market, *, env=None, clock, cal=None):
     now = int(clock())
     nowdt = datetime.fromtimestamp(now, tz=timezone.utc)
+    _fix_suffixed(conn)
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM watchlist ORDER BY exchange, ticker").fetchall()]
     syms = [yahoo_symbol(r["ticker"], r["exchange"]) for r in rows]

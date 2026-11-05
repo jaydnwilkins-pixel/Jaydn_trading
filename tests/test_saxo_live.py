@@ -232,8 +232,28 @@ def test_sim_and_live_are_independent(tmp_path):
             "access_expires_at": T0 + 1200, "refresh_expires_at": T0 + 2400,
             "code_verifier": "v", "redirect_uri": "x"}))
         saxo_live.positions(w, client=client(h), clock=lambda: T0)
-    assert seen[0].startswith("https://gateway.saxobank.com/sim/openapi/")
-    assert seen[1].startswith("https://gateway.saxobank.com/openapi/")
+    # each positions() read is netpositions + openings (first purchase)
+    assert len(seen) == 4
+    assert all(u.startswith("https://gateway.saxobank.com/sim/openapi/")
+               for u in seen[:2])
+    assert all(u.startswith("https://gateway.saxobank.com/openapi/")
+               for u in seen[2:])
+
+
+def test_positions_show_the_first_purchase_price_and_total_cost():
+    from app.tools.saxo_live import _add_openings
+    rows = [{"symbol": "CSCO:xnas", "_net_id": "226__Share"}]
+    _add_openings(rows, [
+        {"NetPositionId": "226__Share", "PositionBase": {
+            "Amount": 5, "OpenPrice": 110.0,
+            "ExecutionTimeOpen": "2026-11-04T15:00:00Z"}},
+        {"NetPositionId": "226__Share", "PositionBase": {
+            "Amount": 9, "OpenPrice": 103.15,
+            "ExecutionTimeOpen": "2026-11-03T17:41:09Z"}}])
+    r = rows[0]
+    assert r["first_open_price"] == 103.15          # the EARLIEST buy
+    assert r["first_open_time"].startswith("2026-11-03")
+    assert r["open_fills"] == 2 and r["cost_basis"] == 1478.35
 
 
 def test_summary_names_the_account(tmp_path):
@@ -305,3 +325,46 @@ def test_saxo_symbols_map_to_desk_chart_symbols():
     assert desk_symbol("7203:xtks") == "7203.T"
     assert desk_symbol("SAP:xetr") == "SAP.DE"
     assert desk_symbol("XYZ:xmil") is None and desk_symbol(None) is None
+
+
+def test_a_zero_saxo_price_is_replaced_by_the_desks_quote(monkeypatch):
+    """Live account, ASX: Saxo sends CurrentPrice 0 (no market data), which
+    showed PRO as a -100% loss. The page gets the desk's quote instead."""
+    import threading
+    from decimal import Decimal
+
+    from app import dashboards
+    from app.accounting import db
+    from app.accounting.repo import Repo
+    from app.tools import saxo_live
+    from tests.test_dashboards import DKEY
+
+    class M:
+        def spark(self, syms):
+            return {s: {"price": Decimal("0.065"), "src": "tradingview"}
+                    for s in syms}
+
+        def fx(self, a, b):
+            return Decimal("0.885") if a != b else Decimal(1)
+    monkeypatch.setattr(saxo_live, "summary", lambda which, **kw: {
+        "balance": {"Currency": "SGD"}, "orders": [],
+        "positions": [{"symbol": "PRO:xasx", "currency": "AUD",
+                       "amount": 2000.0, "avg_open_price": 0.8525,
+                       "current_price": 0.0, "pnl": -1705.0,
+                       "pnl_base": -1509.45, "exposure_base": 0.0}]})
+    conn = db.connect(":memory:")
+    db.init(conn)
+    srv = dashboards.create_server(conn, Repo(conn), M(), secret="s",
+                                   dash_key=DKEY, port=0, sse_interval=None,
+                                   api_base="http://127.0.0.1:9")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        (p,) = httpx.get(base + "/api/saxo-account?env=live",
+                         headers={"X-Dash-Key": DKEY}).json()["positions"]
+    finally:
+        srv.shutdown()
+    assert p["current_price"] == 0.065 and p["price_src"] == "tradingview"
+    assert p["pnl"] == round((0.065 - 0.8525) * 2000, 2)      # -1575, not -1705
+    assert p["pnl_base"] == round(p["pnl"] * 0.885, 2)
+    assert p["weight_pct"] == 100.0

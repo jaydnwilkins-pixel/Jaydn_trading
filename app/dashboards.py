@@ -44,11 +44,13 @@ PAGES = {"/": "index.html", "/portfolio": "portfolio.html",
          "/agents": "agents.html", "/providers": "providers.html",
          "/claire": "claire.html", "/schedule": "agents.html",  # merged
          "/approvals": "approvals.html", "/saxo": "saxo.html",
-         "/usage": "usage.html", "/watchlist": "watchlist.html"}
+         "/usage": "usage.html", "/watchlist": "watchlist.html",
+         "/orders": "orders.html", "/trades": "trades.html"}
 STATIC = {"/style.css": ("style.css", "text/css"),
           "/nav.js": ("nav.js", "text/javascript"),
           "/charts.js": ("charts.js", "text/javascript"),
-          "/sell.js": ("sell.js", "text/javascript")}
+          "/sell.js": ("sell.js", "text/javascript"),
+          "/orderinfo.js": ("orderinfo.js", "text/javascript")}
 
 PIPELINE_EDGES = [("prepare", "fundamental"), ("prepare", "technical"),
                   ("prepare", "news"), ("fundamental", "bull"),
@@ -106,6 +108,62 @@ def _levels(c):
             "high20": round(max(b[0] for b in last20), 4),
             "day_high": round(bars[-1][0], 4), "day_low": round(bars[-1][1], 4),
             "bars": len(bars)}
+
+
+def venue_adapter(acct, env) -> str:
+    """Which adapter claire-api builds for this account (wiring.build_brokers
+    is the rule; this mirrors it for display — it places nothing)."""
+    b = acct["broker"]
+    if b == "saxo" and (env.get("SAXO_SIM_EXECUTION") or "").lower() == \
+            "enabled" and env.get("SAXO_SIM_ACCOUNT_KEY"):
+        return "saxo-sim"
+    if b == "saxo_live" and acct["environment"] == "live":
+        return "saxo-live"
+    return "paper-sim"
+
+
+def background_loops(env) -> list:
+    """Recurring work that is not in the schedules table (fixed loops) —
+    shown on the system map so nothing that runs on its own is invisible."""
+    out = []
+    try:
+        from .tools import saxo_live
+        st = {w: saxo_live.status(w) for w in ("sim", "live")}
+        signed = [w for w, v in st.items() if v.get("signed_in")]
+        out.append({"id": "loop:saxo", "name": "Saxo sign-in keepalive",
+                    "sub": ("keeps " + " + ".join(signed) + " signed in")
+                    if signed else "nothing signed in",
+                    "state": "ok" if signed else "idle",
+                    "detail": "refreshes the Saxo sign-in every 10 min"
+                              " and warns you (Telegram + desktop) before or"
+                              " when it lapses · runs in claire-api"})
+    except Exception:                            # noqa: BLE001 — display only
+        pass
+    try:
+        from . import alerts
+        tg = alerts.telegram_settings(alerts.TELEGRAM_ENV)
+        ready = bool(tg.get("token") and tg.get("approver_id"))
+    except Exception:                            # noqa: BLE001
+        ready = False
+    out.append({"id": "loop:telegram", "name": "Telegram approvals",
+                "sub": "every 20 s" if ready else "not configured",
+                "state": "ok" if ready else "idle",
+                "detail": "sends each approval card (with chart) to your "
+                          "Telegram and closes it when it is decided · runs "
+                          "in the dashboards; Bob's bot relays your taps"})
+    return out
+
+
+def session_facts(exchange, cal, now):
+    """Is the order's market open, and when does it next open (epoch s) —
+    what the Orders page needs to say what has to happen for it to fill."""
+    nowdt = datetime.fromtimestamp(now, tz=timezone.utc)
+    try:
+        return {"is_open": sessions.is_open(exchange, nowdt, cal),
+                "next_open": int(sessions.next_open(exchange, nowdt,
+                                                    cal).timestamp())}
+    except KeyError:
+        return {"is_open": None, "next_open": None}
 
 
 def _approval_account(a, repo, env, live):
@@ -745,6 +803,14 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                         return self._send(400, {"error":
                                                 "env must be sim or live"})
                     return self._send(200, self._saxo_account(which))
+                if u.path == "/api/orders":
+                    return self._send(200, self._orders())
+                if u.path == "/api/trades":
+                    return self._send(200, self._trades(
+                        int(q.get("days", 90) or 90)))
+                if u.path == "/api/approvals-archive":
+                    return self._send(200, self._approvals_archive(
+                        int(q.get("days", 30) or 30)))
                 if u.path == "/api/levels-for-override":
                     return self._send(200, self._override_context(
                         q.get("id", "")))
@@ -811,6 +877,49 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     return self._ask_proxy(body, "/ask")
                 if u.path == "/api/agent-ask":
                     return self._ask_proxy(body, "/agent/ask")
+                if u.path == "/api/flag-ack":
+                    # clear (or bring back) a Mission Control warning
+                    keys = body.get("keys") or [body.get("key")]
+                    if not all(isinstance(k, str) and 0 < len(k) <= 120
+                               for k in keys) or len(keys) > 50:
+                        raise HTTPError(400, "keys must be short strings")
+                    for k in keys:
+                        if body.get("restore"):
+                            conn.execute("DELETE FROM dashboard_acks"
+                                         " WHERE key=?", (k,))
+                        else:
+                            conn.execute(
+                                "INSERT INTO dashboard_acks (key, acked_at)"
+                                " VALUES (?,?) ON CONFLICT(key) DO UPDATE"
+                                " SET acked_at=excluded.acked_at",
+                                (k, int(clock())))
+                    return self._send(200, {"ok": True})
+                if u.path == "/api/order-control":
+                    # cancel / edit an APPROVED order before it fills; the
+                    # adapters live in claire-api, which does the work
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    req = {"work_item_id": str(body.get("work_item_id") or ""),
+                           "actor": "human",
+                           "action": body.get("action")}
+                    for k in ("entry", "stop", "target", "qty"):
+                        if body.get(k) not in (None, ""):
+                            req[k] = float(body[k])
+                    try:
+                        r = httpx.post(f"{api_base}/internal/order", json=req,
+                                       headers={"x-claire-secret": secret},
+                                       timeout=60)
+                    except Exception as e:          # noqa: BLE001
+                        return self._send(502, {"error":
+                                                f"claire-api unreachable ({e})"})
+                    try:
+                        data = r.json()
+                    except ValueError:
+                        data = {}
+                    if r.status_code != 200:
+                        return self._send(r.status_code, {"error": str(
+                            data.get("detail") or f"HTTP {r.status_code}")})
+                    return self._send(200, data)
                 if u.path in ("/api/trade-retry", "/api/trade-cancel"):
                     # money path: re-checked locally, like thesis-action
                     if not self._paired():
@@ -900,11 +1009,19 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     if not self._paired():
                         raise HTTPError(403, "dashboard not paired")
                     from . import price_triggers
+                    who = ("human via the paired dashboard ("
+                           f"{self.client_address[0]})")
                     try:
-                        out = price_triggers.create(
-                            conn, body, env=env or {}, clock=clock,
-                            created_by="human via the paired dashboard ("
-                            f"{self.client_address[0]})")
+                        if body.get("replace") is not None:
+                            out = price_triggers.replace(
+                                conn, body.get("replace"),
+                                {k: v for k, v in body.items()
+                                 if k != "replace"},
+                                env=env or {}, clock=clock, created_by=who)
+                        else:
+                            out = price_triggers.create(
+                                conn, body, env=env or {}, clock=clock,
+                                created_by=who)
                     except price_triggers.TriggerError as e:
                         return self._send(e.code, {"error": e.message})
                     return self._send(200, out)
@@ -964,6 +1081,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 if u.path == "/api/watchlist":
                     t = str(body.get("ticker", "")).upper().strip()
                     ex = str(body.get("exchange", "")).upper().strip()
+                    from .tools.market import desk_ticker
+                    t = desk_ticker(t, ex)
                     if not t or not ex:
                         return self._send(400, {"error":
                                                 "ticker and exchange required"})
@@ -1089,6 +1208,11 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
+                # a first byte at once: a browser may hold "open" until the
+                # body starts, and the pill sat on "connecting…" for a
+                # keep-alive interval (20 s). retry: reconnect in 3 s.
+                self.wfile.write(b"retry: 3000\n: connected\n\n")
+                self.wfile.flush()
                 last_write = time.monotonic()
                 while time.monotonic() < deadline and not self._client_gone():
                     # short waits so a disconnect is noticed within seconds
@@ -1239,15 +1363,33 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             for svc, h in healthrows.items():
                 if h["ok"] != "ok":
                     flags.append(f"{svc} is {h['ok']}")
-            day_ago = int(clock()) - 86400
+            now = int(clock())
+            day_ago = now - 86400
+            acks = {r["key"]: r["acked_at"] for r in conn.execute(
+                "SELECT key, acked_at FROM dashboard_acks")}
+            # a warning's key is its text, so a CHANGED warning is new; a
+            # cleared one returns after a day if it is still true
+            items = [{"key": "flag:" + f[:110], "text": f} for f in flags]
+            visible = [i for i in items
+                       if acks.get(i["key"], 0) < day_ago]
+            cleared = [dict(i, acked_at=acks[i["key"]]) for i in items
+                       if i not in visible]
+            # failed runs: clearing acknowledges the ones so far; only a
+            # failure AFTER that brings the warning back
+            seen = max(day_ago, acks.get("failed_runs", 0))
             (nfail,) = conn.execute(
                 "SELECT COUNT(*) FROM work_items WHERE state='failed'"
-                " AND updated_at > ?", (day_ago,)).fetchone()
+                " AND updated_at > ?", (seen,)).fetchone()
             if nfail:
-                flags.append(f"{nfail} failed run(s) in the last 24h —"
-                             " see Trading")
+                visible.append({"key": "failed_runs", "text":
+                                f"{nfail} failed run(s) in the last 24h"
+                                + (" since you last cleared this"
+                                   if seen > day_ago else "")
+                                + " — see Trading", "link": "/trading"})
             return {"work_items": states, "health": healthrows, "cash": cash,
-                    "claire_api": up, "flags": flags,
+                    "claire_api": up,
+                    "flags": [i["text"] for i in visible],
+                    "flag_items": visible, "cleared": cleared,
                     "pending": states.get("awaiting_approval", 0)}
 
         def _reports_for(self, wi):
@@ -1353,8 +1495,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 # offering a second one would double-buy the same thesis
                 ovr = conn.execute(
                     "SELECT id, state FROM work_items WHERE override_of=?"
-                    " AND state NOT IN ('rejected','expired','failed')"
-                    " ORDER BY created_at DESC LIMIT 1", (r["id"],)).fetchone()
+                    " AND state NOT IN ('rejected','expired','failed',"
+                    "'cancelled') ORDER BY created_at DESC LIMIT 1", (r["id"],)).fetchone()
                 inst = conn.execute(
                     "SELECT exchange FROM instruments WHERE ticker=? LIMIT 1",
                     (r["ticker"],)).fetchone()
@@ -1477,6 +1619,329 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                           text)
             return text[:220]
 
+        def _orders(self):
+            """Everything still outstanding: entry orders (queued by the desk
+            or working at the broker), the protective stop/target legs that
+            guard open positions, and price triggers — for the Orders page."""
+            from . import price_triggers
+            from .tools.market import yahoo_symbol
+            accts = {a["id"]: dict(a) for a in conn.execute(
+                "SELECT id, broker, environment FROM broker_accounts")}
+            rows = [dict(r) for r in conn.execute(
+                "SELECT o.id, o.work_item_id, o.account_id, o.side,"
+                " o.qty/1e6 qty, o.limit_price/1e6 limit_price,"
+                " o.stop_loss/1e6 stop_loss, o.take_profit/1e6 take_profit,"
+                " o.status, o.broker_order_id, o.created_at, o.placed_at,"
+                " o.expires_at, o.leg, o.parent_order_id, o.submitted_at,"
+                " i.ticker, i.exchange, i.currency,"
+                " (SELECT COALESCE(SUM(e.qty),0)/1e6 FROM executions e"
+                "  WHERE e.order_id=o.id) filled"
+                " FROM orders o JOIN instruments i ON i.id=o.instrument_id"
+                " WHERE o.status IN ('pending_session','placed',"
+                " 'partially_filled') ORDER BY o.created_at DESC")]
+            for r in rows:
+                a = accts.get(r["account_id"]) or {}
+                r["broker"] = a.get("broker")
+                r["account"] = self._account_label(a.get("broker"),
+                                                   a.get("environment"))
+                r["symbol"] = yahoo_symbol(r["ticker"], r["exchange"])
+                r["where"] = ("queued — sent when the market opens"
+                              if r["status"] == "pending_session" and
+                              not r["submitted_at"] else
+                              "being sent to the broker"
+                              if r["status"] == "pending_session" else
+                              "part filled at the broker"
+                              if r["status"] == "partially_filled" else
+                              "working at the broker")
+            trig = price_triggers.list_triggers(
+                conn, since=int(clock()) - 7 * 86400, limit=200)
+            syms = sorted({r["symbol"] for r in rows} |
+                          {yahoo_symbol(t["ticker"], t["exchange"])
+                           for t in trig if t["status"] == "active"})
+            quotes = {}
+            if syms:
+                try:
+                    quotes = {s: {"price": float(v["price"]),
+                                  "stale": v.get("stale")}
+                              for s, v in market.spark(syms).items()
+                              if v.get("price") is not None}
+                except Exception:               # noqa: BLE001 — best effort
+                    quotes = {}
+            for t in trig:
+                t["symbol"] = yahoo_symbol(t["ticker"], t["exchange"])
+                a = accts.get(t["account_id"]) or {}
+                t["account"] = self._account_label(a.get("broker"),
+                                                   a.get("environment"))
+            for r in rows:
+                q = quotes.get(r["symbol"]) or {}
+                r["last"] = q.get("price")
+                r.update(session_facts(r["exchange"], cal_or_default(),
+                                       int(clock())))
+                if r["leg"] and r["parent_order_id"]:
+                    # what the shares cost, so the page can say what the
+                    # leg would make or lose if it fills
+                    f = conn.execute(
+                        "SELECT SUM(1.0*qty*price_native)/SUM(qty)/1e6"
+                        " FROM executions WHERE order_id=?",
+                        (r["parent_order_id"],)).fetchone()
+                    r["entry_price"] = f[0] if f else None
+            return {"entries": [r for r in rows if not r["leg"]],
+                    "legs": [r for r in rows if r["leg"]],
+                    "triggers": trig, "quotes": quotes, "now": int(clock())}
+
+        def _approvals_archive(self, days):
+            """Approvals you have already dealt with — they leave the
+            Approvals page and are kept here: what you decided and what
+            happened next."""
+            since = int(clock()) - max(1, min(days, 365)) * 86400
+            out = []
+            for r in conn.execute(
+                    "SELECT w.id, w.ticker, w.kind, w.state, w.trigger,"
+                    " w.thesis_json, w.updated_at, w.created_at FROM work_items w"
+                    " WHERE w.updated_at >= ? AND w.state NOT IN"
+                    " ('running','awaiting_approval')"
+                    " AND EXISTS (SELECT 1 FROM events e WHERE e.item_id=w.id"
+                    "  AND e.to_state='awaiting_approval')"
+                    " ORDER BY w.updated_at DESC LIMIT 200", (since,)):
+                try:
+                    th = json.loads(r["thesis_json"] or "{}")
+                except ValueError:
+                    th = {}
+                dec = conn.execute(
+                    "SELECT to_state, ts, payload FROM events WHERE item_id=?"
+                    " AND to_state IN ('approved','rejected','expired')"
+                    " ORDER BY id LIMIT 1", (r["id"],)).fetchone()
+                try:
+                    dp = json.loads(dec["payload"] or "{}") if dec else {}
+                except ValueError:
+                    dp = {}
+                fill = conn.execute(
+                    "SELECT SUM(e.qty)/1e6 q, SUM(1.0*e.qty*e.price_native)"
+                    "/SUM(e.qty)/1e6 px FROM executions e JOIN orders o"
+                    " ON o.id=e.order_id WHERE o.work_item_id=? AND"
+                    " o.leg IS NULL", (r["id"],)).fetchone()
+                out.append({
+                    "id": r["id"], "ticker": r["ticker"], "kind": r["kind"],
+                    "state": r["state"], "trigger": r["trigger"],
+                    "direction": th.get("direction"),
+                    "entry": th.get("entry_high"),
+                    "stop": th.get("stop_loss"),
+                    "target": th.get("take_profit"),
+                    "currency": th.get("currency"),
+                    "decision": dec["to_state"] if dec else None,
+                    "decided_at": dec["ts"] if dec else None,
+                    "broker": dp.get("broker"),
+                    "size": dp.get("size_base"), "qty": dp.get("qty"),
+                    "filled_qty": fill["q"] if fill else None,
+                    "fill_price": fill["px"] if fill else None,
+                    "updated_at": r["updated_at"]})
+            return {"items": out}
+
+        def _trades(self, days):
+            """Every fill in the book — buys and sells, including the ones a
+            stop or target made at the broker while nobody was looking — with
+            the profit or loss and why the trade happened (Trades page)."""
+            from .tools.market import yahoo_symbol
+            since = int(clock()) - max(1, min(days, 3650)) * 86400
+            accts = {a["id"]: dict(a) for a in conn.execute(
+                "SELECT id, broker, environment, base_currency"
+                " FROM broker_accounts")}
+            rows = [dict(r) for r in conn.execute(
+                "SELECT e.id, e.order_id, e.account_id, e.side,"
+                " e.qty/1e6 qty, e.price_native/1e6 price, e.currency,"
+                " e.commission/1e6 fees, e.other_fees/1e6 other_fees,"
+                " e.gross_base/1e6 gross, e.net_base/1e6 net,"
+                " e.executed_at, e.work_item_id, i.ticker, i.exchange,"
+                " i.name, o.leg, o.limit_price/1e6 order_limit,"
+                " o.stop_loss/1e6 order_stop, o.parent_order_id"
+                " FROM executions e JOIN instruments i ON i.id=e.instrument_id"
+                " LEFT JOIN orders o ON o.id=e.order_id"
+                " WHERE e.executed_at >= ? ORDER BY e.executed_at DESC",
+                (since,))]
+            work = {}
+
+            def item(wi):
+                if wi and wi not in work:
+                    r = conn.execute("SELECT * FROM work_items WHERE id=?",
+                                     (wi,)).fetchone()
+                    work[wi] = dict(r) if r else None
+                return work.get(wi) if wi else None
+
+            def thesis(w):
+                try:
+                    return json.loads((w or {}).get("thesis_json") or "{}")
+                except ValueError:
+                    return {}
+
+            def analysts(wi):
+                out = []
+                for rep in conn.execute(
+                        "SELECT agent_id, payload FROM agent_reports WHERE"
+                        " work_item_id=? AND kind='analyst' ORDER BY id",
+                        (wi,)):
+                    try:
+                        s = json.loads(rep["payload"]).get("summary")
+                    except (ValueError, AttributeError):
+                        s = None
+                    if s:
+                        out.append(f"{rep['agent_id']}: {s}")
+                return out
+
+            def verdict(wi):
+                r = conn.execute(
+                    "SELECT payload FROM agent_reports WHERE work_item_id=?"
+                    " AND agent_id='arbiter' ORDER BY id DESC LIMIT 1",
+                    (wi,)).fetchone()
+                try:
+                    return json.loads(r["payload"]) if r else {}
+                except ValueError:
+                    return {}
+
+            def approved_at(wi):
+                r = conn.execute(
+                    "SELECT MIN(ts) FROM events WHERE item_id=? AND"
+                    " to_state='approved'", (wi,)).fetchone()
+                return r[0] if r else None
+
+            def reason(t):
+                w = item(t["work_item_id"]) or {}
+                th, kind = thesis(w), w.get("kind")
+                why, details = "", []
+                if t["leg"] == "stop":
+                    why = ("Stop-loss hit — the protective stop "
+                           + (f"at {t['order_stop']:g} " if t["order_stop"]
+                              else "")
+                           + "sold the shares at the broker automatically")
+                elif t["leg"] == "target":
+                    why = ("Target reached — the take-profit order "
+                           + (f"at {t['order_limit']:g} " if t["order_limit"]
+                              else "")
+                           + "sold the shares at the broker automatically")
+                elif kind == "pipeline":
+                    conv = th.get("conviction")
+                    why = ("Claire's desk recommended this "
+                           f"{th.get('direction') or t['side']}"
+                           + (f" ({conv:.0%} conviction)" if conv else "")
+                           + " and you approved it")
+                    details = analysts(w["id"])
+                elif kind == "override":
+                    origin = w.get("override_of")
+                    v = verdict(origin) if origin else {}
+                    why = ("The desk passed on it"
+                           + (f" ({v['conviction']:.0%} conviction)"
+                              if v.get("conviction") else "")
+                           + " — you overrode it and approved the trade")
+                    ev = conn.execute(
+                        "SELECT payload FROM events WHERE item_id=? AND"
+                        " to_state='override'", (w["id"],)).fetchone()
+                    try:
+                        note = json.loads(ev["payload"] or "{}").get("note") \
+                            if ev else None
+                    except ValueError:
+                        note = None
+                    if note:
+                        details.append(f"your note: {note}")
+                    details += analysts(origin) if origin else []
+                elif kind == "sell_review":
+                    why = ("Sell review after a price alert, approved by you"
+                           + (f" — {w['trigger']}" if w.get("trigger")
+                              else ""))
+                    details = analysts(w["id"])
+                elif kind == "manual":
+                    cond = (th.get("conditions") or [""])[0]
+                    why = (re.sub(r"^MANUAL (\w+)", lambda m: "Your manual "
+                                  + m.group(1).lower(), cond) if cond else
+                           (w.get("trigger") or "your manual trade"))
+                    why += " — approved by you"
+                elif w:
+                    why = w.get("trigger") or kind or ""
+                else:
+                    why = "not linked to a Claire run (booked from the broker)"
+                if t["leg"]:
+                    parent = item(t["work_item_id"]) or {}
+                    details.append("protecting the buy from run "
+                                   + (parent.get("id") or "?"))
+                return why, details, approved_at(w["id"]) if w else None
+
+            # profit / loss: sells from their lot closures, buys from their lot
+            open_syms = set()
+            for t in rows:
+                a = accts.get(t["account_id"]) or {}
+                t["account"] = self._account_label(a.get("broker"),
+                                                   a.get("environment"))
+                t["base_currency"] = a.get("base_currency")
+                t["symbol"] = yahoo_symbol(t["ticker"], t["exchange"])
+                t["reason"], t["details"], t["approved_at"] = reason(t)
+                cl = conn.execute(
+                    "SELECT COUNT(*) n, SUM(realized_pl_base)/1e6 pl,"
+                    " SUM(cost_base)/1e6 cost, SUM(qty)/1e6 q,"
+                    " MAX(holding_days) held FROM lot_closures"
+                    " WHERE close_execution_id=?", (t["id"],)).fetchone()
+                lot = conn.execute(
+                    "SELECT id, qty_opened/1e6 opened,"
+                    " qty_remaining/1e6 remaining,"
+                    " cost_per_share_base/1e6 cost FROM lots"
+                    " WHERE open_execution_id=?", (t["id"],)).fetchone()
+                t["closes"] = None
+                t["lot"] = None
+                if cl and cl["n"]:
+                    t["closes"] = {"pl": cl["pl"], "cost": cl["cost"],
+                                   "qty": cl["q"], "held_days": cl["held"],
+                                   "pct": (cl["pl"] / cl["cost"] * 100
+                                           if cl["cost"] else None)}
+                if lot:
+                    rz = conn.execute(
+                        "SELECT SUM(realized_pl_base)/1e6, SUM(qty)/1e6,"
+                        " GROUP_CONCAT(close_execution_id) FROM lot_closures"
+                        " WHERE lot_id=?", (lot["id"],)).fetchone()
+                    t["lot"] = {"opened": abs(lot["opened"]),
+                                "remaining": lot["remaining"],
+                                "cost": lot["cost"],
+                                "realized": rz[0], "closed_qty": rz[1],
+                                "closed_by": (rz[2] or "").split(",")
+                                if rz[2] else []}
+                    if lot["remaining"] > 0:
+                        open_syms.add(t["symbol"])
+            quotes = {}
+            if open_syms:
+                try:
+                    quotes = {s: float(v["price"]) for s, v in
+                              market.spark(sorted(open_syms)).items()
+                              if v.get("price") is not None}
+                except Exception:               # noqa: BLE001 — best effort
+                    quotes = {}
+            summary = {"realized": 0.0, "unrealized": 0.0, "fees": 0.0,
+                       "wins": 0, "losses": 0, "buys": 0, "sells": 0,
+                       "priced": True}
+            for t in rows:
+                summary["fees"] += (t["fees"] or 0) + (t["other_fees"] or 0)
+                summary["buys" if t["side"] == "buy" else "sells"] += 1
+                if t["closes"]:
+                    pl = t["closes"]["pl"] or 0
+                    summary["realized"] += pl
+                    summary["wins" if pl > 0 else "losses"] += 1
+                lot = t["lot"]
+                if lot and lot["remaining"] > 0:
+                    last = quotes.get(t["symbol"])
+                    lot["last"] = last
+                    if last is not None:
+                        try:
+                            fx = float(market.fx(t["currency"],
+                                                 t["base_currency"] or
+                                                 t["currency"]))
+                        except Exception:       # noqa: BLE001
+                            fx = 1.0 if t["currency"] == \
+                                t["base_currency"] else None
+                        if fx is not None:
+                            sign = 1 if t["side"] == "buy" else -1
+                            lot["unrealized"] = sign * (
+                                last * fx - lot["cost"]) * lot["remaining"]
+                            summary["unrealized"] += lot["unrealized"]
+                    else:
+                        summary["priced"] = False
+            return {"trades": rows, "summary": summary, "days": days,
+                    "now": int(clock())}
+
         @staticmethod
         def _account_label(broker, env):
             if broker == "saxo":
@@ -1551,7 +2016,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 "SELECT id, account_id, side, qty/1e6 qty,"
                 " limit_price/1e6 limit_price, stop_loss/1e6 stop_loss,"
                 " take_profit/1e6 take_profit, status, broker_order_id,"
-                " placed_at, updated_at FROM orders WHERE work_item_id=?"
+                " placed_at, updated_at, leg FROM orders WHERE work_item_id=?"
                 " ORDER BY COALESCE(created_at, updated_at)", (wi,))]
             failed_rows = [o for o in orders if o["status"] == "rejected"
                            and not o["broker_order_id"]]
@@ -1560,6 +2025,29 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 a = accts.get(o["account_id"]) or {}
                 o["account"] = self._account_label(a.get("broker"),
                                                    a.get("environment"))
+                if o["status"] in ("pending_session", "placed",
+                                   "partially_filled") and not o["leg"] \
+                        and inst is not None:
+                    # an outstanding order: say what has to happen for it
+                    # to go out / fill — with today's price beside it
+                    from .tools.market import yahoo_symbol
+                    o["exchange"] = inst["exchange"]
+                    o.update(session_facts(inst["exchange"],
+                                           cal_or_default(), int(clock())))
+                    try:
+                        o["last"] = float(market.quote(yahoo_symbol(
+                            d["ticker"], inst["exchange"]))["price"])
+                    except Exception:           # noqa: BLE001 — best effort
+                        o["last"] = None
+                    o["filled"] = conn.execute(
+                        "SELECT COALESCE(SUM(qty),0)/1e6 FROM executions"
+                        " WHERE order_id=?", (o["id"],)).fetchone()[0]
+                    o["expires_at"] = conn.execute(
+                        "SELECT expires_at FROM orders WHERE id=?",
+                        (o["id"],)).fetchone()[0]
+                    o["submitted_at"] = conn.execute(
+                        "SELECT submitted_at FROM orders WHERE id=?",
+                        (o["id"],)).fetchone()[0]
             approval = None
             appr = [e for e in evs if e["to_state"] in
                     ("approved", "approve_retry")]
@@ -1599,7 +2087,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                                "raw": [str(x)[:400] for x in errs[:6]]}
                     break
             ended = next((dict(payload(e), ts=e["ts"]) for e in reversed(evs)
-                          if e["to_state"] in ("rejected", "expired")), None)
+                          if e["to_state"] in ("rejected", "expired", "cancelled")),
+                         None)
             fills = [dict(f) for f in conn.execute(
                 "SELECT side, SUM(qty)/1e6 qty,"
                 " SUM(1.0*qty*price_native)/SUM(qty)/1e6 avg_price, currency,"
@@ -1836,6 +2325,16 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 out["levels"] = _levels(c)
             except Exception as e:              # noqa: BLE001
                 out["levels_error"] = str(e)[:200]
+            if not (out.get("levels") or {}).get("atr14"):
+                # Yahoo rate-limits this machine; without ATR the
+                # "use suggestion" buttons have nothing to work from.
+                try:
+                    lv = tradingview.levels(sym)
+                    if lv:
+                        out["levels"] = lv
+                        out.pop("levels_error", None)
+                except Exception as e:          # noqa: BLE001
+                    out.setdefault("levels_error", str(e)[:200])
             held = conn.execute(
                 "SELECT l.account_id, SUM(CASE WHEN l.qty_opened < 0 THEN"
                 " -l.qty_remaining ELSE l.qty_remaining END)/1e6 AS q"
@@ -1967,6 +2466,11 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             allowed = ("ticker", "exchange", "direction", "entry", "stop",
                        "target", "note", "suggested", "source")
             fwd = {k: body.get(k) for k in allowed if body.get(k) is not None}
+            if isinstance(fwd.get("ticker"), str) and \
+                    isinstance(fwd.get("exchange"), str):
+                from .tools.market import desk_ticker
+                fwd["ticker"] = desk_ticker(fwd["ticker"].upper().strip(),
+                                            fwd["exchange"].upper().strip())
             fwd["actor"] = "human"
             try:
                 r = httpx.post(f"{api_base}/internal/manual", json=fwd,
@@ -2035,13 +2539,16 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             out = saxo_live.summary(which, with_orders=True, env=env or {})
             out["signin"] = saxo_live.status(which, clock=clock)
             pos = out.get("positions") or []
-            gross = sum(abs(p.get("exposure_base") or 0) for p in pos)
             from .tools.saxo_broker import desk_symbol
+            for p in pos:
+                # the desk's market-data symbol, so the page can chart it
+                p["chart_symbol"] = desk_symbol(p.get("symbol"))
+            self._fill_missing_prices(pos, (out.get("balance") or {})
+                                      .get("Currency"))
+            gross = sum(abs(p.get("exposure_base") or 0) for p in pos)
             for p in pos:
                 p["weight_pct"] = (round(abs(p.get("exposure_base") or 0)
                                          / gross * 100, 1) if gross else None)
-                # the desk's market-data symbol, so the page can chart it
-                p["chart_symbol"] = desk_symbol(p.get("symbol"))
             # the Sell button is offered only for what the DESK bought on
             # this very account; the rest is Richard's own holding
             broker = "saxo_live" if which == "live" else "saxo"
@@ -2060,6 +2567,40 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                              "exchange": d["exchange"]} if d else None
             out["desk_broker"] = broker
             return out
+
+        def _fill_missing_prices(self, pos, acct_ccy):
+            """Saxo sends CurrentPrice 0 where the account has no market data
+            for that exchange (the live account and ASX, 2026-11-06: PRO
+            shown at 0.00, a "-100%" loss, while Saxo's own total valued it
+            at the real ~0.065). A zero price is no price: use the desk's own
+            quote, and re-work P/L from it — marked, never passed off as
+            Saxo's."""
+            for p in pos:
+                if p.get("current_price") or not p.get("amount") or \
+                        not p.get("chart_symbol"):
+                    continue
+                try:
+                    q = market.spark([p["chart_symbol"]]).get(
+                        p["chart_symbol"]) or {}
+                    cur = float(q["price"])
+                except Exception:               # noqa: BLE001 — leave as is
+                    p["price_missing"] = True
+                    continue
+                avg, amt = p.get("avg_open_price") or 0, p["amount"]
+                p["current_price"] = cur
+                p["price_src"] = q.get("src") or "desk quote"
+                p["pnl"] = round((cur - avg) * amt, 2) if avg else None
+                p["pnl_pct"] = (round((cur - avg) / avg * 100 *
+                                      (1 if amt >= 0 else -1), 2)
+                                if avg else None)
+                try:
+                    fx = float(market.fx(p.get("currency") or acct_ccy,
+                                         acct_ccy)) if acct_ccy else None
+                except Exception:               # noqa: BLE001
+                    fx = None
+                if fx and p["pnl"] is not None:
+                    p["pnl_base"] = round(p["pnl"] * fx, 2)
+                    p["exposure_base"] = round(abs(amt * cur * fx), 2)
 
         def _live_status(self):
             from . import live_trading
@@ -2110,18 +2651,27 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     (acct["broker"],)).fetchone()
                 refs = json.loads(mcp["env_refs"]) if mcp else []
                 creds = bool(refs) and all(env.get(r) for r in refs)
-                # Execution ALWAYS goes to the in-process PaperSimBroker
-                # (wiring.build_brokers builds nothing else, and no MCP server
-                # is ever launched), so the map must not claim "MCP live" just
-                # because credentials exist. An MCP row is configuration only.
-                if mcp and refs and not creds:
-                    bstate, bdetail = "warn", ("paper sim · MCP configured, "
-                                               "creds missing (unused)")
+                # where orders REALLY go — the same rule as
+                # wiring.build_brokers (claire-api builds the adapters). An
+                # MCP row is configuration only: no MCP server ever places.
+                adapter = venue_adapter(acct, env or {})
+                if adapter == "saxo-sim":
+                    bstate, bdetail = "ok", ("orders go to Saxo SIM — real "
+                                             "Saxo order handling, "
+                                             "simulated money")
+                elif adapter == "saxo-live":
+                    bstate, bdetail = "warn", ("REAL MONEY at Saxo — only "
+                                               "while live trading is armed")
+                elif mcp and refs and not creds:
+                    bstate, bdetail = "warn", ("Claire's paper sim · MCP "
+                                               "configured, creds missing "
+                                               "(unused)")
                 elif mcp:
-                    bstate, bdetail = "ok", ("paper sim · MCP configured but "
-                                             "not wired to execution")
+                    bstate, bdetail = "ok", ("Claire's paper sim · MCP "
+                                             "configured but not used for "
+                                             "orders")
                 else:
-                    bstate, bdetail = "idle", "paper sim (by design)"
+                    bstate, bdetail = "idle", "Claire's paper sim"
                 brokers.append({
                     "broker": acct["broker"], "account": acct["id"],
                     "environment": acct["environment"],
@@ -2129,7 +2679,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     "ccy": acct["base_currency"],
                     "open_orders": open_orders,
                     "state": bstate, "detail": bdetail,
-                    "adapter": "paper-sim",
+                    "adapter": adapter,
                     "mcp": {"command": " ".join(json.loads(mcp["command"])),
                             "env_refs": refs,
                             "creds_present": creds,
@@ -2164,13 +2714,18 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             stale = len(market._stale_keys) if hasattr(market, "_stale_keys") \
                 else 0
             return {"agents": agents, "edges": PIPELINE_EDGES,
+                    "loops": background_loops(env or {}),
                     "brokers": brokers, "claire_api": api_ok(),
                     "mcps": self._mcps(), "health": health,
                     "book": {"open_orders": open_orders,
                              "positions": positions, "pending": pending},
                     "market_data": {
                         "source": primary or "yahoo",
-                        "fallbacks": "tradingview · ecb",
+                        "fallbacks": " · ".join(
+                            ["tradingview", "yahoo"]
+                            + (["saxo charts"] if getattr(
+                                market, "_chart_fallback", None) else [])
+                            + ["ecb fx"]),
                         "stale_keys": stale,
                         "state": "warn" if stale else "ok",
                         "detail": (f"{stale} symbol(s) served stale"
@@ -2514,7 +3069,17 @@ def start_watcher_thread(conn, repo, market, *, api_base, interval=600,
                 pass
             try:
                 if enabled:
-                    watcher.tick()
+                    rep_ = watcher.tick()
+                    # so Agents & Schedule shows when it last ran (it said
+                    # "never": only claire-api's scheduler wrote this row)
+                    conn.execute(
+                        "UPDATE schedules SET last_run_at=?, last_result=?"
+                        " WHERE job='watcher'",
+                        (int(clock()), json.dumps({
+                            "checked": rep_.get("checked"),
+                            "fired": len(rep_.get("fired") or []),
+                            "market_closed": len(rep_.get("closed") or []),
+                            "unpriced": len(rep_.get("unpriced") or [])})))
             except Exception:                    # noqa: BLE001
                 traceback.print_exc()
             time.sleep(max(60, minutes * 60))

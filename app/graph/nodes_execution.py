@@ -21,6 +21,36 @@ from .pipeline import PRICE_BAND
 
 
 FRACTION_STEP = Decimal("0.1")   # venues that allow fractions: 1/10th share
+# "buy at the current price": a limit this far through the live price fills
+# at once (the exchange gives the best price on offer) yet caps a jump
+MARKET_CAP = Decimal("0.01")
+
+
+def at_market(th, market, symbol, inst):
+    """The plan re-priced to fill NOW: limit = live price ± MARKET_CAP. The
+    stop and target stay yours; if the price has already gone through one
+    of them the trade is refused rather than sent the wrong way round."""
+    from .state import Thesis
+    q = market.quote(symbol)
+    px = Decimal(str(q["price"]))
+    q_ccy = q.get("currency") or inst.currency
+    if q_ccy != inst.currency:
+        px = px * Decimal(market.fx(q_ccy, inst.currency))
+    if px <= 0:
+        raise ValueError(f"no usable live price for {inst.id}")
+    buy = th.direction == "buy"
+    step = Decimal("0.0001") if px < 1 else Decimal("0.01")
+    lim = (px * (1 + MARKET_CAP if buy else 1 - MARKET_CAP)).quantize(
+        step, rounding="ROUND_UP" if buy else "ROUND_DOWN")
+    data = th.model_dump()
+    data.update(entry_low=float(lim), entry_high=float(lim))
+    try:
+        return Thesis.model_validate(data)
+    except Exception as e:                      # noqa: BLE001 — explained
+        raise ValueError(
+            f"at the current price ({px:f}) the order no longer makes sense: "
+            f"the stop {th.stop_loss} / target {th.take_profit} must sit "
+            f"either side of {lim:f} — change them and retry ({e})") from None
 
 
 def _fractional(adapter) -> bool:
@@ -221,6 +251,15 @@ def build_execute(repo, brokers: dict, market, *, account_for,
                 raise RuntimeError(f"broker rejected order: {placed.detail}")
             return {"order_ids": [prior["id"]]}
 
+        repriced = {}
+        if getattr(ap, "order_type", "limit") == "market" and \
+                th.direction in ("buy", "sell"):
+            th = at_market(th, market, symbol, inst)
+            repriced = {"thesis": th}
+            if state.work_item_id:
+                repo.conn.execute("UPDATE work_items SET thesis_json=?"
+                                  " WHERE id=?", (th.model_dump_json(),
+                                                  state.work_item_id))
         qty, ref_native, rate, reserve = _intended(
             ap, th, inst, market, symbol, account_id, repo, state.kind)
         _pre_checks(repo, account_id, inst, th, qty, ref_native, rate,
@@ -255,13 +294,13 @@ def build_execute(repo, brokers: dict, market, *, account_for,
                                              cal).timestamp()), ts=ts)
         if not is_open:
             _set_trailing_floor(repo, inst, ap, account_id, th.direction)
-            return {"order_ids": [oid]}             # custodian places at next open
+            return {"order_ids": [oid], **repriced}  # custodian places at next open
         placed = submit_order(repo, brokers[ap.broker], oid, symbol=symbol,
                               ts=ts, claimed=True)
         if placed.status != "accepted":
             raise RuntimeError(f"broker rejected order: {placed.detail}")
         _set_trailing_floor(repo, inst, ap, account_id, th.direction)
-        return {"order_ids": [oid]}                 # fills arrive ASYNC (§12)
+        return {"order_ids": [oid], **repriced}     # fills arrive ASYNC (§12)
 
     def _intended(ap, th, inst, market, symbol, account_id, repo_, kind):
         """(qty, reference price native, fx rate ×1e6, cash to reserve).

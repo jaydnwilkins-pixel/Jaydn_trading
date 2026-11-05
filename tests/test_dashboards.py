@@ -383,10 +383,11 @@ def test_mission_control_map_is_one_svg(web):
     base, conn = web
     with paired(base) as c:
         page = c.get("/").text
-        assert 'id="map"' in page and 'viewBox="0 0 1240 486"' in page
+        assert 'id="map"' in page and 'viewBox="0 0 1240 530"' in page
         assert "class=\"mapwrap\"" in page
         assert "position:absolute" not in page      # no overlay layer
-        for piece in ("renderMap", "SCREEN · PREPARE", "SUPPORTING SYSTEMS",
+        for piece in ("renderMap", "SCREEN · scans only",
+                      "OTHER SYSTEMS", "BACK OFFICE", "claire_chat",
                       "VENUES", "mcp:", "id === 'book'"):
             assert piece in page, piece
         css = c.get("/style.css").text

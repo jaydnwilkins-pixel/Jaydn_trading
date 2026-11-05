@@ -75,6 +75,8 @@ READ_PATHS = {
     "positions": "/port/v1/netpositions/me?FieldGroups="
                  "NetPositionBase,NetPositionView,DisplayAndFormat&$top=500",
     "orders": "/port/v1/orders/me?FieldGroups=DisplayAndFormat&$top=200",
+    # one row per opening fill — the first purchase price and date
+    "openings": "/port/v1/positions/me?FieldGroups=PositionBase&$top=500",
 }
 
 
@@ -356,8 +358,36 @@ def positions(which=None, **kw):
             "pnl_pct": _pct(view.get("CurrentPrice"),
                             view.get("AverageOpenPrice"), base.get("Amount")),
             "exposure_base": view.get("ExposureInBaseCurrency"),
+            "_net_id": p.get("NetPositionId"),
         })
+    try:
+        _add_openings(out, _get("openings", which, **kw).get("Data", []))
+    except Exception:                       # noqa: BLE001 — extra detail only
+        pass
+    for r in out:
+        r.pop("_net_id", None)
     return sorted(out, key=lambda r: -abs(r.get("exposure_base") or 0))
+
+
+def _add_openings(rows, openings):
+    """Per net position: the FIRST purchase (price, time), how many fills
+    opened it, and what was paid in total (sum of amount x open price)."""
+    by_net = {}
+    for o in openings:
+        b = o.get("PositionBase", {})
+        if b.get("OpenPrice") is None:
+            continue
+        by_net.setdefault(o.get("NetPositionId"), []).append(b)
+    for r in rows:
+        opens = sorted(by_net.get(r.get("_net_id"), []),
+                       key=lambda b: b.get("ExecutionTimeOpen") or "")
+        if not opens:
+            continue
+        r["first_open_price"] = opens[0]["OpenPrice"]
+        r["first_open_time"] = opens[0].get("ExecutionTimeOpen")
+        r["open_fills"] = len(opens)
+        r["cost_basis"] = round(sum(abs(b.get("Amount") or 0) * b["OpenPrice"]
+                                    for b in opens), 2)
 
 
 def orders(which=None, **kw):

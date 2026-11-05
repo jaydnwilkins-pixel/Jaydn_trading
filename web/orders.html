@@ -1,0 +1,305 @@
+<meta charset="utf-8"><title>Claire — Orders</title>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/orderinfo.js"></script>
+<script>nav('/orders')</script>
+<style>
+  .ot td { vertical-align:top; font-size:.85rem; }
+  .small { font-size:.75rem; }
+  .gap-near { color:var(--warn); font-weight:600; }
+  #editor .card { border-color:var(--warn); }
+  #editor label { font-size:.85rem; }
+</style>
+<main>
+  <h1>Orders <span class="muted" id="stamp" style="font-size:.8rem"></span></h1>
+  <p class="muted">Everything still outstanding, in one place: orders you
+    approved that have not filled, the stop and target orders guarding your
+    positions, and your price triggers. Edit or cancel any of them here.</p>
+  <div id="editor"></div>
+
+  <h2>Outstanding orders</h2>
+  <p class="muted small" style="margin-top:-.3rem">Buys and sells you approved
+    that have not filled yet. Under each one: what has to happen for it to go
+    through, against today's price.</p>
+  <div id="entries">loading…</div>
+
+  <h2>Price triggers</h2>
+  <div id="triggers">loading…</div>
+
+  <h2>Protective stops &amp; targets</h2>
+  <div id="legs">loading…</div>
+
+  <details class="small" style="margin-top:1.5rem" open>
+    <summary class="muted">About protective stops &amp; targets, and what the columns mean</summary>
+    <p style="margin:.3rem 0">When a buy fills, Claire leaves two orders at the
+      broker to guard the shares — they work even when Claire, this PC or the
+      internet is down:</p>
+    <ul style="margin:.2rem 0 .4rem 1.2rem;padding:0">
+      <li><b>🛑 Stop-loss</b> — sells the shares if the price <b>falls</b> to
+        the stop price, so a loss cannot keep growing. Once the stop price is
+        hit it sells at the market, so the fill can be a little below it
+        (CSCO's 96.97 stop filled at 96.90).</li>
+      <li><b>🎯 Take-profit</b> — sells the shares if the price <b>rises</b>
+        to the target, locking in the gain. It never sells below the
+        target.</li>
+      <li>They are a pair: when one fills, the broker cancels the other.</li>
+    </ul>
+    <p style="margin:.2rem 0"><b>Shares</b> how many it would sell ·
+      <b>Sells at</b> the stop or target price · <b>Current price</b> the latest
+      price and how far it has to move to reach the order · <b>You paid</b> your
+      buy price · <b>If it fills</b> profit or loss on those shares versus
+      what you paid, before fees · <b>Value</b> shares × the order price.</p>
+    <p style="margin:.2rem 0" class="muted">To change them, sell the position
+      (Portfolio, Saxo accounts or Watchlist — that cancels them first) or
+      change them on Saxo's platform.</p>
+  </details>
+</main>
+<script>
+let DATA = {entries: [], legs: [], triggers: [], quotes: {}};
+const COND = {lte: '≤', gte: '≥'};
+function px(n) { return n == null ? '—' : fmt(n, Math.abs(n) < 10 ? 3 : 2); }
+function when(t) {
+  if (!t) return '—';
+  return new Date(t * 1000).toLocaleString([], {day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit'});
+}
+function last(sym) { return ((DATA.quotes || {})[sym] || {}).price; }
+/* how far the price must move from `now` to reach the order's `price` */
+function gap(price, now) {
+  if (price == null || !now) return '';
+  const g = (price - now) / now * 100;
+  const cls = Math.abs(g) < 1 ? 'gap-near' : 'muted';
+  return `<span class="${cls} small" title="how far the price has to move to reach this order">needs ${g >= 0 ? '+' : ''}${fmt(g, 1)}%</span>`;
+}
+async function apiDelete(path) {
+  const r = await fetch(path, {method: 'DELETE', headers: {'X-Dash-Key': dashKey()}});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || data.detail || r.status);
+  return data;
+}
+
+/* ── outstanding entry orders ─────────────────────────────────────── */
+function renderEntries() {
+  const rows = DATA.entries || [], el = document.getElementById('entries');
+  if (!rows.length) { el.innerHTML = '<p class="muted">No outstanding orders.</p>'; return; }
+  el.innerHTML = `<table class="ot"><tr><th>Stock</th><th>Order</th><th class="num">Shares</th><th class="num">Limit</th>
+    <th class="num">Value</th><th class="num">Current price</th><th class="num">Stop</th><th class="num">Target</th>
+    <th>Account</th><th>Status</th><th>Expires</th><th></th></tr>${rows.map(o => {
+    const p = last(o.symbol), editable = o.status !== 'partially_filled';
+    return `<tr>
+      <td><b>${esc(o.ticker)}</b><br><span class="muted small">${esc(o.exchange)}</span></td>
+      <td><b>${esc(o.side.toUpperCase())}</b>
+        <br><a class="small" href="/trading#${esc(o.work_item_id || '')}">${esc(o.work_item_id || '')}</a></td>
+      <td class="num"><b>${fmt(o.qty, o.qty % 1 ? 4 : 0)}</b>${o.filled ? `<br><span class="small">${fmt(o.filled, 0)} filled</span>` : ''}</td>
+      <td class="num">${px(o.limit_price)}</td>
+      <td class="num"><b>${o.limit_price ? fmt(o.qty * o.limit_price, 2) : '—'}</b> ${esc(o.currency || '')}</td>
+      <td class="num">${px(p)}<br>${gap(o.limit_price, p)}</td>
+      <td class="num">${px(o.stop_loss)}</td>
+      <td class="num">${px(o.take_profit)}</td>
+      <td>${esc(o.account)}</td>
+      <td>${o.status === 'pending_session' ? '<span class="pill warn">queued</span>'
+        : `<span class="pill ok">${esc(o.status.replace('_', ' '))}</span>`}
+        <br><span class="small muted">${esc(o.where)}</span>
+        <br><span class="small muted">approved ${when(o.created_at)}</span></td>
+      <td class="small">${when(o.expires_at)}</td>
+      <td>${editable && o.work_item_id ? `<button class="ghost" onclick="editOrder(${jsArg(o.id)})">✎ Edit</button>
+        <button class="ghost" onclick="cancelOrder(${jsArg(o.id)})">✖ Cancel</button>`
+        : '<span class="small muted">part filled — sell or manage at Saxo</span>'}</td></tr>
+      <tr><td></td><td colspan="11" class="small" style="padding-top:0;border-top:none">${orderNeeds(o)}</td></tr>`;
+  }).join('')}</table>`;
+}
+function orderBy(id) { return (DATA.entries || []).find(o => o.id === id); }
+async function cancelOrder(id) {
+  const o = orderBy(id);
+  if (!o) return;
+  const where = o.status === 'pending_session'
+    ? 'Claire is still holding it — nothing has been sent.'
+    : 'It is cancelled at ' + o.account + ', together with its stop and target.';
+  if (!confirm(`Cancel ${o.side.toUpperCase()} ${fmt(o.qty, 0)} ${o.ticker} at limit ${o.limit_price}?\n\n${where}`)) return;
+  try {
+    await api('/api/order-control', {work_item_id: o.work_item_id, action: 'cancel'});
+    toast(o.ticker + ' order cancelled ✓');
+    closeEditor(); load();
+  } catch (e) { toast(e.message, false); }
+}
+function editOrder(id) {
+  const o = orderBy(id);
+  if (!o) return;
+  const atVenue = o.status !== 'pending_session';
+  document.getElementById('editor').innerHTML = `<div class="card">
+    <h3 style="font-size:1rem;margin:0">Edit order — ${esc(o.side.toUpperCase())} ${esc(o.ticker)} on ${esc(o.account)}</h3>
+    <p class="muted small">${atVenue
+      ? 'This order is at the broker. Saving <b>cancels it there</b> and puts a new order with these levels on Approvals for you to approve.'
+      : 'Claire is still holding this order (sent when the market opens), so it is changed in place — no new approval needed.'}
+      Saxo refuses a stop or target more than 25% from the limit.</p>
+    <div class="row" style="gap:.5rem;flex-wrap:wrap">
+      <label>shares <input id="e-qty" type="number" min="1" step="1" style="width:80px" value="${esc(o.qty)}"></label>
+      <label>limit <input id="e-entry" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.limit_price ?? '')}"></label>
+      <label>stop <input id="e-stop" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.stop_loss ?? '')}"></label>
+      <label>target <input id="e-target" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.take_profit ?? '')}"></label>
+      <span id="e-val" class="small"></span>
+      <button onclick="saveOrder(${jsArg(o.id)})">Save</button>
+      <button class="ghost" onclick="closeEditor()">Close</button>
+    </div><p id="e-msg" class="small"></p></div>`;
+  const upd = () => {
+    const q = Number(document.getElementById('e-qty').value), l = Number(document.getElementById('e-entry').value);
+    document.getElementById('e-val').innerHTML = q && l ? `≈ <b>${fmt(q * l, 2)} ${esc(o.currency || '')}</b>` : '';
+  };
+  ['e-qty', 'e-entry'].forEach(i => document.getElementById(i).oninput = upd); upd();
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+async function saveOrder(id) {
+  const o = orderBy(id), msg = document.getElementById('e-msg');
+  if (!o) { msg.innerHTML = '<b class="bad">the order is no longer outstanding</b>'; return; }
+  const n = k => { const v = document.getElementById('e-' + k).value; return v === '' ? null : Number(v); };
+  const v = {entry: n('entry'), stop: n('stop'), target: n('target'), qty: n('qty')};
+  const buy = o.side === 'buy';
+  if (!v.entry) { msg.innerHTML = '<b class="bad">enter a limit price</b>'; return; }
+  if (v.stop != null && (buy ? v.stop >= v.entry : v.stop <= v.entry)) {
+    msg.innerHTML = `<b class="bad">the stop must be ${buy ? 'below' : 'above'} the limit</b>`; return; }
+  if (v.target != null && (buy ? v.target <= v.entry : v.target >= v.entry)) {
+    msg.innerHTML = `<b class="bad">the target must be ${buy ? 'above' : 'below'} the limit</b>`; return; }
+  if (o.status !== 'pending_session' && !confirm(
+      `Cancel the ${o.ticker} order at the broker and send a new one (limit ${v.entry}) to Approvals?`)) return;
+  try {
+    const out = await api('/api/order-control', {work_item_id: o.work_item_id, action: 'edit', ...v});
+    msg.innerHTML = out.new_work_item_id
+      ? '<b class="ok">✔ old order cancelled</b> — approve the new one on <a href="/approvals">Approvals →</a>'
+      : '<b class="ok">✔ saved</b> — Claire sends these levels when the market opens.';
+    toast(o.ticker + ' order updated ✓');
+    load();
+  } catch (e) { msg.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
+}
+function closeEditor() { document.getElementById('editor').innerHTML = ''; }
+
+/* ── price triggers ───────────────────────────────────────────────── */
+function renderTriggers() {
+  const all = DATA.triggers || [], el = document.getElementById('triggers');
+  const active = all.filter(t => t.status === 'active'), done = all.filter(t => t.status !== 'active');
+  const row = t => {
+    const p = last(t.symbol);
+    return `<tr>
+      <td>#${esc(t.id)}</td>
+      <td>${esc(t.rule)}${t.stop_loss != null ? `<br><span class="muted small">stop ${px(t.stop_loss)}${
+        t.take_profit != null ? ' · target ' + px(t.take_profit) : ''}</span>` : ''}${
+        t.note ? `<br><span class="small">📝 ${esc(t.note)}</span>` : ''}</td>
+      <td class="num">${t.status === 'active' ? px(p) + '<br>' + gap(t.trigger_price, p) : ''}</td>
+      <td>${esc(t.account)}</td>
+      <td>${t.mode === 'auto' ? '<b class="warn">⚡ places automatically</b>' : 'asks you'}</td>
+      <td>${t.status === 'active' ? '<span class="pill ok">active</span>'
+        : `<span class="pill ${t.status === 'failed' ? 'bad' : ''}">${esc(t.status)}</span>
+           <br><span class="small">${esc(t.status_reason || t.outcome || '')}</span>`}</td>
+      <td class="small">${when(t.expires_at)}</td>
+      <td>${t.status === 'active' ? `<button class="ghost" onclick="editTrigger(${jsArg(t.id)})">✎ Edit</button>
+        <button class="ghost" onclick="cancelTrigger(${jsArg(t.id)})">✖ Cancel</button>` : ''}</td></tr>`;
+  };
+  const head = `<tr><th>#</th><th>Rule</th><th class="num">Current price</th><th>Account</th>
+    <th>When it hits</th><th>Status</th><th>Expires</th><th></th></tr>`;
+  el.innerHTML = (active.length ? `<table class="ot">${head}${active.map(row).join('')}</table>`
+      : '<p class="muted">No active triggers — add one from the <a href="/watchlist">Watchlist</a>.</p>') +
+    (done.length ? `<details style="margin-top:.4rem"><summary class="muted small">Fired, cancelled or expired
+      in the last 7 days (${done.length})</summary><table class="ot">${head}${done.map(row).join('')}</table></details>` : '');
+}
+function trigBy(id) { return (DATA.triggers || []).find(t => String(t.id) === String(id)); }
+async function cancelTrigger(id) {
+  const t = trigBy(id);
+  if (!t || !confirm(`Cancel trigger #${t.id}: ${t.rule}?`)) return;
+  try { await apiDelete('/api/price-triggers?id=' + encodeURIComponent(t.id)); toast('trigger cancelled'); load(); }
+  catch (e) { toast(e.message, false); }
+}
+function editTrigger(id) {
+  const t = trigBy(id);
+  if (!t) return;
+  const days = Math.max(1, Math.ceil((t.expires_at - DATA.now) / 86400));
+  const exit = t.kind === 'exit';
+  const amount = t.qty == null;
+  document.getElementById('editor').innerHTML = `<div class="card">
+    <h3 style="font-size:1rem;margin:0">Edit trigger #${esc(t.id)} — ${esc(t.rule)}</h3>
+    <p class="muted small">Saving replaces this trigger with a new one (the old one
+      is cancelled at the same moment). Same checks as a new trigger.</p>
+    <div class="row" style="gap:.5rem;flex-wrap:wrap">
+      <label>when price <select id="g-cond"><option value="lte" ${t.condition === 'lte' ? 'selected' : ''}>falls to ≤</option>
+        <option value="gte" ${t.condition === 'gte' ? 'selected' : ''}>rises to ≥</option></select></label>
+      <input id="g-trig" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.trigger_price)}">
+      <label title="the most you pay (buy) or the least you accept (sell) once it fires">limit
+        <input id="g-lim" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.limit_price)}"></label>
+      <span id="g-limnote" class="muted small"></span>
+      ${amount ? `<label>amount <input id="g-amt" type="number" min="0" step="0.01" style="width:100px" value="${esc(t.amount_base)}"></label>`
+        : `<label>shares <input id="g-qty" type="number" min="0" step="any" style="width:80px" value="${esc(t.qty)}"></label>`}
+      ${exit ? '' : `<label>stop <input id="g-stop" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.stop_loss ?? '')}"></label>
+        <label>target <input id="g-tgt" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.take_profit ?? '')}"></label>`}
+    </div>
+    <div class="row" style="gap:.5rem;flex-wrap:wrap;margin-top:.4rem">
+      <label>expires in <input id="g-days" type="number" min="1" max="365" step="1" style="width:60px" value="${days}"> days</label>
+      <label>when it hits <select id="g-mode"><option value="ask" ${t.mode === 'ask' ? 'selected' : ''}>ask me</option>
+        <option value="auto" ${t.mode === 'auto' ? 'selected' : ''}>place automatically (paper only)</option></select></label>
+      <input id="g-note" placeholder="note" maxlength="120" style="flex:1;min-width:140px" value="${esc(t.note || '')}">
+      <button onclick="saveTrigger(${jsArg(t.id)})">Save</button>
+      <button class="ghost" onclick="closeEditor()">Close</button>
+    </div><p id="g-msg" class="small"></p></div>`;
+  /* the limit follows the trigger price while they are the same (as on the
+     Watchlist); typing a different limit unlinks it */
+  const trig = document.getElementById('g-trig'), lim = document.getElementById('g-lim');
+  const note = document.getElementById('g-limnote');
+  let linked = Number(lim.value) === Number(trig.value);
+  const show = () => { note.textContent = linked ? '= trigger price (follows it)' : 'own limit — clear it to follow the trigger price'; };
+  trig.oninput = () => { if (linked) lim.value = trig.value; show(); };
+  lim.oninput = () => { linked = lim.value === '' || Number(lim.value) === Number(trig.value); show(); };
+  lim.onblur = () => { if (lim.value === '') { lim.value = trig.value; linked = true; show(); } };
+  show();
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+async function saveTrigger(id) {
+  const t = trigBy(id), msg = document.getElementById('g-msg');
+  if (!t) { msg.innerHTML = '<b class="bad">that trigger is gone</b>'; return; }
+  const n = k => { const el = document.getElementById('g-' + k); if (!el || el.value === '') return null; return Number(el.value); };
+  const body = {replace: t.id, ticker: t.ticker, exchange: t.exchange, direction: t.direction,
+    condition: document.getElementById('g-cond').value, trigger_price: n('trig'),
+    limit_price: n('lim') ?? n('trig'), stop: n('stop'), target: n('tgt'), broker: t.broker,
+    mode: document.getElementById('g-mode').value, expires_in_days: n('days'),
+    note: document.getElementById('g-note').value || null};
+  if (t.qty == null) body.amount = n('amt'); else body.qty = n('qty');
+  if (t.trail_pct != null) body.trail_pct = t.trail_pct;
+  for (const k of Object.keys(body)) if (body[k] == null) delete body[k];
+  if (body.mode === 'auto' && !confirm('AUTOMATIC: you approve this order now. When the price hits, ' +
+      'the desk places it without asking again (paper account). Continue?')) return;
+  try {
+    const out = await api('/api/price-triggers', body);
+    msg.innerHTML = `<b class="ok">✔ saved as trigger #${esc(out.id)}</b> — ${esc(out.rule)}`;
+    toast('trigger updated ✓');
+    load();
+  } catch (e) { msg.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
+}
+
+/* ── protective legs ──────────────────────────────────────────────── */
+function renderLegs() {
+  const rows = DATA.legs || [], el = document.getElementById('legs');
+  if (!rows.length) { el.innerHTML = '<p class="muted">No stop or target orders working.</p>'; return; }
+  el.innerHTML = `<table class="ot"><tr><th>Stock</th><th>Type</th><th class="num">Shares</th>
+    <th class="num">Sells at</th><th class="num">Current price</th><th class="num">You paid</th>
+    <th class="num">If it fills</th><th class="num">Value</th><th>Account</th><th>Since</th></tr>${rows.map(o => {
+    const p = o.last ?? last(o.symbol), price = o.leg === 'stop' ? o.stop_loss ?? o.limit_price : o.limit_price ?? o.take_profit;
+    const sell = o.side === 'sell';
+    const pl = o.entry_price && price ? (sell ? price - o.entry_price : o.entry_price - price) * o.qty : null;
+    return `<tr><td><b>${esc(o.ticker)}</b><br><span class="muted small">${esc(o.exchange)}</span></td>
+      <td>${o.leg === 'stop' ? '🛑 stop-loss' : '🎯 take-profit'}<br><span class="muted small">${sell ? 'sells' : 'buys back'}</span></td>
+      <td class="num">${fmt(o.qty, 0)}</td>
+      <td class="num"><b>${px(price)}</b></td>
+      <td class="num">${px(p)}<br>${gap(price, p)}</td>
+      <td class="num">${px(o.entry_price)}</td>
+      <td class="num">${pl == null ? '—' : `<b class="${pl >= 0 ? 'ok' : 'bad'}">${pl >= 0 ? '+' : ''}${fmt(pl, 2)}</b>`}</td>
+      <td class="num">${price ? fmt(o.qty * price, 2) : '—'} ${esc(o.currency || '')}</td>
+      <td>${esc(o.account)}</td><td class="small">${when(o.placed_at || o.created_at)}</td></tr>`;
+  }).join('')}</table>`;
+}
+
+async function load() {
+  try {
+    DATA = await api('/api/orders');
+    renderEntries(); renderTriggers(); renderLegs();
+    document.getElementById('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById('entries').innerHTML = `<p class="bad">${esc(e.message)}</p>`;
+  }
+}
+load();
+setInterval(load, 30000);
+</script>

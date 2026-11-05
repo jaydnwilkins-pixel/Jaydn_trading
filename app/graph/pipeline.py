@@ -225,4 +225,16 @@ def approval_gate(state: PipelineState):
     })
     # Reached ONLY via the authorized resume path (§10) — the payload was
     # token-verified server-side before the graph ever sees it.
-    return {"approval": Approval(**decision)}
+    decision = dict(decision)
+    levels = decision.pop("levels", None)
+    out = {"approval": Approval(**decision)}
+    if levels and out["approval"].status == "approved" and \
+            state.thesis.direction in ("buy", "sell"):
+        # the stop / target YOU set on the card replace the plan's (the
+        # dashboard validated them; the Thesis validator checks them again)
+        data = state.thesis.model_dump()
+        for k in ("stop_loss", "take_profit"):
+            if k in levels:
+                data[k] = levels[k]
+        out["thesis"] = Thesis.model_validate(data)
+    return out

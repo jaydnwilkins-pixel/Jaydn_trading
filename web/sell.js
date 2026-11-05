@@ -46,6 +46,20 @@ function sellSave(key) {
   if (!s) return;
   const g = n => (document.getElementById(n + '-' + key) || {}).value;
   s.qty = g('sq'); s.px = g('sp'); s.note = g('sn');
+  sellValueLine(key);
+}
+
+/* "≈ 1,234.50 USD" — what the shares are worth at the limit (else last) */
+function sellValueLine(key) {
+  const el = document.getElementById('sv-' + key);
+  const p = SELLPOS[key], s = SELLS[key];
+  if (!el || !p || !s) return;
+  const q = Number(s.qty), px = Number(s.px) || p.price;
+  el.innerHTML = q > 0 && px ? `≈ <b>${fmt(q * px, 2)} ${esc(p.currency || '')}</b>
+    <span class="muted">(${fmt(q, p.whole ? 0 : 4)} × ${fmt(px, 2)}${Number(s.px) ? ' limit' : ' last'}, before fees)
+    · all ${fmt(p.held, 4)} shares ≈ ${fmt(p.held * px, 2)} ${esc(p.currency || '')}</span>`
+    : `<span class="muted">all ${fmt(p.held, 4)} shares ≈ ${p.price ? fmt(p.held * p.price, 2) + ' ' +
+      esc(p.currency || '') : '—'} at the last price</span>`;
 }
 
 function sellRender(key) {
@@ -70,6 +84,7 @@ function sellRender(key) {
         style="flex:1;min-width:140px" value="${esc(s.note)}"
         oninput="sellSave(${a})">
     </div>
+    <p id="sv-${k}" style="font-size:.85rem;margin:.35rem 0 0"></p>
     <div class="row" style="margin-top:.4rem;gap:.5rem">
       <button type="button" onclick="sellCheck(${a})">✓ Check with Saxo</button>
       <button type="button" onclick="sellSend(${a})">Send to approval →</button>
@@ -82,6 +97,7 @@ function sellRender(key) {
       desk first cancels this position's stop-loss / take-profit (Saxo will
       not take a sell while they rest), then sells; shares left over are
       re-protected at the same levels.</p></div>`;
+  sellValueLine(key);
 }
 
 function sellValues(key) {

@@ -53,7 +53,9 @@ const ACCOUNT = {live: 'Saxo LIVE', sim: 'Saxo SIM'};
 let ENV = new URLSearchParams(location.search).get('env') || 'live';
 
 function money(v, ccy) {
-  return v == null ? '—' : `${fmt(v, 2)}${ccy ? ' ' + esc(ccy) : ''}`;
+  /* a per-share price under 1 (PRO at 0.065) needs more than 2 decimals */
+  const dp = !ccy && v != null && v !== 0 && Math.abs(v) < 1 ? 4 : 2;
+  return v == null ? '—' : `${fmt(v, dp)}${ccy ? ' ' + esc(ccy) : ''}`;
 }
 function signed(v, ccy) {
   if (v == null) return '—';
@@ -125,17 +127,25 @@ function render(d) {
         of ${fmt(p.amount, 0)}</span>` : ''}`;
   const rows = pos.length ? pos.map((p, i) => `<tr class="pos${
       SEL && SEL.symbol === p.symbol ? ' sel' : ''}" onclick="pick(${i})"
-      title="Click to chart ${esc(p.symbol)}">
-      <td><b>${esc(p.symbol)}</b><br><span class="muted">${esc(p.name || '')}</span></td>
+      title="Click to ${SEL && SEL.symbol === p.symbol ? 'hide the chart' : 'chart ' + esc(p.symbol)}">
+      <td><b>${esc(p.symbol)}</b> <span class="muted" style="font-size:.75rem">${
+        SEL && SEL.symbol === p.symbol ? '▴ chart' : '📈'}</span><br><span class="muted">${esc(p.name || '')}</span></td>
       <td class="num">${fmt(p.amount, 0)}</td>
-      <td class="num">${money(p.avg_open_price)}</td>
-      <td class="num">${money(p.current_price)}</td>
+      <td class="num">${p.first_open_price != null ? money(p.first_open_price) +
+        `<br><span class="muted" style="font-size:.72rem">${esc(bought(p.first_open_time))}</span>`
+        : '—'}</td>
+      <td class="num">${money(p.avg_open_price)}${p.open_fills > 1
+        ? `<br><span class="muted" style="font-size:.72rem">${p.open_fills} buys</span>` : ''}</td>
+      <td class="num">${p.cost_basis != null ? money(p.cost_basis, p.currency) : '—'}</td>
+      <td class="num">${p.price_missing ? '<span class="warn" title="Saxo sent no price for this market">—</span>'
+        : money(p.current_price)}${p.price_src ? `<br><span class="muted" style="font-size:.7rem"
+        title="Saxo sends no live price for this exchange on this account, so this is Claire's own quote">via ${esc(p.price_src)}</span>` : ''}</td>
       <td class="num">${money(p.market_value, p.currency)}</td>
       <td class="num">${signed(p.pnl, p.currency)}</td>
       <td class="num">${pctSigned(p.pnl_pct)}</td>
       <td>${allocBar(p)}</td>
       <td onclick="event.stopPropagation()">${sellCell(p)}</td></tr>`).join('')
-    : `<tr><td colspan="9" class="muted">No open positions.</td></tr>`;
+    : `<tr><td colspan="11" class="muted">No open positions.</td></tr>`;
   const orows = ord.length ? ord.map(o => `<tr>
       <td><b>${esc(o.symbol)}</b></td><td>${esc(o.side)}</td>
       <td class="num">${fmt(o.amount, 0)}</td><td>${esc(o.type)}</td>
@@ -147,7 +157,9 @@ function render(d) {
      <h2>Positions <span class="muted" style="font-size:.8rem">
        allocation = share of gross exposure</span></h2>
      <table><thead><tr><th>Instrument</th><th class="num">Qty</th>
-       <th class="num">Avg cost</th><th class="num">Price</th>
+       <th class="num" title="price of the first buy that opened this position">Bought at</th>
+       <th class="num" title="average across all buys">Avg cost</th>
+       <th class="num" title="what you paid in total">Cost</th><th class="num">Current price</th>
        <th class="num">Value</th><th class="num">P/L</th>
        <th class="num">P/L %</th><th>Allocation</th><th></th></tr></thead>
        <tbody>${rows}</tbody></table>
@@ -182,6 +194,13 @@ async function signIn(env) {
 }
 
 function pick(i) {
+  /* the chart shows only for the stock you pick; picking it again hides it */
+  if (SEL && POS[i] && SEL.symbol === POS[i].symbol) {
+    SEL = null; CHART = null;
+    document.querySelectorAll('tr.pos').forEach(tr => tr.classList.remove('sel'));
+    document.getElementById('chartbox').innerHTML = '';
+    return;
+  }
   SEL = POS[i];
   CHART = null;
   document.querySelectorAll('tr.pos').forEach((tr, k) =>
@@ -226,6 +245,13 @@ async function drawPosition(rerenderOnly) {
               label: 'your avg cost ' + fmt(SEL.avg_open_price, 2)}]});
 }
 window.addEventListener('resize', () => drawPosition(true));
+
+function bought(t) {               /* "3 Nov, 01:41" in your time zone */
+  if (!t) return '';
+  const d = new Date(t);
+  return isNaN(d) ? '' : d.toLocaleString([], {day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit'});
+}
 
 async function load() {
   document.querySelectorAll('#tabs button').forEach(b =>

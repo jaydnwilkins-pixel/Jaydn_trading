@@ -195,3 +195,73 @@ def test_resume_idempotent_replay(world):
                               "size_base": 1000, "broker": "alpaca"})
     assert (code, resp.get("idempotent")) == (200, True)
     assert script.calls.count("execute") == 1
+
+
+# ── stop / target set on the approval card (2026-11-06, PG) ─────────────
+def graph_thesis(desk, wi):
+    return desk._pipeline_for(wi).get_state(desk.cfg(wi)).values["thesis"]
+
+
+def test_card_stop_and_target_replace_the_plan(world):
+    conn, desk, client, resume_post, wi, script, app = world
+    thesis_action(conn, approve_payload(
+        conn, wi, levels={"stop_loss": 165.0, "take_profit": None}),
+        resume_post, clock=CLOCK)
+    th = graph_thesis(desk, wi)
+    assert th.stop_loss == 165.0 and th.take_profit is None   # execution's view
+    import json
+    assert json.loads(row(conn, wi)["thesis_json"])["stop_loss"] == 165.0
+    ev = conn.execute("SELECT payload FROM events WHERE item_id=? AND"
+                      " to_state='authorize:approve'", (wi,)).fetchone()
+    assert json.loads(ev[0])["levels"] == {"stop_loss": 165.0,
+                                           "take_profit": None}
+
+
+def test_unchanged_levels_keep_the_plan(world):
+    conn, desk, client, resume_post, wi, script, app = world
+    thesis_action(conn, approve_payload(
+        conn, wi, levels={"stop_loss": 160.0, "take_profit": 200.0}),
+        resume_post, clock=CLOCK)
+    th = graph_thesis(desk, wi)
+    assert (th.stop_loss, th.take_profit) == (160.0, 200.0)
+
+
+@pytest.mark.parametrize("levels, why", [
+    ({"stop_loss": None, "take_profit": 200.0}, "needs a stop"),
+    ({"stop_loss": 180.0}, "below the entry"),
+    ({"stop_loss": 160.0, "take_profit": 170.0}, "above the entry"),
+])
+def test_bad_card_levels_are_refused_before_anything_resumes(world, levels,
+                                                             why):
+    conn, desk, client, resume_post, wi, script, app = world
+    with pytest.raises(AuthError, match=why):
+        thesis_action(conn, approve_payload(conn, wi, levels=levels),
+                      resume_post, clock=CLOCK)
+    assert row(conn, wi)["state"] == "awaiting_approval"
+    assert "execute" not in script.calls
+
+
+def test_saxo_25_percent_rule_on_card_levels(world):
+    conn, desk, client, resume_post, wi, script, app = world
+    from app.approvals import _card_levels
+    r = row(conn, wi)
+    with pytest.raises(AuthError, match="25%"):
+        _card_levels(r, {"broker": "saxo",
+                         "levels": {"stop_loss": 120.0}})   # 31% below 175
+    assert _card_levels(r, {"broker": "alpaca",
+                            "levels": {"stop_loss": 120.0}}) is not None
+
+
+def test_order_type_reaches_the_graph(world):
+    conn, desk, client, resume_post, wi, script, app = world
+    thesis_action(conn, approve_payload(conn, wi, order_type="market"),
+                  resume_post, clock=CLOCK)
+    ap = desk._pipeline_for(wi).get_state(desk.cfg(wi)).values["approval"]
+    assert ap.order_type == "market"
+
+
+def test_an_unknown_order_type_is_refused(world):
+    conn, desk, client, resume_post, wi, script, app = world
+    with pytest.raises(AuthError, match="order_type"):
+        thesis_action(conn, approve_payload(conn, wi, order_type="stop"),
+                      resume_post, clock=CLOCK)

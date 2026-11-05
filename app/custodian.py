@@ -513,7 +513,7 @@ class Custodian:
         now = int(self.clock())
         cur = self.conn.execute(
             "UPDATE work_items SET archived_at=? WHERE archived_at IS NULL"
-            " AND state IN ('done','rejected','expired','failed')"
+            " AND state IN ('done','rejected','expired','failed','cancelled')"
             " AND updated_at < ?", (now, now - 30 * 86400))
         if report is not None:
             report["archived"] = cur.rowcount

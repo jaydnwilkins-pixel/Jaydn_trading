@@ -65,6 +65,11 @@ def render_chart(chart: dict, *, title: str, subtitle: str = "",
     """PNG bytes. `chart` is Market.chart() output; `levels` maps any of
     entry/stop/target/last to a price (None/missing are skipped). Raises
     ValueError when there are too few bars to draw anything useful."""
+    import os
+    # one chart needs no maths thread pool: numpy otherwise starts one worker
+    # per CPU core (11 idle "telegram-approv" threads in the dashboards)
+    for v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS"):
+        os.environ.setdefault(v, "1")
     import matplotlib
     matplotlib.use("Agg", force=False)
     from matplotlib.backends.backend_agg import FigureCanvasAgg

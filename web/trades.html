@@ -1,0 +1,129 @@
+<meta charset="utf-8"><title>Claire — Trades</title>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
+<script>nav('/trades')</script>
+<style>
+  .tt td { vertical-align:top; font-size:.85rem; }
+  .tt tr.trow { cursor:pointer; }
+  .tt tr.trow:hover td { background:rgba(255,255,255,.03); }
+  .tt tr.more td { border-top:none; padding-top:0; font-size:.78rem; }
+  .small { font-size:.75rem; }
+  .why { max-width:30rem; }
+  .act { white-space:nowrap; font-weight:600; }
+  .act.buy { color:var(--ok, #26a69a); }
+  .act.sell { color:var(--bad, #ef5350); }
+</style>
+<main>
+  <h1>Trades <span class="muted" id="stamp" style="font-size:.8rem"></span></h1>
+  <p class="muted">Every buy and sell that filled — including the ones a stop-loss
+    or target made at the broker on its own — with the profit or loss and why
+    it happened. Click a row for the detail.</p>
+  <div class="row" style="gap:.5rem;margin:.4rem 0 .8rem;flex-wrap:wrap">
+    <label class="small">period <select id="f-days" onchange="load()">
+      <option value="30">30 days</option><option value="90" selected>90 days</option>
+      <option value="365">1 year</option><option value="3650">all</option></select></label>
+    <label class="small">show <select id="f-side" onchange="render()">
+      <option value="">buys and sells</option><option value="buy">buys</option>
+      <option value="sell">sells</option></select></label>
+    <label class="small">account <select id="f-acct" onchange="render()"><option value="">all</option></select></label>
+    <input id="f-q" placeholder="filter by stock" style="width:140px" oninput="render()">
+  </div>
+  <div class="statstrip" id="strip"></div>
+  <div id="list">loading…</div>
+  <p class="muted small" style="margin-top:1rem">Profit and loss is in the account's
+    currency, after fees. "Open" means you still hold the shares from that buy — its
+    figure is unrealized (at today's price) and changes until you sell. Trades
+    placed directly on a broker's own platform are not in Claire's book, so they are
+    not listed here — see <a href="/saxo">Saxo accounts</a> for those.</p>
+</main>
+<script>
+let DATA = {trades: [], summary: {}}, OPEN = new Set();
+function px(n) { return n == null ? '—' : fmt(n, Math.abs(n) < 10 ? 3 : 2); }
+function money(n, ccy) {
+  if (n == null) return '—';
+  return `<b class="${n >= 0 ? 'ok' : 'bad'}">${n >= 0 ? '+' : ''}${fmt(n, 2)}</b>${ccy ? ' <span class="muted small">' + esc(ccy) + '</span>' : ''}`;
+}
+function when(t) {
+  return t ? new Date(t * 1000).toLocaleString([], {day: 'numeric', month: 'short',
+    year: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
+}
+function action(t) {
+  if (t.leg === 'stop') return `<span class="act sell">SELL</span><br><span class="small">🛑 stop-loss</span>`;
+  if (t.leg === 'target') return `<span class="act sell">SELL</span><br><span class="small">🎯 target</span>`;
+  return `<span class="act ${t.side}">${esc(t.side.toUpperCase())}</span>`;
+}
+function plCell(t) {
+  const ccy = t.base_currency;
+  if (t.closes) {
+    const c = t.closes;
+    return `${money(c.pl, ccy)}${c.pct != null ? `<br><span class="small ${c.pl >= 0 ? 'ok' : 'bad'}">${c.pl >= 0 ? '+' : ''}${fmt(c.pct, 1)}%</span>` : ''}
+      <br><span class="muted small">realized · held ${c.held_days ?? '?'}d</span>`;
+  }
+  const l = t.lot;
+  if (!l) return '<span class="muted">—</span>';
+  if (l.remaining > 0) {
+    const part = l.closed_qty ? `${fmt(l.remaining, 0)} of ${fmt(l.opened, 0)} still held` : 'still held';
+    return `${l.unrealized != null ? money(l.unrealized, ccy) : '<span class="muted">no price</span>'}
+      <br><span class="muted small">open · ${part}${l.last != null ? ' · current price ' + px(l.last) : ''}</span>`;
+  }
+  return `${money(l.realized, ccy)}<br><span class="muted small">closed — sold, see the sell</span>`;
+}
+function render() {
+  const side = document.getElementById('f-side').value, acct = document.getElementById('f-acct').value;
+  const q = document.getElementById('f-q').value.trim().toUpperCase();
+  const rows = (DATA.trades || []).filter(t => (!side || t.side === side) &&
+    (!acct || t.account === acct) && (!q || t.ticker.toUpperCase().includes(q)));
+  const s = DATA.summary || {}, ccy = (DATA.trades[0] || {}).base_currency || '';
+  const pill = (label, val) => `<div class="stat"><span>${label}</span><b>${val}</b></div>`;
+  document.getElementById('strip').innerHTML =
+    pill('realized P/L', money(s.realized, ccy)) +
+    pill('open (unrealized)', s.priced === false ? money(s.unrealized) + ' <span class="muted small">part priced</span>' : money(s.unrealized)) +
+    pill('fees paid', fmt(s.fees || 0, 2)) +
+    pill('closed trades won / lost', `${s.wins || 0} / ${s.losses || 0}`) +
+    pill('buys / sells', `${s.buys || 0} / ${s.sells || 0}`);
+  const el = document.getElementById('list');
+  if (!rows.length) { el.innerHTML = '<p class="muted">No trades in this period.</p>'; return; }
+  el.innerHTML = `<table class="tt"><tr><th>When</th><th>Stock</th><th>Action</th>
+    <th class="num">Shares</th><th class="num">Price</th><th class="num">Value</th>
+    <th class="num">Fees</th><th class="num">Profit / loss</th><th>Why</th><th>Account</th></tr>${rows.map(t => {
+    const open = OPEN.has(t.id), a = jsArg(t.id);
+    return `<tr class="trow" onclick="toggle(${a})">
+      <td class="small">${when(t.executed_at)}</td>
+      <td><b>${esc(t.ticker)}</b><br><span class="muted small">${esc(t.exchange)}</span></td>
+      <td>${action(t)}</td>
+      <td class="num">${fmt(t.qty, t.qty % 1 ? 4 : 0)}</td>
+      <td class="num">${px(t.price)} <span class="muted small">${esc(t.currency || '')}</span></td>
+      <td class="num">${fmt(t.qty * t.price, 2)}</td>
+      <td class="num small">${fmt((t.fees || 0) + (t.other_fees || 0), 2)}</td>
+      <td class="num">${plCell(t)}</td>
+      <td class="why small">${esc(t.reason)} <span class="muted">${open ? '▴' : '▾'}</span></td>
+      <td class="small">${esc(t.account)}</td></tr>
+      ${open ? `<tr class="more"><td></td><td colspan="9">${detail(t)}</td></tr>` : ''}`;
+  }).join('')}</table>`;
+}
+function detail(t) {
+  const out = [];
+  if (t.approved_at) out.push(`Approved by you ${when(t.approved_at)}.`);
+  if (t.leg === 'stop' && t.order_stop) out.push(`The stop was set at ${px(t.order_stop)}; it filled at ${px(t.price)}
+    (${fmt((t.price - t.order_stop) / t.order_stop * 100, 2)}% — a stop sells at the market once its price is hit, so it can fill a little lower).`);
+  if (t.closes) out.push(`Bought for ${fmt(t.closes.cost, 2)}, sold for ${fmt(t.gross, 2)}; fees on the round trip are in the result.`);
+  if (t.lot && t.lot.remaining > 0 && t.lot.unrealized != null) out.push(`Cost ${px(t.lot.cost)} a share; at the current price of ${px(t.lot.last)},
+    the ${fmt(t.lot.remaining, 0)} shares still held are ${t.lot.unrealized >= 0 ? 'up' : 'down'} ${fmt(Math.abs(t.lot.unrealized), 2)}.`);
+  const det = (t.details || []).map(d => `<li>${esc(d)}</li>`).join('');
+  return `${out.join(' ')}${det ? `<ul style="margin:.3rem 0 .3rem 1.1rem;padding:0">${det}</ul>` : ''}
+    ${t.work_item_id ? `<a href="/trading#${esc(t.work_item_id)}" onclick="event.stopPropagation()">the full run on Trading →</a>` : ''}`;
+}
+function toggle(id) { OPEN.has(id) ? OPEN.delete(id) : OPEN.add(id); render(); }
+async function load() {
+  try {
+    DATA = await api('/api/trades?days=' + document.getElementById('f-days').value);
+    const sel = document.getElementById('f-acct'), cur = sel.value;
+    const accts = [...new Set((DATA.trades || []).map(t => t.account))].sort();
+    sel.innerHTML = '<option value="">all</option>' + accts.map(a =>
+      `<option ${a === cur ? 'selected' : ''}>${esc(a)}</option>`).join('');
+    render();
+    document.getElementById('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) { document.getElementById('list').innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+}
+load();
+setInterval(load, 60000);
+</script>

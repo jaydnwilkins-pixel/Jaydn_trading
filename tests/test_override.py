@@ -255,3 +255,61 @@ def test_reference_levels_for_the_override_form():
     assert L["atr14"] == 2.0
     assert L["sma50"] is None                       # not enough bars
     assert _levels({"close": [1, 2], "high": [1, 2], "low": [1, 2]}) == {}
+
+
+def test_tradingview_levels_fallback_when_yahoo_bars_are_rate_limited():
+    """C6L, 2026-11-04: Yahoo answered 429 for the daily bars, so there was
+    no ATR and "use suggestion" silently did nothing. TradingView's scanner
+    supplies the same levels."""
+    from app.tools import tradingview
+
+    class R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"data": [{"s": "SGX:C6L", "d": [
+                "C6L", 0.0945, 6.6155, 6.6546, 6.92, 6.46, 6.92, 6.81]}]}
+
+    class C:
+        def post(self, *a, **k):
+            return R()
+
+    L = tradingview.levels("C6L.SI", _client=C())
+    assert L["atr14"] == 0.0945 and L["low20"] == 6.46
+    assert L["sma20"] == 6.6155 and L["src"] == "tradingview"
+
+
+def test_hong_kong_tickers_map_between_yahoo_and_saxo():
+    from app.tools.saxo_broker import desk_symbol
+    assert desk_symbol("00700:xhkg") == "0700.HK"
+    assert desk_symbol("09988:xhkg") == "9988.HK"
+    assert desk_symbol("C6L:xses") == "C6L.SI"
+
+
+def test_chart_falls_back_to_saxo_when_yahoo_refuses():
+    """C6L.SI, 2026-11-04: Yahoo 429 on the daily bars; Twelve Data's free
+    tier does not cover SGX. The chart must still draw, from Saxo."""
+    from app.tools.market import Market
+
+    def yahoo(url, params=None):
+        raise RuntimeError("429 Too Many Requests")
+
+    calls = []
+
+    def saxo(sym, rng, iv):
+        calls.append(sym)
+        return {"symbol": sym, "timestamps": [1, 2], "open": [1, 2],
+                "high": [1, 2], "low": [1, 2], "close": [6.79, 6.86],
+                "volume": [5, 6], "currency": "SGD", "src": "saxo-cfd",
+                "stale": False}
+
+    m = Market(_get=yahoo, chart_fallback=saxo)
+    c = m.chart("C6L.SI", "6mo", "1d")
+    assert c["src"] == "saxo-cfd" and c["close"][-1] == 6.86
+    m.chart("C6L.SI", "6mo", "1d")
+    assert calls == ["C6L.SI"]                  # cached, not re-fetched
+
+    import pytest
+    with pytest.raises(RuntimeError):           # no fallback: error as before
+        Market(_get=yahoo).chart("C6L.SI")

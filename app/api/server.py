@@ -299,7 +299,7 @@ def main():
                                  media_type="application/x-ndjson")
 
     app = create_app(desk, conn, secret, ask_handler=ask_handler,
-                     agent_ask_handler=agent_ask_handler)
+                     agent_ask_handler=agent_ask_handler, brokers=brokers)
     uvicorn.run(app, host="127.0.0.1", port=7788, log_level="info")
 
 

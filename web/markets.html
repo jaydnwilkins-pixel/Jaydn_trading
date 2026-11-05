@@ -228,7 +228,7 @@ function pick(i) {
     <h3>${esc(sel.symbol)} <span class="muted">${esc(sel.name || '')}</span>
       ${sel.rating_label ? `<span class="pill warn">${esc(sel.rating_label)}</span>`
         : ''}</h3>
-    <p class="muted" id="qchips">${sel.price ? 'last ' + fmt(sel.price) : ''}
+    <p class="muted" id="qchips">${sel.price ? 'current price ' + fmt(sel.price) : ''}
       ${sel.change_pct != null ? ` · <b class="${sel.change_pct >= 0 ? 'ok'
         : 'bad'}">${(sel.change_pct >= 0 ? '+' : '') + fmt(sel.change_pct)}%</b>`
         : ''}
@@ -254,8 +254,14 @@ function pick(i) {
         title="watchlisted names always enter the screener's universe">
         ${onWatchlist(sel.ticker || sel.symbol, ex) ? '★ watching'
           : '☆ watchlist'}</button>
-      <button onclick="sendToPipeline(${jsArg(ex)})">Send to pipeline</button>
+      <button class="ghost" onclick="sendToPipeline(${jsArg(ex)})"
+        title="Claire's analysts research it and, if they recommend a trade, it comes to Approvals">Send to pipeline</button>
+      <button class="ghost" onclick="setTrigger(${jsArg(ex)})"
+        title="opens it on the Watchlist with the trigger form ready">Set a trigger</button>
+      <button onclick="buyNow(${jsArg(ex)})"
+        title="puts a buy at the current price straight onto Approvals — nothing trades until you approve">Buy at current price</button>
     </div>
+    <p class="muted small" id="buy-note" style="margin:.2rem 0"></p>
     <div id="chart"><p class="muted">loading…</p></div>
   </div>`;
   chartData = null;
@@ -309,6 +315,55 @@ async function sendToPipeline(ex) {
       lot_size: ex === 'SGX' ? 100 : 1});
     toast('launched ' + r.work_item_id + ' — watch it on Trading');
   } catch (e) { toast(e.message, false); }
+}
+
+/* ── set a trigger: on the Watchlist, where triggers live ─────────── */
+async function setTrigger(ex) {
+  const ticker = (sel.ticker || sel.symbol).toUpperCase();
+  try {
+    if (!onWatchlist(ticker, ex))
+      await api('/api/watchlist', {ticker, exchange: ex, note: sel.name || null, action: 'add'});
+    location.href = '/watchlist#trigger=' + encodeURIComponent(ticker + ':' + ex);
+  } catch (e) { toast(e.message, false); }
+}
+
+/* ── buy at the current price: straight to Approvals ──────────────────
+   A trade needs a stop, so one is suggested from how far the stock usually
+   moves in a day (2 × ATR 14, from the chart), with a target at 2:1 —
+   both capped inside Saxo's 25% rule. You can change them, the size and
+   the account on the approval card before anything is sent. */
+function atr14(c) {
+  const H = c.high || [], L = c.low || [], C = c.close || [];
+  const tr = [];
+  for (let i = 1; i < C.length; i++) {
+    if (H[i] == null || L[i] == null || C[i - 1] == null) continue;
+    tr.push(Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1])));
+  }
+  const last = tr.slice(-14);
+  return last.length >= 5 ? last.reduce((a, b) => a + b, 0) / last.length : null;
+}
+async function buyNow(ex) {
+  const note = document.getElementById('buy-note');
+  const ticker = (sel.ticker || sel.symbol).toUpperCase();
+  let price = sel.price;
+  try {
+    const q = await api('/api/quote?symbols=' + encodeURIComponent(sel.symbol));
+    price = ((q || {})[sel.symbol] || {}).price ?? price;
+  } catch {}
+  if (!price) { note.innerHTML = '<b class="bad">no current price — try again in a moment</b>'; return; }
+  const atr = chartData ? atr14(chartData) : null;
+  const r = Math.min(atr ? 2 * atr : price * 0.08, price * 0.24);
+  const rp = v => Math.round(v * (price < 1 ? 1e4 : 100)) / (price < 1 ? 1e4 : 100);
+  const stop = rp(price - r), target = rp(price + Math.min(2 * r, price * 0.24));
+  if (!confirm(`Put a BUY of ${ticker} at the current price (${fmt(price)}) on Approvals?\n\n` +
+      `Suggested stop ${stop} and target ${target} (${atr ? '2 × the daily move' : '8% — no chart data'}, 2:1).\n` +
+      'You choose the size and account, and can change the stop and target, on the approval card. Nothing trades until you approve.')) return;
+  try {
+    const out = await api('/api/manual-trade', {ticker, exchange: ex, direction: 'buy',
+      entry: price, stop, target, source: 'markets', suggested: {order_type: 'market'}});
+    note.innerHTML = `<b class="ok">✔ on Approvals</b> — <a href="/approvals#c-${esc(out.work_item_id || '')}">review and approve it →</a>`;
+    toast('buy sent to Approvals ✓');
+  } catch (e) { note.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
 }
 
 loadWatchlist();

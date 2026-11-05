@@ -104,6 +104,17 @@ if what == "inflight":
         " ON a.id=o.account_id WHERE o.status IN ('placed','partially_filled')"
         f" AND o.broker_order_id IS NOT NULL AND a.broker IN ({vh})",
         venue) if r["work_item_id"]]
+    # An order still HELD by the desk (pending_session, never sent) is a
+    # row in desk.db and nothing else: the custodian sends it when its market
+    # opens, before or after a restart alike. It must not hold a restart for
+    # hours (DDOG, 2026-11-05: approved at 19:35, NASDAQ opens 22:30 SGT).
+    queued_rows = conn.execute(
+        "SELECT id, work_item_id FROM orders WHERE status='pending_session'"
+        " AND submitted_at IS NULL AND leg IS NULL").fetchall()
+    queued = len(queued_rows)
+    waiting_items += [r["work_item_id"] for r in queued_rows
+                      if r["work_item_id"]]
+    at_venue += queued                   # subtracted from `orders` below
     parked += waiting_items              # executing = waiting on that order
     ph = ",".join("?" * len(parked)) or "''"
     runs = conn.execute(
@@ -122,7 +133,8 @@ if what == "inflight":
                  (pend, "authorised-not-acked"),
                  (len(parked) - len(waiting_items),
                   "refused trade(s) waiting for you on Approvals"),
-                 (at_venue, "order(s) working at Saxo")) if n]
+                 (at_venue - queued, "order(s) working at Saxo"),
+                 (queued, "order(s) queued for the market open")) if n]
         print(", ".join(bits) or "nothing")
     else:
         print(total)

@@ -92,6 +92,11 @@ def thesis_action(conn, payload: dict, resume_post, *, clock=time.time):
                                  f"{bal / 1e6:.2f} {acct['base_currency']} — "
                                  "top up on the Portfolio page or reduce size")
 
+    levels = _card_levels(row, payload) if action == "approve" else None
+    order_type = payload.get("order_type") or "limit"
+    if order_type not in ("limit", "market"):
+        raise AuthError(400, "order_type must be limit or market")
+
     # authorize: mark pending_resume (NOT burned) + audit row. Conditional on
     # the state the checks above read, so an item that was resumed, burned or
     # expired in between is refused rather than re-authorized. A re-click on
@@ -108,16 +113,22 @@ def thesis_action(conn, payload: dict, resume_post, *, clock=time.time):
         "INSERT INTO events (item_id, ts, actor, from_state, to_state, payload)"
         " VALUES (?,?,?,?,?,?)",
         (wi, now, "human", "awaiting_approval", f"authorize:{action}",
-         json.dumps({k: payload.get(k) for k in
-                     ("size_base", "qty", "trail_pct", "broker",
-                      "confirm_live")})))
+         json.dumps({**{k: payload.get(k) for k in
+                       ("size_base", "qty", "trail_pct", "broker",
+                        "confirm_live")}, "levels": levels,
+                     "order_type": order_type})))
+    if levels:
+        th = {**json.loads(row["thesis_json"] or "{}"), **levels}
+        conn.execute("UPDATE work_items SET thesis_json=? WHERE id=?",
+                     (json.dumps(th), wi))
 
     body = {"work_item_id": wi,
             "status": "approved" if action == "approve" else "rejected",
             "token": token, "actor": "human",
             "size_base": payload.get("size_base"), "qty": payload.get("qty"),
             "trail_pct": payload.get("trail_pct"),
-            "broker": payload.get("broker")}
+            "broker": payload.get("broker"), "levels": levels,
+            "order_type": order_type}
     try:
         code, resp = resume_post(body)      # idempotent server-side; retryable
     except Exception as e:                  # noqa: BLE001 — claire-api down
@@ -249,6 +260,70 @@ def _failed_row(conn, wi):
     return row
 
 
+SAXO_MAX_PCT = 25          # Saxo refuses a stop/target further from entry
+
+
+def _card_levels(row, payload):
+    """The stop / target you set on the approval card, checked BEFORE the
+    trade resumes: the same rules as any plan (stop below a buy's entry,
+    target above it), a buy must keep a stop, and Saxo's 25% limit. Returns
+    {stop_loss, take_profit} only when they differ from the plan, else None.
+    """
+    lv = payload.get("levels")
+    if lv is None:
+        return None
+    if not isinstance(lv, dict):
+        raise AuthError(400, "levels must be an object")
+    th = json.loads(row["thesis_json"] or "{}")
+    direction = th.get("direction")
+    if direction not in ("buy", "sell"):
+        return None
+    new = {}
+    for k in ("stop_loss", "take_profit"):
+        if k not in lv:
+            continue
+        v = lv[k]
+        if v in (None, ""):
+            new[k] = None
+            continue
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            raise AuthError(400, f"{k} must be a number") from None
+        if not v > 0:
+            raise AuthError(400, f"{k} must be more than zero")
+        new[k] = v
+    if all(th.get(k) == v for k, v in new.items()):
+        return None                                  # unchanged: the plan
+    data = {**th, **new}
+    entry = data.get("entry_high") or data.get("entry_low")
+    stop, target = data.get("stop_loss"), data.get("take_profit")
+    if direction == "buy" and not stop:
+        raise AuthError(400, "a buy needs a stop below the entry")
+    if entry:
+        lo = direction == "buy"
+        if stop and (stop >= entry if lo else stop <= entry):
+            raise AuthError(400, f"the stop must be {'below' if lo else 'above'}"
+                                 f" the entry ({entry:g})")
+        if target and (target <= entry if lo else target >= entry):
+            raise AuthError(400, f"the target must be "
+                                 f"{'above' if lo else 'below'} the entry "
+                                 f"({entry:g})")
+        if (payload.get("broker") or "").startswith("saxo"):
+            for name, v in (("stop", stop), ("target", target)):
+                if v and abs(v - entry) / entry * 100 > SAXO_MAX_PCT:
+                    raise AuthError(400, f"Saxo refuses a {name} more than "
+                                         f"{SAXO_MAX_PCT}% from the entry "
+                                         f"({name} {v:g}, entry {entry:g})")
+    from .graph.state import Thesis
+    try:
+        Thesis.model_validate(data)
+    except Exception as e:                           # noqa: BLE001 — shown
+        raise AuthError(400, f"those levels are not valid: {str(e)[:200]}") \
+            from None
+    return new
+
+
 def retry_failed(conn, wi, resume_post, *, confirm_live=None, changes=None):
     """Re-send a refused trade. By default with the SAME approval the human
     gave (size, account, trailing floor); `changes` may replace any of those
@@ -263,7 +338,8 @@ def retry_failed(conn, wi, resume_post, *, confirm_live=None, changes=None):
         (wi,)).fetchone()
     detail = json.loads((auth and auth["payload"]) or "{}")
     for k, v in (changes or {}).items():
-        if k in ("size_base", "qty", "trail_pct", "broker") and v is not None:
+        if k in ("size_base", "qty", "trail_pct", "broker",
+                 "order_type") and v is not None:
             detail[k] = v
     if detail.get("broker") == "saxo_live":
         import os
@@ -281,7 +357,9 @@ def retry_failed(conn, wi, resume_post, *, confirm_live=None, changes=None):
     body = {"work_item_id": wi, "status": "approved",
             "token": row["approval_token"], "actor": "human",
             **{k: detail.get(k) for k in ("size_base", "qty", "trail_pct",
-                                          "broker")}}
+                                          "broker")},
+            **({"order_type": detail["order_type"]}
+               if detail.get("order_type") else {})}
     try:
         code, resp = resume_post(body)
     except Exception as e:                  # noqa: BLE001

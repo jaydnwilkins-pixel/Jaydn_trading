@@ -127,6 +127,10 @@ class Approval(BaseModel):
     trail_pct: float | None = Field(default=None, gt=0, le=90)
     """Trailing floor: how far below entry the watcher's stop-alert sits."""
     broker: Literal["alpaca", "saxo", "moomoo", "saxo_live"] | None = None
+    # "market": fill now at the current price — sent as a limit a little
+    # through the live price (MARKET_CAP), so it fills at once at the best
+    # price available but can never run away. "limit": wait for the plan's.
+    order_type: Literal["limit", "market"] = "limit"
     actor: str                                           # "human" | "reaper"
     token: str
     at: datetime

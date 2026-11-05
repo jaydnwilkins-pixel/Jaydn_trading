@@ -188,29 +188,69 @@ class Claire:
                                            system_prompt=row["system_prompt"])
         return self._agent
 
+    # a refusal by the model's safety filter, not a desk error. Once a long
+    # thread trips it, EVERY later call resends that history and trips it
+    # again (2026-11-06: 16 of 17 calls failed) — so retry, don't repeat.
+    REFUSED = ("safeguards flagged", "usage policy", "aup")
+
+    @classmethod
+    def _refused(cls, err) -> bool:
+        e = str(err).lower()
+        return any(m in e for m in cls.REFUSED)
+
     def _ask_stream_sdk(self, history, thread):
+        """Answer on the subscription. If the model refuses: try the backup
+        model; if that refuses too, try once more on a FRESH conversation
+        (only this question) and keep that as the thread from now on."""
         from ..providers import claude_sdk
         chat, system, tools = self._sdk_chat
-        msgs = [(m["role"], m["content"]) for m in history]
-        _, prompt = claude_sdk.split_messages(msgs)
-        final = ""
-        try:
-            for kind, payload in claude_sdk.stream_chat(chat, system, prompt,
-                                                        tools):
-                if kind == "tool":
-                    yield json.dumps({"kind": "tool", **payload},
-                                     default=str) + "\n"
-                elif kind == "text":
-                    yield json.dumps({"kind": "text", "text": payload}) + "\n"
-                elif kind == "done":
-                    final = payload or final
+        attempts = [("primary", chat, history)]
+        if chat.fallback_model and chat.fallback_model != chat.model:
+            attempts.append(("backup", chat._copy(model=chat.fallback_model,
+                                                  fallback_model=None),
+                             history))
+        attempts.append(("fresh", chat._copy(
+            model=chat.fallback_model or chat.model, fallback_model=None),
+            [history[-1]]))
+        last_err = None
+        for label, model, msgs_in in attempts:
+            msgs = [(m["role"], m["content"]) for m in msgs_in]
+            _, prompt = claude_sdk.split_messages(msgs)
+            final, streamed = "", False
+            try:
+                for kind, payload in claude_sdk.stream_chat(model, system,
+                                                            prompt, tools):
+                    if kind == "tool":
+                        streamed = True
+                        yield json.dumps({"kind": "tool", **payload},
+                                         default=str) + "\n"
+                    elif kind == "text":
+                        streamed = True
+                        yield json.dumps({"kind": "text",
+                                          "text": payload}) + "\n"
+                    elif kind == "done":
+                        final = payload or final
+            except Exception as e:              # noqa: BLE001
+                last_err = e
+                # only a refusal before anything was said is worth another
+                # try; anything else (or a half-streamed answer) is final
+                if self._refused(e) and not streamed:
+                    continue
+                break
+            if label == "fresh":
+                # the old history kept being refused: start over from here
+                history[:] = [history[-1]]
+                yield json.dumps({"kind": "text", "text":
+                                  "\n\n_(I started a fresh conversation — "
+                                  "the earlier one kept being refused by "
+                                  "the model's safety filter.)_"}) + "\n"
             history.append({"role": "assistant", "content": final})
             self._save(thread)
             yield json.dumps({"kind": "done"}) + "\n"
-        except Exception as e:                  # noqa: BLE001
-            history.pop()                       # don't keep an unanswered turn
-            yield json.dumps({"kind": "error", "text": str(e)[:400]}) + "\n"
-            yield json.dumps({"kind": "done"}) + "\n"
+            return
+        history.pop()                           # don't keep an unanswered turn
+        yield json.dumps({"kind": "error", "text": str(last_err)[:400]}) + "\n"
+        yield json.dumps({"kind": "done"}) + "\n"
 
     def ask_stream(self, text: str, thread: str = "main"):
         """NDJSON generator: {kind: text|tool|done|error}."""

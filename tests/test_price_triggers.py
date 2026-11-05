@@ -582,3 +582,40 @@ def test_routes_are_key_gated_in_source_and_not_override_prefixed():
     assert "_paired()" in src[j:j + 600]
     for route in ("/api/price-triggers", "/api/watchlist-data"):
         assert not route.startswith("/api/override")
+
+
+# ── editing (Orders page) ────────────────────────────────────────────────
+def test_edit_replaces_the_trigger_atomically():
+    w = World()
+    t = make(w)
+    new = pt.replace(w.conn, t["id"], body(trigger_price=100, qty=7),
+                     created_by="human (test)", clock=w.clock)
+    assert new["replaces"] == t["id"] and new["status"] == "active"
+    assert new["trigger_price"] == 100.0 and new["qty"] == 7.0
+    old = status(w, t["id"])
+    assert old["status"] == "cancelled"
+    assert f"replaced by #{new['id']}" in old["status_reason"]
+
+
+def test_a_refused_edit_changes_nothing():
+    w = World()
+    t = make(w)
+    with pytest.raises(pt.TriggerError):            # buy stop above limit
+        pt.replace(w.conn, t["id"], body(stop=120), created_by="human",
+                   clock=w.clock)
+    assert status(w, t["id"])["status"] == "active"
+    (n,) = w.conn.execute("SELECT COUNT(*) FROM price_triggers").fetchone()
+    assert n == 1
+
+
+def test_a_fired_trigger_cannot_be_edited_back_to_life():
+    w = World()
+    t = make(w)
+    w.conn.execute("UPDATE price_triggers SET status='fired' WHERE id=?",
+                   (t["id"],))
+    with pytest.raises(pt.TriggerError) as e:
+        pt.replace(w.conn, t["id"], body(), created_by="human",
+                   clock=w.clock)
+    assert e.value.code == 409
+    (n,) = w.conn.execute("SELECT COUNT(*) FROM price_triggers").fetchone()
+    assert n == 1

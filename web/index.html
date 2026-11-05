@@ -9,7 +9,7 @@
   <div id="pending"></div>
 
   <h2>System map</h2>
-  <div class="mapwrap"><svg id="map" viewBox="0 0 1240 486"
+  <div class="mapwrap"><svg id="map" viewBox="0 0 1240 530"
     preserveAspectRatio="xMidYMin meet"></svg></div>
   <div class="legend">
     <span><b class="sw" style="background:var(--good);
@@ -26,14 +26,13 @@
     <span><i style="border-color:#1d6b62;border-top-style:dashed"></i>book
       writes &amp; data</span>
     <span><i style="border-color:#8a6a2a;border-top-style:dashed"></i>shortcut
-      paths: breach → exit review · override → gate</span>
-    <span style="color:var(--purple)">⚙ MCP config sits inside each venue
-      (execution is always the paper sim)</span>
+      paths: breach → exit review · your own trades → approval · pass → record</span>
+    <span style="color:var(--purple)">⚙ MCP entries are configuration only —
+      Saxo orders go to Saxo SIM over Claire's own connection; Alpaca and
+      moomoo use Claire's paper sim</span>
     <span>hover for detail · click to inspect, question or configure</span>
   </div>
 
-  <h2>Accounts</h2>
-  <div class="tiles" id="tiles"></div>
 </main>
 
 <div class="drawer" id="drawer">
@@ -52,14 +51,14 @@ const typing = () => ['INPUT', 'TEXTAREA', 'SELECT']
   .includes((document.activeElement || {}).tagName);
 
 /* ── system map ──────────────────────────────────────────────────── */
-const L = {railX: 12, railW: 152, railH: 44, railGap: 14, railTop: 46,
+const L = {railX: 12, railW: 152, railH: 40, railGap: 8, railTop: 46,
   stageX: 200, stageW: 128, pitch: 148, nodeH: 40, nodeGap: 8, band: 122,
   gIn: 180};
 const STAGES = [
-  // screener and prepare are one step on the map: prepare is deterministic
-  // bookkeeping the screener's pick flows straight through, and drawing it
-  // as its own box implied a handover that is not there
-  {label: 'SCREEN · PREPARE', ids: ['screener']},
+  // only the SCHEDULED scans use the screener to pick stocks; every other
+  // entry starts at the analysts (prepare is deterministic bookkeeping
+  // before them, not drawn as its own box)
+  {label: 'SCREEN (scans)', ids: ['screener']},
   {label: 'ANALYZE ∥', ids: ['fundamental', 'technical', 'news']},
   {label: 'DEBATE', ids: ['bull', 'bear']},
   {label: 'ARBITRATE', ids: ['arbiter']},
@@ -92,8 +91,8 @@ function node(id, x, y, w, h, title, sub, cls, extra, tip, href) {
     : `<circle class="dot" cx="${w - 11}" cy="12" r="3.5"/>`;
   const inner = `<rect class="body" width="${w}" height="${h}" rx="7"/>
     ${dot}
-    <text class="nt" x="10" y="17">${esc(cut(title, 17))}</text>
-    <text class="ns" x="10" y="30">${esc(cut(sub, 22))}</text>
+    <text class="nt" x="10" y="17">${esc(cut(title, Math.floor((w - 22) / 6.6)))}</text>
+    <text class="ns" x="10" y="31">${esc(cut(sub, Math.floor((w - 14) / 5.5)))}</text>
     ${extra || ''}<title>${esc(tip || sub)}</title>`;
   // ids are agent ids / broker names from desk.db: never trust them in a
   // handler or attribute unescaped
@@ -103,149 +102,306 @@ function node(id, x, y, w, h, title, sub, cls, extra, tip, href) {
   return `<g class="mnode ${esc(cls)}${sel}" transform="translate(${x},${y})"
     onclick="openDrawer(${jsArg(id)})">${inner}</g>`;
 }
+/* The map, in four horizontal bands so every kind of path has its own lane:
+     1. the run: entry → screen → analyze → debate → decide → approve →
+        execute → record (solid arrows, left to right)
+     2. shortcut lanes just below it (amber): exit review, your own trades
+     3. supporting systems the run uses (teal: data & book writes)
+     4. other recurring jobs
+   Every coordinate is in one SVG, so nothing paints over a connector. */
+const M = {W: 1240, H: 600, nodeW: 122, nodeH: 40,
+  col: {entry: 10, screen: 196, analyze: 350, debate: 504, decide: 658,
+        approve: 812, execute: 960, record: 1100},
+  band: 138,                         // centre line of the run
+  laneExit: 268,                     // amber shortcut lane (exit review)
+  support: 354, jobs: 404};
 function renderMap() {
-  const g = GRAPH, h = g.health || {}, parts = [], edges = [];
+  const g = GRAPH, h = g.health || {}, parts = [], edges = [], labels = [];
+  const C = M.col, W = M.nodeW, H = M.nodeH, B = M.band;
   const arrow = (id, col) => `<marker id="${id}" markerWidth="7"
     markerHeight="7" refX="6.5" refY="3.5" orient="auto">
     <path d="M0,0 L7,3.5 L0,7 z" fill="${col}"/></marker>`;
-  parts.push(`<defs>${arrow('af', '#2c4560')}${arrow('ai', '#1d6b62')}
-    ${arrow('al', '#8a6a2a')}</defs>`);
+  parts.push(`<defs>${arrow('af', '#4a6a8c')}${arrow('ai', '#1d8a7c')}
+    ${arrow('al', '#b08a3a')}</defs>`);
+  const flow = (d, end = true) => edges.push(`<path class="medge" ${end ? 'marker-end="url(#af)"' : ''} d="${d}"/>`);
+  const info = (d, end = true) => edges.push(`<path class="medge info" ${end ? 'marker-end="url(#ai)"' : ''} d="${d}"/>`);
+  const loop = (d, end = true) => edges.push(`<path class="medge loop" ${end ? 'marker-end="url(#al)"' : ''} d="${d}"/>`);
+  const lab = (x, y, t, cls = '', anchor = 'start') => labels.push(
+    `<text class="elabel ${cls}" x="${x}" y="${y}" text-anchor="${anchor}">${esc(t)}</text>`);
+  const head = (x, t) => parts.push(`<text class="mlabel" x="${x}" y="26">${t}</text>`);
+  const agent = (id, x, y, w = W) => {
+    const a = g.agents[id];
+    if (!a) return;
+    const sub = a.state === 'error' || a.state === 'active' ? a.detail
+      : `${(a.model || '').replace('claude-', '')}`;
+    parts.push(node(id, x, y, w, H, a.display_name || id, sub, a.state, null,
+      `${a.state} — ${a.detail}\n${a.provider_id}/${a.model} · click for what it does`));
+  };
 
-  /* entry rail */
-  parts.push(`<text class="mlabel" x="${L.railX}" y="34">ENTRY POINTS</text>`);
-  // each entry point goes straight to the page you would start a run from
-  const entries = [
-    ['you', '👤 You', 'pick a stock →', '/markets'],
-    ['sched', '🗓 Schedule', `scans in ${jobNext('analysis_')} · events ` +
-      jobNext('event_scan'), '/agents'],
-    ['claire', '💬 Claire', 'ask her to run one', '/claire']];
-  entries.forEach(([id, t, s, href], i) => {
-    const y = L.railTop + i * (L.railH + L.railGap);
-    parts.push(node(id, L.railX, y, L.railW, L.railH, t, s, 'entry',
-                    null, `go to ${href}`, href));
-    edges.push(`<path class="medge" d="M ${L.railX + L.railW} ${y + L.railH / 2}
-      H ${L.gIn} V ${L.band - 10}"/>`);
-  });
-  edges.push(`<path class="medge" marker-end="url(#af)"
-    d="M ${L.gIn} ${L.band - 10} H ${L.stageX}"/>`);
+  /* ── band 1: the run ─────────────────────────────────────────────── */
+  head(C.entry, 'WHO STARTS A RUN'); head(C.screen, 'SCREEN · scans only');
+  head(C.analyze, 'ANALYZE · in parallel'); head(C.debate, 'DEBATE');
+  head(C.decide, 'DECIDE'); head(C.approve, 'APPROVE · you');
+  head(C.execute, 'EXECUTE'); head(C.record, 'RECORD');
 
-  /* pipeline */
-  STAGES.forEach((st, i) => {
-    const x = L.stageX + i * L.pitch;
-    const tot = st.ids.length * L.nodeH + (st.ids.length - 1) * L.nodeGap;
-    const top = L.band - tot / 2;
-    parts.push(`<text class="mlabel" x="${x}" y="34">${st.label}</text>`);
-    st.ids.forEach((id, k) => {
-      const y = top + k * (L.nodeH + L.nodeGap);
-      if (DET[id]) {
-        const [t, s] = DET[id];
-        parts.push(node(id, x, y, L.stageW, L.nodeH, t, s, 'det ok',
-          null, 'deterministic — always configured, no LLM'));
-      } else {
-        const a = g.agents[id];
-        if (!a) return;
-        const sub = a.state === 'error' || a.state === 'active'
-          ? a.detail
-          : `${a.provider_id}/${(a.model || '').replace('claude-', '')}`;
-        parts.push(node(id, x, y, L.stageW, L.nodeH, a.display_name || id,
-          sub, a.state, null,
-          `${a.state} — ${a.detail}\n${a.provider_id}/${a.model}`));
-      }
-    });
-    if (i < STAGES.length - 1)
-      edges.push(`<path class="medge" marker-end="url(#af)"
-        d="M ${x + L.stageW} ${L.band} H ${x + L.pitch}"/>`);
-  });
+  // entry points, top to bottom: the scans feed the screener (level with
+  // it — its only input); you, the volume scan and Claire go straight to
+  // the analysts; the watcher starts exit reviews at News; your own trades
+  // and price triggers go straight to approval
+  const scans = SCHEDULES.filter(j => j.job.startsWith('analysis_'));
+  const scanSub = scans.length ? scans.map(j => j.job.replace('analysis_', '')
+    .toUpperCase() + (j.enabled ? ' on' : ' off')).join(' · ') : 'none';
+  const cc = g.agents.claire_chat;
+  const EW = 156, ey = i => 44 + i * 46;
+  const job = id => SCHEDULES.find(j => j.job === id) || {};
+  const jobState = j => !j.job ? 'idle' : !j.enabled ? 'disabled' : j.last_run_at ? 'ok' : 'idle';
+  parts.push(node('job:scans', C.entry, ey(0), EW, H, '🗓 Scheduled scans', scanSub, 'entry', null, 'click for what it does'));
+  parts.push(node('you', C.entry, ey(1), EW, H, '👤 You', 'Markets · Watchlist →', 'entry', null, 'go to /markets', '/markets'));
+  parts.push(node('job:event_scan', C.entry, ey(2), EW, H, '⚡ Volume scan',
+    `hourly · no LLM · ${jobNext('event_scan')}`, 'entry', null, 'click for what it does'));
+  if (cc) parts.push(node('claire_chat', C.entry, ey(3), EW, H, '💬 Claire Chat',
+    cc.state === 'error' ? cc.detail : (cc.model || '').replace('claude-', ''), cc.state, null,
+    `${cc.state} — ${cc.detail} · click to inspect`));
+  const hs = k => (h[k] || {}).ok || 'never ran', hc = k => (h[k] || {}).state || 'idle';
+  parts.push(node('watcher', C.entry, ey(4), EW, H, '🔔 Watcher',
+    `held stocks · ${hs('watcher')}`, hc('watcher'), null,
+    `watcher is ${hs('watcher')} — last checked ${(h.watcher || {}).checked_at ? ago(h.watcher.checked_at) : 'never'} · click for what it does`));
+  parts.push(node('job:own', C.entry, ey(5), EW, H, '🧾 Your own trades',
+    'sell · buy now · edits', 'entry', null, 'click for what goes this way'));
+  parts.push(node('job:price_triggers', C.entry, ey(6), EW, H, '🎯 Price triggers',
+    `every 2 min · next ${jobNext('price_triggers')}`, jobState(job('price_triggers')), null,
+    'your Watchlist triggers · click for what it does'));
 
-  /* supporting systems */
-  parts.push(`<text class="mlabel" x="190" y="292">SUPPORTING SYSTEMS</text>`);
-  const md = g.market_data;
-  parts.push(node('market', 190, 300, 128, 50, md.source, md.detail,
-    md.state,
-    `<text class="ns" x="10" y="43">${esc(cut('via ' + md.fallbacks, 22))}</text>`,
-    `${md.state} — ${md.detail}`));
-  const hs = k => (h[k] || {}).ok || 'never ran';
-  const hc = k => (h[k] || {}).state || 'idle';
-  parts.push(node('watcher', 450, 300, 128, 50, 'watcher', hs('watcher'),
-    hc('watcher'),
-    `<text class="ns" x="10" y="43">trail peak → exit review</text>`,
-    `watcher is ${hs('watcher')} — last checked ${
-      (h.watcher || {}).checked_at ? ago((h.watcher || {}).checked_at) : 'never'}`));
-  parts.push(node('book', 640, 300, 128, 50, 'desk.db',
-    `${g.book.positions} pos · ${g.book.open_orders} orders`, 'ok',
+  // scheduled scans → screener, on one level
+  const sx = C.entry + EW, cy = i => ey(i) + H / 2;
+  const scrY = ey(0);
+  flow(`M ${sx} ${cy(0)} H ${C.screen}`);
+  agent('screener', C.screen, scrY);
+
+  const newsX = C.analyze + M.nodeW / 2;
+  // analysts, stacked around the band
+  const ay = [B - 68, B - 20, B + 28];
+  ['fundamental', 'technical', 'news'].forEach((id, i) => agent(id, C.analyze, ay[i]));
+  // fan-out bar into the analysts, fed by the screener …
+  // the analysts' feed bar: the screener comes in at its top, the
+  // skip-the-screener bracket at its middle
+  const fanX = C.analyze - 16;
+  const skipY = cy(2);                   // middle of You · Volume · Claire
+  flow(`M ${C.screen + W} ${cy(0)} H ${fanX}`, false);
+  edges.push(`<path class="medge" d="M ${fanX} ${cy(0)} V ${Math.max(skipY, ay[2] + H / 2)}"/>`);
+  ay.forEach(y => flow(`M ${fanX} ${y + H / 2} H ${C.analyze}`));
+  // … and by you, the volume scan and Claire, which skip the screener
+  // a symmetrical bracket: three equal links, one bar, one arrow out of
+  // its exact middle, straight across under the screener
+  const busX = C.entry + 156 + 14;
+  [1, 2, 3].forEach(i => flow(`M ${sx} ${cy(i)} H ${busX}`, false));
+  edges.push(`<path class="medge" d="M ${busX} ${cy(1)} V ${cy(3)}"/>`);
+  flow(`M ${busX} ${skipY} H ${fanX}`, false);
+  lab((busX + fanX) / 2, skipY - 5, 'skip the screener', '', 'middle');
+
+  // analysts → debate (bull, then bear) → decide
+  const bullY = B - 46, bearY = B + 6;
+  const joinX = C.debate - 16;
+  ay.forEach(y => flow(`M ${C.analyze + W} ${y + H / 2} H ${joinX}`, false));
+  edges.push(`<path class="medge" d="M ${joinX} ${ay[0] + H / 2} V ${ay[2] + H / 2}"/>`);
+  flow(`M ${joinX} ${bullY + H / 2} H ${C.debate}`);
+  agent('bull', C.debate, bullY); agent('bear', C.debate, bearY);
+  flow(`M ${C.debate + W / 2} ${bullY + H} V ${bearY}`);
+  flow(`M ${C.debate + W} ${bearY + H / 2} H ${C.decide - 14} V ${B} H ${C.decide}`);
+  agent('arbiter', C.decide, B - H / 2);
+  // decide → approve → execute → record
+  const det = (id, x, t, sub) => parts.push(node(id, x, B - H / 2, W, H, t, sub, 'det ok', null,
+    'deterministic — no LLM · click for what it does'));
+  flow(`M ${C.decide + W} ${B} H ${C.approve}`);
+  det('gate', C.approve, '🔒 approve', 'your decision ⏸');
+  flow(`M ${C.approve + W} ${B} H ${C.execute}`);
+  det('execute', C.execute, 'execute', 'checks · sends order');
+  flow(`M ${C.execute + W} ${B} H ${C.record}`);
+  agent('recorder', C.record, B - H / 2);
+  // a PASS (or a rejected / expired approval) is recorded with no order
+  loop(`M ${C.decide + W / 2} ${B - H / 2} V 50 H ${C.record + W / 2} V ${B - H / 2}`);
+  lab((C.decide + C.record + W) / 2, 45, 'pass, rejected or expired → recorded, no order', 'amber', 'middle');
+
+  /* ── band 2: shortcut lanes ─────────────────────────────────────── */
+  // exit review: the watcher wakes News, which goes straight to the Arbiter
+  const decX = C.decide + W / 2;
+  // leaves News from its bottom (the watcher comes in beside it), so it
+  // never tangles with the analysts' lines into the debate
+  loop(`M ${newsX + 30} ${ay[2] + H} V ${M.laneExit} H ${decX} V ${B + H / 2}`);
+  lab(newsX + 36, M.laneExit - 5, 'exit review: News → Arbiter, no debate', 'amber');
+  // your own trades (and price triggers) go straight to approval
+  const gateX = C.approve + W / 2;
+  // the same bracket for your own trades + price triggers: two equal
+  // links, a bar, and one line from its middle straight to approval
+  const ownY = (cy(5) + cy(6)) / 2;
+  loop(`M ${sx} ${cy(5)} H ${busX}`, false);
+  loop(`M ${sx} ${cy(6)} H ${busX}`, false);
+  edges.push(`<path class="medge loop" d="M ${busX} ${cy(5)} V ${cy(6)}"/>`);
+  loop(`M ${busX} ${ownY} H ${gateX} V ${B + H / 2}`);
+  lab(busX + 14, ownY - 5, 'your own trades & price triggers → approval, no analysis', 'amber');
+  // the watcher: a held stock falls → exit review, which starts at News
+  loop(`M ${sx} ${cy(4)} H ${newsX - 20} V ${ay[2] + H}`);
+  lab(sx + 8, cy(4) - 4, 'a held stock falls → exit review', 'amber');
+
+  /* ── band 3: back office — the book and the brokers ─────────────── */
+  // execute → book (records the order) and execute → venue (sends it);
+  // the venue's fills come back to the custodian, which books them
+  const BY = M.support, VY = BY + 84;
+  parts.push(`<text class="mlabel" x="${C.approve}" y="${BY - 10}">BACK OFFICE</text>`);
+  parts.push(node('custodian', C.approve, BY, W, 50, 'custodian', hs('custodian'), hc('custodian'),
+    `<text class="ns" x="10" y="43">books fills · 5 min</text>`,
+    `custodian is ${hs('custodian')} — last checked ${(h.custodian || {}).checked_at ? ago(h.custodian.checked_at) : 'never'} · click for what it does`));
+  const BW = 96;
+  parts.push(node('book', C.execute, BY, BW, 50, 'desk.db',
+    `${g.book.positions} pos · ${g.book.open_orders} ord`, 'ok',
     `<text class="ns" x="10" y="43">the book</text>`,
-    'the durable record — written only by the repository layer'));
-  parts.push(node('custodian', 830, 300, 128, 50, 'custodian', hs('custodian'),
-    hc('custodian'),
-    `<text class="ns" x="10" y="43">fills · TTLs · expiry</text>`,
-    `custodian is ${hs('custodian')} — last checked ${
-      (h.custodian || {}).checked_at ? ago((h.custodian || {}).checked_at) : 'never'}`));
+    'the durable record — written only by the desk\'s code, never an LLM'));
+  const exBook = C.execute + BW / 2, exVen = C.execute + BW + 16;
+  info(`M ${exBook} ${B + H / 2} V ${BY}`);
+  lab(exBook + 5, BY - 22, 'records', 'teal');
+  flow(`M ${exVen} ${B + H / 2} V ${VY}`);
+  lab(exVen + 5, VY - 8, 'sends the order');
+  info(`M ${C.approve + W} ${BY + 25} H ${C.execute}`);
 
-  /* venues group with MCP status inside each broker */
-  const gx = 1000, gy = 262, gw = 148;
+  // venues: one row, a box per broker, under the back office
   const brokers = g.brokers || [];
-  const gh = brokers.length * 54 + (brokers.length - 1) * 8 + 30;
-  parts.push(`<g class="mgroup"><rect x="${gx}" y="${gy}" width="${gw}"
-    height="${gh}" rx="9"/><text class="mlabel" x="${gx + 10}"
-    y="${gy + 16}">VENUES</text></g>`);
+  const vx0 = C.approve - 8, vw = C.record + W + 8 - vx0;
+  parts.push(`<g class="mgroup"><rect x="${vx0}" y="${VY}" width="${vw}" height="82" rx="9"/>
+    <text class="mlabel" x="${vx0 + 10}" y="${VY + 15}">VENUES (brokers)</text></g>`);
+  const vcols = [C.approve, C.execute, C.record];
   brokers.forEach((b, i) => {
-    const y = gy + 26 + i * 62;
     const m = (g.mcps || []).find(x => x.broker === b.broker);
-    // an MCP entry is configuration only — orders always go to the paper
-    // sim — so never draw it as "live", even with creds present
-    const mcpTxt = m ? (m.creds_present ? `⚙ mcp cfg ${m.id} (unused)`
-      : `⚙ mcp ○ needs creds`) : '⚙ no mcp';
-    const mcp = m ? `<text class="nm" x="10" y="46"
-      fill="${m.creds_present ? 'var(--purple)' : 'var(--dim)'}"
-      >${esc(cut(mcpTxt, 20))}</text>
-      <rect x="6" y="36" width="118" height="14" fill="transparent"
-        style="cursor:pointer" onclick="event.stopPropagation();
-        openDrawer(${jsArg('mcp:' + m.id)})"><title>inspect MCP server</title></rect>`
-      : `<text class="nm" x="10" y="46" fill="var(--dim)">${esc(mcpTxt)}</text>`;
-    parts.push(node(b.broker, gx + 10, y, 128, 54, b.broker,
-      `${b.adapter} · ${b.open_orders} open`,
-      b.state || 'idle', mcp, `${b.state} — ${b.detail}`));
+    const kind = b.adapter === 'saxo-sim' ? 'Saxo SIM API' : b.adapter === 'saxo-live' ? 'Saxo LIVE'
+      : 'Claire paper sim';
+    const mcp = m ? `<rect x="6" y="36" width="110" height="14" fill="transparent"
+        style="cursor:pointer" onclick="event.stopPropagation();openDrawer(${jsArg('mcp:' + m.id)})"><title>MCP entry (configuration only)</title></rect>
+      <text class="nm" x="10" y="46" fill="var(--dim)">⚙ mcp entry</text>` : '';
+    parts.push(node(b.broker, (vcols[i] ?? C.record + i * 10), VY + 22, W, 52, b.broker,
+      `${kind} · ${b.open_orders} open`, b.state || 'idle', mcp, `${b.state} — ${b.detail}`));
   });
+  // fills: straight up from the venues into the custodian
+  info(`M ${C.approve + W / 2} ${VY} V ${BY + 50}`);
+  lab(C.approve + W / 2 + 5, VY - 8, 'fills come back', 'teal');
 
-  /* edges between bands */
-  const exX = L.stageX + 5 * L.pitch + L.stageW / 2;
-  const recX = L.stageX + 6 * L.pitch + L.stageW / 2;
-  const anX = L.stageX + 1 * L.pitch + L.stageW / 2;
-  edges.push(`<path class="medge" marker-end="url(#af)"
-    d="M ${exX} ${L.band + 20} V 246 H ${gx + gw / 2} V ${gy}"/>`);
-  edges.push(`<path class="medge info" marker-end="url(#ai)"
-    d="M ${recX} ${L.band + 20} V 232 H 704 V 300"/>`);
-  edges.push(`<path class="medge info" marker-end="url(#ai)"
-    d="M ${gx} ${gy + gh - 40} H 978 V 325 H 958"/>`);
-  edges.push(`<path class="medge info" marker-end="url(#ai)"
-    d="M 830 325 H 770"/>`);
-  edges.push(`<path class="medge info" marker-end="url(#ai)"
-    d="M 640 325 H 580"/>`);
-  edges.push(`<path class="medge info" marker-end="url(#ai)"
-    d="M 254 300 V 214 H ${anX} V 190"/>`);
-  // a breach launches an EXIT REVIEW, which enters at news — not at the
-  // screener, and not through the debate
-  edges.push(`<path class="medge loop" marker-end="url(#al)"
-    d="M 460 300 V 190"/>`);
-  edges.push(`<text class="ns" x="340" y="238"
-    fill="#8a6a2a">breach ↑ exit review</text>`);
-  // the exit review's shortcut: news → arbiter, skipping the debate
-  edges.push(`<path class="medge loop" marker-end="url(#al)"
-    d="M 476 176 H 708 V 142"/>`);
-  edges.push(`<text class="ns" x="500" y="190"
-    fill="#8a6a2a">exit review skips the debate</text>`);
-  // a human override of a PASS enters the pipeline AT the gate
-  edges.push(`<path class="medge loop" marker-end="url(#al)"
-    d="M 856 208 V 142"/>`);
-  edges.push(`<text class="ns" x="786" y="222"
-    fill="#8a6a2a">human override (Approvals)</text>`);
+  /* ── band 4: everything with no direct link, in one row ─────────── */
+  const JY = M.jobs, JW = 176;
+  parts.push(`<text class="mlabel" x="${C.entry}" y="${JY - 10}">OTHER SYSTEMS &amp; JOBS · used by everything, no single link</text>`);
+  const md = g.market_data;
+  const loops = g.loops || [];
+  const jobs = [
+    ['market', 'market data', `${md.source} → ${md.fallbacks}`, md.state, `${md.state} — ${md.detail} · prices for every step`],
+    ['job:reconcile', 'reconcile', 'daily · backup + drift check', jobState(job('reconcile'))],
+    ...loops.map(l => [l.id, l.name, l.sub, l.state])];
+  jobs.forEach(([id, t, sub, st, tip], i) => parts.push(node(id, C.entry + i * (JW + 16), JY, JW, 44,
+    t, sub, st, null, (tip || sub) + ' · click for what it does')));
 
-  document.getElementById('map').innerHTML = edges.join('') + parts.join('');
+  document.getElementById('map').innerHTML = edges.join('') + parts.join('') + labels.join('');
+}
+
+/* ── side-panel write-ups: what each agent / job is FOR ─────────────
+   what · when it runs · what it reads · what it produces · what it can't do */
+const ABOUT = {
+  screener: {what: 'Picks which stocks are worth analysing today. It scans the market with TradingView\'s screener (price moves, volume, ratings, size), looks up quotes, always considers your Watchlist, and weighs what the book already holds so picks diversify rather than pile into one sector.',
+    when: 'Only in the scheduled scans (US 10:00 New York on weekdays; the Asia and EU scans are turned off). Runs you start, Claire\'s and the volume scan\'s skip it.',
+    reads: 'The screener results, live quotes, your Watchlist and the open positions.',
+    makes: 'A short list of tickers, each with a one-line reason — that reason travels with the run so the analysts know why the stock was picked.',
+    limits: 'It cannot buy anything or approve anything; it only starts analysis runs.'},
+  fundamental: {what: 'Judges the business and its price: growth, profitability, balance sheet, valuation versus history and peers, and anything material in filings or results.',
+    when: 'In every full analysis run, in parallel with Technical and News.',
+    reads: 'Price history and quotes, web search and the pages it fetches (company results, financial sites).',
+    makes: 'An analyst report: bullish / bearish / neutral, a conviction from 0 to 1, a summary, the key findings with their sources. It works in two steps — research, then a short call that writes the structured report — so it shows two runs per stock.',
+    limits: 'Research only. If a source is blocked it says so in its findings rather than guessing.'},
+  technical: {what: 'Reads the chart: trend, moving averages (20 / 50 / 200 day), momentum (RSI, MACD), volatility (ATR — the typical daily move), support and resistance, and volume.',
+    when: 'In every full analysis run, in parallel with Fundamental and News.',
+    reads: 'Daily price bars, and a sandboxed Python tool to calculate the indicators exactly instead of estimating them.',
+    makes: 'An analyst report (signal, conviction, summary, key levels) — the levels it finds feed the stop and target the Arbiter sets.',
+    limits: 'Research only; the Python sandbox has no network and no file access.'},
+  news: {what: 'Finds what is happening to the company now: results and guidance, analyst changes, deals, lawsuits, sector news — anything that could move the price.',
+    when: 'In every full analysis run, and ALONE in an exit review (when the watcher sees a held stock fall), where speed matters.',
+    reads: 'Web search and the news pages it fetches.',
+    makes: 'An analyst report with dated findings and sources.',
+    limits: 'Research only. Older or unverifiable stories are flagged as such.'},
+  bull: {what: 'Makes the strongest honest case FOR the trade, using only what the three analysts found.',
+    when: 'After all three analysts have finished.',
+    reads: 'The three analyst reports (not the web — no tools).',
+    makes: 'A debate case: key points for, and rebuttals of the obvious objections.',
+    limits: 'It argues one side on purpose; the Arbiter decides.'},
+  bear: {what: 'Makes the strongest honest case AGAINST, answering the Bull point by point.',
+    when: 'Strictly after the Bull, so it can rebut it.',
+    reads: 'The analyst reports and the Bull\'s case (no tools).',
+    makes: 'A debate case: key points against and rebuttals of the Bull.',
+    limits: 'It argues one side on purpose; the Arbiter decides.'},
+  arbiter: {what: 'The decision. It weighs the evidence and both sides of the debate and says buy, sell or pass — and for a trade, the full plan: entry range, stop, target, conviction and the conditions or caveats you should know.',
+    when: 'At the end of every analysis run, and in exit reviews (where its answer is sell or hold).',
+    reads: 'All analyst reports and the debate.',
+    makes: 'A thesis. A buy or sell goes to Approvals (and Telegram) for you; a pass is recorded and goes nowhere. The stop and target it sets are what the approval card pre-fills — you can change them there.',
+    limits: 'It can never place an order: nothing trades until you approve. Runs on Opus, with Sonnet as its backup.'},
+  recorder: {what: 'Writes the plain-English story of a finished run — what was found, what was decided, what you did and what happened to the order — for the Trading page.',
+    when: 'At the end of every run, whatever the outcome.',
+    reads: 'The run\'s reports, the decision and the order and fill records.',
+    makes: 'A narrative about the record. The record itself (orders, fills, cash) is written by the desk\'s own code, never by an LLM.',
+    limits: 'Read-only on the book.'},
+  claire_chat: {what: 'The desk\'s conversational assistant — the Claire you talk to on the Claire page, by voice ("Claire, …") and through Bob. She answers questions about your positions, orders, P/L and pending approvals, looks up prices and charts, explains a thesis, and can start an analysis run on a stock you name.',
+    when: 'Whenever you (or Bob, or the voice daemon) ask her something.',
+    reads: 'Her tools: run pipeline, pipeline status, pending approvals, portfolio summary, share P/L, broker metrics, quotes, charts, search, explain thesis. Each conversation is kept (up to 50 turns).',
+    makes: 'Answers, and analysis runs when asked.',
+    limits: 'She cannot approve, place or cancel a trade. If her model refuses a message she retries on her backup model, then on a fresh conversation.'},
+  gate: {what: 'The approval gate. Every run that wants to trade stops here and waits for you. The approval card shows the evidence, the plan, the share count at the current price, and lets you set size, account, order type, stop and target.',
+    when: 'Every trade, from every path: analysis runs, exit reviews, your own trades and price triggers.',
+    reads: 'Your decision, carrying a single-use token from the card or the Telegram button.',
+    makes: 'Approved → execute; rejected or expired (at the market close) → recorded.',
+    limits: 'No LLM can pass it. Real-money approvals also need LIVE typed on the card.'},
+  execute: {what: 'Turns an approval into an order: sizes it in shares at the live price, checks it (price band, cash, risk limits, whole shares at Saxo, the live-money switch), then sends it with its stop and target attached — or holds it until the market opens.',
+    when: 'Straight after you approve.',
+    reads: 'The approval, the live quote and FX rate, the account\'s cash.',
+    makes: 'An order at the broker (or queued for the open), with cash set aside for it.',
+    limits: 'Deterministic code, no LLM. It refuses rather than guesses.'},
+  watcher: {what: 'The safety net on positions you hold. It tracks each stock\'s best price since you bought and, if it falls by the trailing floor (8% unless you set another), starts an exit review — News, then the Arbiter — which comes to you as a "sell?" approval. It keeps nudging (+3% each time, up to 6 a day) if the fall continues.',
+    when: 'Every 10 minutes while the stock\'s market is open (and for 30 minutes after the close).',
+    reads: 'Open positions and live prices.',
+    makes: 'Exit reviews. An alert is removed when the position is sold.',
+    limits: 'It never sells by itself — the stop at the broker is the automatic exit.'},
+  custodian: {what: 'The back office. It books fills from the broker into the book, sends orders queued for the open, cancels orders that expired, expires approvals at the close, retries an approval that could not reach claire-api, re-protects shares whose stop/target had to be cancelled, and flags anything that does not match the broker.',
+    when: 'Every 5 minutes.',
+    reads: 'The broker\'s order and fill state, and the book.',
+    makes: 'Fills, positions and P/L in the book; warnings on Mission Control.',
+    limits: 'Never invents an order; never re-sends one the broker refused.'},
+  market: {what: 'Where prices come from. A keyed provider first (Twelve Data), then TradingView, Yahoo (paused for 5 minutes when it rate-limits), Saxo\'s own chart data, and the ECB for currency rates. A value served from cache while sources fail is marked stale.',
+    when: 'Whenever anything needs a price or a chart.', reads: '', makes: '', limits: ''},
+  'job:event_scan': {what: 'Sweeps the open markets for unusual trading volume (3× normal or more) and starts an analysis run on the strongest one — a fast way to catch news before it is everywhere.',
+    when: 'Hourly while NASDAQ / NYSE are open; at most one run per sweep.',
+    reads: 'Volume across the market (no LLM).', makes: 'At most one analysis run, which goes straight to the analysts.', limits: ''},
+  'job:price_triggers': {what: 'Checks every active price trigger from your Watchlist. When the price reaches one, it fires once: "ask me" puts an approval card on Approvals and Telegram; "automatic" (paper accounts only) places the order you approved in advance.',
+    when: 'Every 2 minutes while the trigger\'s market is open.',
+    reads: 'Your triggers and live prices — never a stale price.', makes: 'Approval cards or pre-approved paper orders; expired triggers are closed.', limits: 'Never places anything on the real-money account by itself.'},
+  'job:reconcile': {what: 'The daily check-up: takes a snapshot of each broker account, compares it with the book to catch drift, and backs up the desk database.',
+    when: 'Every day at 09:00 (your time).', reads: 'Broker balances and positions.', makes: 'Snapshots, drift warnings, and var/desk.backup.db.', limits: ''},
+  'loop:saxo': {what: 'Keeps your Saxo sign-ins alive. Saxo\'s sign-in expires quickly, so this refreshes it every 10 minutes (every minute after a failed try) and warns you by Telegram and desktop notification before it lapses and if it does (re-sign in with bin/saxo login).',
+    when: 'Constantly, in claire-api.', reads: 'The Saxo sign-in files in etc/.', makes: 'A fresh sign-in, or a warning.', limits: 'Read-only: it never trades.'},
+  'loop:telegram': {what: 'Sends each approval card to your Telegram — the chart, the plan and the buttons — and closes it there when it is decided, expired or replaced. Your taps reach Claire through Bob\'s Telegram bot, and only from your own Telegram account.',
+    when: 'Every 20 seconds, in the dashboards.', reads: 'Pending and refused approvals.', makes: 'Telegram messages; one more message for each failed placement.', limits: 'The buttons carry no approval token; Claire checks it is you.'},
+};
+ABOUT['job:own'] = {what: 'Trades you start yourself go straight to the approval gate — no analysts, no debate: the Sell buttons (Portfolio, Saxo accounts, Watchlist), Buy now on the Watchlist, Buy at current price on Markets, a price trigger firing, an edit of an order already at the broker, and overriding a pass on Approvals.',
+  when: 'Whenever you do one of those.', reads: 'What you entered: levels, size, account.',
+  makes: 'An approval card (and a Telegram message). Nothing trades until you approve it there — except an automatic paper-account trigger you approved in advance.',
+  limits: 'The same checks as any trade: price band, cash, risk limits, Saxo\'s rules.'};
+const SCAN_ABOUT = {what: 'A scheduled scan: the Screener picks stocks on this region\'s exchanges and each pick goes through the full analysis (analysts → debate → Arbiter). Anything worth trading lands on Approvals.',
+  when: '', reads: 'The screener, your Watchlist, the open positions.', makes: 'Analysis runs; buys or sells for your approval.', limits: 'It is skipped if the market is closed that day.'};
+function aboutHtml(id, extraWhen) {
+  let a = ABOUT[id];
+  if (!a && (id.startsWith('job:analysis_') || id === 'job:scans')) a = SCAN_ABOUT;
+  if (!a) return '';
+  const row = (k, v) => v ? `<p style="margin:.25rem 0"><b>${k}</b> ${esc(v)}</p>` : '';
+  return `<div class="narr" style="margin-bottom:.6rem">
+    <p style="margin:.1rem 0 .35rem">${esc(a.what)}</p>
+    ${row('When:', extraWhen || a.when)}${row('Reads:', a.reads)}
+    ${row('Produces:', a.makes)}${row('Limits:', a.limits)}</div>`;
 }
 
 /* ── drawer ──────────────────────────────────────────────────────── */
 function closeDrawer() {
   document.getElementById('drawer').classList.remove('open');
+  document.body.classList.remove('drawer-open');
   selected = null; renderMap();
 }
 document.addEventListener('keydown', e => {
@@ -255,6 +411,7 @@ async function openDrawer(id) {
   selected = id; renderMap();
   const d = document.getElementById('drawer');
   d.classList.add('open');
+  document.body.classList.add('drawer-open');
   document.getElementById('d-title').textContent = id;
   const body = document.getElementById('d-body');
   const g = GRAPH;
@@ -271,10 +428,43 @@ async function openDrawer(id) {
           : m.creds_present ? 'present'
           : 'missing ' + esc(m.missing_refs.join(', '))}</b></p>
       <p class="muted">${esc(m.note || '')}</p>
-      <p class="muted">Configuration only: execution always runs on the
-        deterministic in-process paper sim — the desk never launches this MCP
-        server to place orders, credentials or not. Edit servers on
+      <p class="muted">Configuration only: the desk never launches this MCP
+        server to place orders, credentials or not. Orders go through
+        Claire's own adapters — Saxo SIM's real API for Saxo, Claire's paper
+        sim for the others. Edit servers on
         <a href="/providers">Providers &amp; MCP</a>.</p>`;
+    return;
+  }
+  if (id === 'job:own') {
+    document.getElementById('d-title').textContent = 'Your own trades';
+    body.innerHTML = aboutHtml(id);
+    return;
+  }
+  if (id === 'job:scans') {
+    document.getElementById('d-title').textContent = 'Scheduled scans';
+    const sc = SCHEDULES.filter(x => x.job.startsWith('analysis_'));
+    body.innerHTML = aboutHtml(id) + `<table><tr><th>scan</th><th>when</th><th>status</th><th>last run</th></tr>${
+      sc.map(x => { let sp = x.spec || {}; if (typeof sp === 'string') { try { sp = JSON.parse(sp); } catch { sp = {}; } }
+        return `<tr><td>${esc(x.description || x.job)}</td>
+        <td class="small">${esc((sp.time || '') + ' ' + (sp.tz || ''))}</td>
+        <td>${x.enabled ? '<span class="pill ok">on</span>' : '<span class="pill">off</span>'}</td>
+        <td class="small">${x.last_run_at ? ago(x.last_run_at) : 'never'}</td></tr>`; }).join('')}</table>
+      <p><a href="/agents">turn scans on or off, or change their times →</a></p>`;
+    return;
+  }
+  if (id.startsWith('job:') || id.startsWith('loop:')) {
+    const j = SCHEDULES.find(x => 'job:' + x.job === id);
+    const l = (g.loops || []).find(x => x.id === id);
+    document.getElementById('d-title').textContent = j ? j.job.replace('_', ' ') : l.name;
+    body.innerHTML = aboutHtml(id) + (j ? `<p class="muted">${esc(j.description || '')}</p>
+      <p>${j.enabled ? '<span class="pill ok">on</span>' : '<span class="pill">off</span>'}
+        · last run <b>${j.last_run_at ? ago(j.last_run_at) : 'never'}</b>
+        ${j.next_run_at ? ` · next ${esc(jobNext(j.job))}` : ''}</p>
+      ${j.last_result ? `<details><summary class="muted">last result</summary>
+        <pre style="white-space:pre-wrap">${esc(j.last_result)}</pre></details>` : ''}
+      <p><a href="/agents">change its schedule →</a></p>`
+      : `<p class="muted">${esc(l.sub)} — a fixed loop, not in the
+        schedule table.</p>`);
     return;
   }
   if (id === 'book') {
@@ -304,15 +494,19 @@ async function openDrawer(id) {
         'selected' : ''} ${okc ? '' : 'disabled'}>${esc(pr.display_name)}
         ${okc ? '' : '(incompatible)'}</option>`;
     }).join('');
-    body.innerHTML = `
+    body.innerHTML = aboutHtml(id) + `
       <p class="muted">${a.tools.length ? 'tools: ' + esc(a.tools.join(', '))
         : 'single structured call — no tools'} · $${fmt(act.cost_24h, 4)}
         spent in 24h</p>
-      ${id === 'screener' ? `<p class="muted">This step also covers
-        <b>prepare</b>: whatever it picks is resolved deterministically —
-        currency from the exchange suffix (GBp→GBP), venue lot size, desk.db
-        registration — before the analysts see it. No LLM in that part.</p>`
+      ${id === 'screener' ? `<p class="muted">Used only by the <b>scheduled
+        scans</b>, to pick which stocks to analyse. Runs you start, Claire's
+        and the volume scan's go straight to the analysts. Every run then
+        passes <b>prepare</b> (no LLM): currency from the exchange (GBp→GBP),
+        the venue's lot size, desk.db registration.</p>`
         : ''}
+      ${id === 'claire_chat' ? `<p><a href="/claire">open the chat with Claire →</a>
+        <span class="muted">· if her model refuses, she retries on her backup
+        model, then on a fresh conversation</span></p>` : ''}
       ${act.current ? `<p class="ok">● running now on
         ${esc(act.current.ticker || act.current.work_item_id || '—')}</p>`
         : '<p class="muted">idle right now</p>'}
@@ -332,7 +526,8 @@ async function openDrawer(id) {
         : `<div class="runlist">` + act.runs.map((r, i) =>
           `<div class="runrow" id="rr-${i}" onclick="pickRun(${jsArg(id)},${i},
             ${jsArg(r.work_item_id || '')})">
-            <span class="rt">${esc(r.ticker || r.work_item_id || '—')}</span>
+            <span class="rt">${esc(r.ticker || r.work_item_id || '—')}${
+              r.status === 'running' ? ' <span class="ok">● analysing</span>' : ''}</span>
             <span class="muted">${ago(r.started_at)}</span>
             <span class="${r.status === 'ok' ? 'ok' : r.status === 'error' ?
               'bad' : 'warn'}">${esc(r.status)}</span>
@@ -351,7 +546,11 @@ async function openDrawer(id) {
         </summary><pre style="white-space:pre-wrap">${esc(a.system_prompt)}
         </pre></details>`;
     window._runs = act.runs;
-    const first = act.runs.findIndex(r => r.has_narrative);
+    /* open on what it is analysing NOW: its running call, else a run whose
+       pipeline is still going; only then the latest finished write-up */
+    let first = act.runs.findIndex(r => r.status === 'running');
+    if (first < 0) first = act.runs.findIndex(r => r.wi_state === 'running');
+    if (first < 0) first = act.runs.findIndex(r => r.has_narrative);
     if (first >= 0) pickRun(id, first, act.runs[first].work_item_id);
     return;
   }
@@ -387,12 +586,13 @@ async function openDrawer(id) {
       'fills and writes them to the book, places queued orders at the open, ' +
       'expires approvals at the gate, cancels orders past TTL, flags drift.',
     market: 'Market-data chain. Configure sources on Providers &amp; MCP.'};
-  body.innerHTML = `<p class="muted">${desc[id] || ''}</p>` +
+  body.innerHTML = (aboutHtml(id) || `<p class="muted">${desc[id] || ''}</p>`) +
     (['watcher', 'custodian'].includes(id)
       ? `<p><a href="/agents">change its schedule</a></p>` : '') +
     (id === 'market' ? `<p><a href="/providers">data sources</a></p>` : '');
 }
 async function pickRun(agentId, idx, workItem) {
+  window._narrSel = workItem;
   document.querySelectorAll('.runrow').forEach((el, i) =>
     el.classList.toggle('sel', i === idx));
   const out = document.getElementById('d-narr');
@@ -403,12 +603,31 @@ async function pickRun(agentId, idx, workItem) {
   try {
     const n = await api(`/api/agent-narrative?agent=${
       encodeURIComponent(agentId)}&work_item=${encodeURIComponent(workItem)}`);
-    if (n.error) {
-      out.innerHTML = `<h2>Output</h2><p class="muted">${esc(n.error)}</p>`;
-      return;
-    }
     const run = (window._runs || []).find(r => r.work_item_id === workItem)
     || {};
+    const live = run.status === 'running' || run.wi_state === 'running';
+    if (live) {
+      /* still working: check again shortly while this run stays selected */
+      clearTimeout(window._narrTimer);
+      window._narrTimer = setTimeout(async () => {
+        if (selected !== agentId || !document.getElementById('d-narr')) return;
+        try {
+          const act = await api('/api/agent-activity?id=' + encodeURIComponent(agentId));
+          window._runs = act.runs;
+          const i = act.runs.findIndex(r => r.work_item_id === workItem);
+          if (i >= 0 && window._narrSel === workItem) pickRun(agentId, i, workItem);
+        } catch {}
+      }, 15000);
+    }
+    if (n.error || (live && !n.report && !n.transcript)) {
+      out.innerHTML = live
+        ? `<h2>Analysing ${esc(run.ticker || workItem)} now</h2>
+           <p class="muted">${run.status === 'running' ? 'This agent is working on it right now.'
+             : 'The run is still going (this agent has finished its part or not started yet).'}
+           Its write-up appears here when it finishes — this panel checks every 15 s.</p>`
+        : `<h2>Output</h2><p class="muted">${esc(n.error)}</p>`;
+      return;
+    }
   const d = run.report || {};
   const list = (k, label) => (d[k] || []).length
     ? `<div style="margin-top:.3rem"><span class="muted" style="font-size:.66rem;
@@ -529,32 +748,44 @@ async function refresh() {
   [OVERVIEW, GRAPH, PROVIDERS, SCHEDULES] = await Promise.all([
     api('/api/overview'), api('/api/agent-graph'), api('/api/providers'),
     api('/api/schedules')]);
-  document.getElementById('banner').innerHTML = OVERVIEW.flags.length
-    ? `<div class="banner">${OVERVIEW.flags.map(f =>
-        `<div>⚠ ${esc(f)}</div>`).join('')}</div>` : '';
+  renderFlags();
   renderStrip();
   renderPending();
   renderMap();
-  document.getElementById('tiles').innerHTML =
-    OVERVIEW.cash.map(c => `<div class="tile"><b>${fmt(c.cash)}</b>
-      <span>${esc(c.account)} (${esc(c.ccy)})</span></div>`).join('');
+  connPill('loaded');
+}
+/* warnings: each can be cleared; "failed runs" returns only for new
+   failures, any other after a day if still true (or at once if it changes) */
+function renderFlags() {
+  const items = OVERVIEW.flag_items || (OVERVIEW.flags || []).map(f => ({key: 'flag:' + f, text: f}));
+  const cleared = OVERVIEW.cleared || [];
+  const row = f => `<div style="display:flex;gap:.5rem;align-items:center">
+      <span style="flex:1">⚠ ${esc(f.text)}${f.link ? ` <a href="${esc(f.link)}">open →</a>` : ''}</span>
+      <button class="ghost" title="clear this warning" onclick="ackFlags([${jsArg(f.key)}])">✖ Clear</button></div>`;
+  document.getElementById('banner').innerHTML = (items.length
+    ? `<div class="banner">${items.map(row).join('')}${items.length > 1
+        ? `<div style="text-align:right"><button class="ghost" onclick='ackFlags(${
+            esc(JSON.stringify(items.map(f => f.key)))})'>Clear all</button></div>` : ''}</div>` : '') +
+    (cleared.length ? `<details class="muted small" style="margin:-.4rem 0 .8rem">
+      <summary>${cleared.length} cleared warning${cleared.length > 1 ? 's' : ''} still true</summary>
+      ${cleared.map(f => `<div>${esc(f.text)} <button class="ghost" onclick="ackFlags([${jsArg(f.key)}], true)">show again</button></div>`).join('')}
+      </details>` : '');
+}
+async function ackFlags(keys, restore) {
+  try {
+    await api('/api/flag-ack', {keys, restore: !!restore});
+    OVERVIEW = await api('/api/overview');
+    renderFlags();
+  } catch (e) { toast(e.message, false); }
 }
 function connectSSE() {
-  const dot = document.getElementById('conn');
-  const es = new EventSource('/api/events');
-  es.onopen = () => { dot.textContent = '● live'; dot.className = 'pill ok'; };
-  es.onerror = () => { dot.textContent = '○ polling';
-    dot.className = 'pill warn'; };
-  es.onmessage = ev => {
-    try {
-      const e = JSON.parse(ev.data);
-      // agent-run changes drive the glow — repaint the map alone (cheap),
-      // work-item transitions warrant a full refresh
-      if (e.kind === 'agents') return refreshGraph();
-      if (['awaiting_approval', 'approved', 'rejected', 'expired', 'done',
-           'failed', 'executing'].includes(e.to_state)) refresh();
-    } catch {}
-  };
+  liveEvents(e => {
+    // agent-run changes drive the glow — repaint the map alone (cheap),
+    // work-item transitions warrant a full refresh
+    if (e.kind === 'agents') return refreshGraph();
+    if (['awaiting_approval', 'approved', 'rejected', 'expired', 'done',
+         'failed', 'executing'].includes(e.to_state)) refresh();
+  }, connPill);
 }
 refresh().then(() => {
   const want = localStorage.getItem('openDrawer');

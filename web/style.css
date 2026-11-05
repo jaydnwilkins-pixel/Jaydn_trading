@@ -110,9 +110,14 @@ pre { background:var(--bg); border:1px solid var(--line); border-radius:8px;
   margin-right:.3rem; vertical-align:middle; }
 .mgroup rect { fill:none; stroke:#1b2b3d; stroke-dasharray:4 4; }
 .mlabel { fill:var(--muted); font-size:9px; letter-spacing:.14em; }
-.medge { fill:none; stroke:#2c4560; stroke-width:1.3; }
-.medge.info { stroke:#1d6b62; stroke-dasharray:5 4; }
-.medge.loop { stroke:#8a6a2a; stroke-dasharray:6 4; }
+.medge { fill:none; stroke:#4a6a8c; stroke-width:1.3; }
+.medge.info { stroke:#1d8a7c; stroke-dasharray:5 4; }
+.medge.loop { stroke:#b08a3a; stroke-dasharray:6 4; }
+/* edge labels: small, and outside the boxes (they used to inherit the page
+   font and sprawl across the lines) */
+.elabel { fill:#7d93ad; font-size:9.5px; font-family:var(--mono); }
+.elabel.amber { fill:#c9a256; }
+.elabel.teal { fill:#3fb3a3; }
 .legend { display:flex; gap:1.2rem; flex-wrap:wrap; font-size:.7rem;
   color:var(--muted); margin-top:.5rem; }
 .legend i { display:inline-block; width:20px; height:0; vertical-align:middle;
@@ -208,6 +213,17 @@ pre { background:var(--bg); border:1px solid var(--line); border-radius:8px;
   height:100vh; background:var(--panel2); border-left:1px solid var(--line);
   transition:right .25s; z-index:15; padding:1.2rem; overflow-y:auto; }
 .drawer.open { right:0; }
+/* wide screens: the page makes room for the drawer instead of sitting under
+   it, so the system map stays visible (and shrinks to fit) */
+@media (min-width: 1100px) {
+  .drawer { width:min(600px, 42vw); right:-640px; }
+  .drawer.open { right:0; }
+  main { transition:margin-right .25s; }
+  body.drawer-open main { margin-right:calc(min(600px, 42vw) + .5rem);
+    margin-left:0; max-width:none; }
+  body.drawer-open .mapwrap { overflow-x:hidden; }
+  body.drawer-open .mapwrap svg { min-width:0; }
+}
 .drawer h3 { color:var(--accent); }
 
 .tabs { display:flex; gap:.4rem; margin:.6rem 0; }

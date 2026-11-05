@@ -274,7 +274,7 @@ def test_sell_offers_all_and_half_of_what_the_account_holds(conn, monkeypatch):
     tg = FakeTg()
     push(conn, tg)
     texts = [b["text"] for b in buttons(tg.messages[0][2])]
-    assert "All (13 sh)" in texts and "Half (6 sh)" in texts   # whole shares
+    assert "All (13 sh ≈ 1,341 USD)" in texts and "Half (6 sh ≈ 619 USD)" in texts   # whole shares
     decide(conn, tg, ta.cb(nid(conn), "s", 1))
     sent = []
     p = json.loads(conn.execute("SELECT options_json FROM telegram_notices"
@@ -296,7 +296,7 @@ def test_suggestion_preselects_account_qty_and_trailing_floor(
     push(conn, tg)
     html, kb = tg.messages[0][1], tg.messages[0][2]
     texts = [b["text"] for b in buttons(kb)]
-    assert "✓ alpaca sim" in texts and "Suggested (4 sh)" in texts
+    assert "✓ alpaca sim" in texts and "Suggested (4 sh ≈ 413 USD)" in texts
     assert "Trailing floor 5.0%" in html
     decide(conn, tg, ta.cb(nid(conn), "s", 0))
     assert "SELL 4 CSCO" in tg.edits[-1][2] and "5.0%" in tg.edits[-1][2]

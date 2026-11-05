@@ -71,6 +71,8 @@ def desk_symbol(saxo_symbol):
     ticker, mic = saxo_symbol.rsplit(":", 1)
     for suffix, mics in MIC_BY_SUFFIX.items():
         if mic.lower() in mics:
+            if suffix == "HK" and ticker.isdigit():   # Saxo 00700 -> 0700.HK
+                ticker = ticker.lstrip("0").zfill(4)
             return ticker + (f".{suffix}" if suffix else "")
     return None
 
@@ -152,6 +154,8 @@ class SaxoBroker:
         if symbol in self._uic:
             return self._uic[symbol]
         ticker, suffix = split_symbol(symbol)
+        if suffix == "HK" and ticker.isdigit():   # Yahoo 0700.HK, Saxo 00700
+            ticker = ticker.zfill(5)
         wanted = [f"{ticker}:{mic}".lower() for mic in MIC_BY_SUFFIX[suffix]]
         found = self._req("GET", "/ref/v1/instruments/?Keywords="
                           f"{quote(ticker)}&AssetTypes=Stock&$top=50"

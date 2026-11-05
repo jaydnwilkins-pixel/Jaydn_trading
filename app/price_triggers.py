@@ -326,6 +326,41 @@ def cancel(conn, tid, *, actor="human", clock=time.time):
     return row_dict(get(conn, tid))
 
 
+def replace(conn, tid, body: dict, *, created_by: str, env=None,
+            clock=time.time):
+    """Edit an ACTIVE trigger: the new rule passes every check `create`
+    applies, and the old one is cancelled ("replaced by #N") in the same
+    transaction — so a refused edit changes nothing, and a trigger that fires
+    while you edit it is not silently re-armed (the edit is refused)."""
+    try:
+        tid = int(tid)
+    except (TypeError, ValueError):
+        raise TriggerError("id must be a number") from None
+    old = get(conn, tid)
+    if old is None:
+        raise TriggerError("unknown trigger", 404)
+    now = int(clock())
+    conn.execute("SAVEPOINT trigger_edit")
+    try:
+        cur = conn.execute(
+            "UPDATE price_triggers SET status='cancelled', status_reason="
+            "'edited', updated_at=? WHERE id=? AND status='active'",
+            (now, tid))
+        if cur.rowcount != 1:
+            raise TriggerError(f"trigger #{tid} is {old['status']}, not "
+                               "active — it can no longer be edited", 409)
+        new = create(conn, body, created_by=created_by, env=env, clock=clock)
+        conn.execute("UPDATE price_triggers SET status_reason=? WHERE id=?",
+                     (f"edited — replaced by #{new['id']}", tid))
+        conn.execute("RELEASE trigger_edit")
+    except BaseException:
+        conn.execute("ROLLBACK TO trigger_edit")
+        conn.execute("RELEASE trigger_edit")
+        raise
+    new["replaces"] = tid
+    return new
+
+
 def list_triggers(conn, *, status=None, ticker=None, since=None, limit=300):
     q, args = "SELECT * FROM price_triggers WHERE 1=1", []
     if status:

@@ -52,11 +52,28 @@ def build_market(env=None) -> "Market":
         primary = twelvedata.Client(
             env["TWELVEDATA_API_KEY"],
             all_exchanges=bool(env.get("TWELVEDATA_ALL_EXCHANGES")))
-    return Market(primary=primary)
+    fallback = None
+    if not env.get("CLAIRE_NO_SAXO_CHARTS"):
+        from . import saxo_chart
+        fallback = saxo_chart.chart
+    return Market(primary=primary, chart_fallback=fallback)
 
 
 def yahoo_symbol(ticker: str, exchange: str) -> str:
-    return ticker + SUFFIX.get(exchange, "")
+    suf = SUFFIX.get(exchange, "")
+    if suf and ticker.upper().endswith(suf.upper()):
+        return ticker              # already carries it ("APC.DE" on XETRA)
+    return ticker + suf
+
+
+def desk_ticker(ticker: str, exchange: str) -> str:
+    """The desk's own ticker: no Yahoo suffix (XETRA "APC", not "APC.DE").
+    A suffixed one was stored from search results and then got the suffix
+    twice ("APC.DE.DE"), so it never priced (2026-11-06)."""
+    suf = SUFFIX.get(exchange, "")
+    if suf and ticker.upper().endswith(suf.upper()) and len(ticker) > len(suf):
+        return ticker[:-len(suf)]
+    return ticker
 
 
 def currency_for(symbol: str) -> str:
@@ -91,7 +108,8 @@ class Market:
     throttled source degrades to a stale value rather than an error."""
 
     def __init__(self, *, _get=None, clock=time.time, cache_ttl=300,
-                 tv_quotes=None, fx_fallback=None, primary=None):
+                 tv_quotes=None, fx_fallback=None, primary=None,
+                 chart_fallback=None):
         self.clock = clock
         self.cache_ttl = cache_ttl
         self._cache = {}
@@ -101,10 +119,12 @@ class Market:
         self._tv_quotes = tv_quotes         # injected in tests
         self._fx_fallback = fx_fallback
         self._primary = primary             # keyed provider (twelvedata/ibkr)
+        self._chart_fallback = chart_fallback   # Saxo bars when Yahoo refuses
         self._pace_lock = __import__("threading").Lock()
         self._last_call = 0.0
         self._host_i = 0
         self._primary_calls: list = []      # timestamps, for the rate gate
+        self._yahoo_quiet_until = 0.0       # set when Yahoo refuses us
 
     PRIMARY_PER_MIN = 7                     # Twelve Data free tier allows 8
 
@@ -132,7 +152,24 @@ class Market:
                 time.sleep(wait)
             self._last_call = time.monotonic()
 
+    YAHOO_QUIET = 300                       # s: back off after a refusal
+
     def _http_get(self, url, params=None):
+        """Yahoo. After it refuses us (429 twice) we stop asking for a few
+        minutes — every further call would be refused too, and each one
+        cost ~3.5 s of a page load (the Watchlist took ~20 s)."""
+        wait = self._yahoo_quiet_until - time.monotonic()
+        if wait > 0:
+            raise MarketError(f"Yahoo is rate-limiting this machine — not "
+                              f"asking again for {int(wait // 60) + 1} min")
+        try:
+            return self._http_get_once(url, params)
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 429:
+                self._yahoo_quiet_until = time.monotonic() + self.YAHOO_QUIET
+            raise
+
+    def _http_get_once(self, url, params=None):
         if self._client is None:
             self._client = httpx.Client(headers=UA, timeout=15,
                                         follow_redirects=True)
@@ -278,7 +315,23 @@ class Market:
                                         symbol, range_, interval))
             except Exception:               # noqa: BLE001 — fall through
                 pass
-        return self._chart_yahoo(symbol, range_, interval)
+        fb = ("fbchart", symbol, range_, interval)
+        if self._chart_fallback is not None and \
+                self._fresh(fb, 900 if interval == "1d" else 300):
+            return self._cache[fb][1]       # recent Saxo bars: no Yahoo trip
+        try:
+            return self._chart_yahoo(symbol, range_, interval)
+        except Exception as yahoo_err:
+            if self._chart_fallback is None or symbol.endswith("=X") \
+                    or symbol.startswith("^"):
+                raise
+            try:
+                return self._cached(fb, 900 if interval == "1d" else 300,
+                                    lambda: self._chart_fallback(
+                                        symbol, range_, interval))
+            except Exception as e:
+                raise MarketError(f"no chart for {symbol}: Yahoo "
+                                  f"{str(yahoo_err)[:80]}; Saxo {e}") from e
 
     def _chart_yahoo(self, symbol: str, range_="6mo", interval="1d") -> dict:
         def fetch():

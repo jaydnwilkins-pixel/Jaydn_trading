@@ -153,6 +153,11 @@ MIGRATIONS = [
     " CHECK(NOT (mode = 'auto' AND broker = 'saxo_live')))",
     "CREATE INDEX IF NOT EXISTS idx_price_triggers_status"
     " ON price_triggers(status, ticker, exchange)",
+    # Mission Control warnings you have cleared (key → when). A cleared
+    # "failed runs" warning comes back only for NEW failures; any other
+    # comes back after a day if it is still true, or at once if it changes.
+    "CREATE TABLE IF NOT EXISTS dashboard_acks ("
+    " key TEXT PRIMARY KEY, acked_at INTEGER NOT NULL)",
 ]
 
 

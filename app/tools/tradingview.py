@@ -133,6 +133,29 @@ def metrics(symbols: list[str], *, _client=None) -> dict:
     return out
 
 
+LEVEL_COLS = ["name", "ATR", "SMA20", "SMA50", "High.1M", "Low.1M",
+              "high", "low"]
+
+
+def levels(symbol: str, *, _client=None) -> dict:
+    """Reference levels for the override/retry suggestion, in the same shape
+    as dashboards._levels — the fallback when Yahoo's daily bars are rate
+    limited. ATR is TradingView's 14-day ATR; the swing high/low is the past
+    month (~21 sessions) rather than exactly 20 bars."""
+    from .market import normalize_price
+    got = _scan_symbols([symbol], LEVEL_COLS, _client).get(symbol)
+    if not got or got[0].get("ATR") is None:
+        return {}
+    d, ccy = got
+    native = d.get("currency") or ccy
+    conv = lambda v: (round(float(normalize_price(v, native)[0]), 4)  # noqa: E731
+                      if v is not None else None)
+    return {"sma20": conv(d.get("SMA20")), "sma50": conv(d.get("SMA50")),
+            "atr14": conv(d.get("ATR")), "low20": conv(d.get("Low.1M")),
+            "high20": conv(d.get("High.1M")), "day_high": conv(d.get("high")),
+            "day_low": conv(d.get("low")), "src": "tradingview"}
+
+
 # ── full exchange listings (replaces the Yahoo screener + its crumb dance) ─
 LISTING_COLS = ["name", "description", "close", "change", "volume",
                 "market_cap_basic", "price_earnings_ttm", "RSI", "sector"]

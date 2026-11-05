@@ -130,21 +130,35 @@ class Watcher:
             pass
 
     def _reset_flat_rules(self, positions):
-        """A position that has gone flat forgets its high-water mark. A
-        re-bought stock used to inherit the old peak — possibly far above
-        the new entry — and alert on its first tick. Execute clears it too
-        when it opens from flat; this covers fills that arrive between."""
+        """A position that has gone flat loses its trailing alert: the shares
+        are gone, so there is nothing left to guard (CSCO, 2026-11-06: its
+        stop sold the shares and the alert sat on the Portfolio page as if
+        it still watched something). A re-buy gets a fresh rule seeded at
+        the new entry — never the old peak, which may sit far above it.
+
+        Kept while an ENTRY order for that name/account/side is still
+        working: execute writes the approval's own trailing % before the
+        fill, and deleting it in that gap would quietly reset it to 8%."""
         live = {(p["instrument"]["id"], p["account_id"], p["side"])
                 for p in positions}
         for r in self.conn.execute(
                 "SELECT id, instrument_id, account_id, side FROM price_alerts"
                 " WHERE rule='trail_pct' AND account_id IS NOT NULL"
-                " AND (peak_base IS NOT NULL OR fire_count_today > 0)"
                 ).fetchall():
-            if (r["instrument_id"], r["account_id"], r["side"]) not in live:
+            if (r["instrument_id"], r["account_id"], r["side"]) in live:
+                continue
+            side = "buy" if (r["side"] or 1) > 0 else "sell"
+            if self.conn.execute(
+                    "SELECT 1 FROM orders WHERE instrument_id=? AND"
+                    " account_id=? AND side=? AND leg IS NULL AND status IN"
+                    " ('pending_session','placed','partially_filled')",
+                    (r["instrument_id"], r["account_id"], side)).fetchone():
                 self.conn.execute(
                     "UPDATE price_alerts SET peak_base=NULL,"
                     " fire_count_today=0 WHERE id=?", (r["id"],))
+                continue
+            self.conn.execute("DELETE FROM price_alerts WHERE id=?",
+                              (r["id"],))
 
     def _track_peak(self, rule, price_base, pos) -> Decimal:
         """Ratchet the high-water mark — the whole point of a TRAILING stop.

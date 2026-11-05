@@ -33,7 +33,7 @@ EXCHANGE_RE = re.compile(r"[A-Z][A-Z0-9]{1,9}")
 # What a manual trade may ask its approval card to prefill. Suggestions,
 # never decisions: the human still sees, edits and approves every one, and
 # thesis_action re-checks whatever is finally sent.
-SUGGEST_KEYS = ("qty", "size_base", "broker", "trail_pct")
+SUGGEST_KEYS = ("qty", "size_base", "broker", "trail_pct", "order_type")
 BROKERS = ("alpaca", "saxo", "moomoo", "saxo_live")
 SOURCE_RE = re.compile(r"[a-z][a-z0-9_-]{0,23}")
 
@@ -70,6 +70,10 @@ def clean_suggested(s):
         if s["broker"] not in BROKERS:
             raise ValueError(f"suggested broker must be one of {BROKERS}")
         out["broker"] = s["broker"]
+    if s.get("order_type") is not None:
+        if s["order_type"] not in ("limit", "market"):
+            raise ValueError("suggested order_type must be limit or market")
+        out["order_type"] = s["order_type"]
     return out or None
 
 
@@ -198,7 +202,7 @@ class Desk:
             raise ValueError(f"run is still {origin['state']}")
         prior = self.conn.execute(
             "SELECT id, state FROM work_items WHERE override_of=?"
-            " AND state NOT IN ('rejected','expired','failed')",
+            " AND state NOT IN ('rejected','expired','failed','cancelled')",
             (origin_wi,)).fetchone()
         if prior:                       # one live override per verdict
             raise ValueError(f"already overridden by {prior['id']} "

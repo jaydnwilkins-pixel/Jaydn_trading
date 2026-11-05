@@ -617,6 +617,13 @@ def estimate(f, acct, size_base):
     return sh, sh * px
 
 
+def _num_or(v):
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def sell_choices(f, acct):
     held = float(f["held"].get(acct["id"], 0))
     if held <= 0:
@@ -697,7 +704,11 @@ def build_keyboard(nid, f, opts, base_url):
                 if row:
                     rows.append(row)
             elif f["side"] == "sell":
-                row = [{"text": f"{lab} ({qty_str(q)} sh)",
+                px = (_num_or(f["thesis"].get("entry_high")) or f.get("price")
+                      or 0) * ((f.get("fx") or {}).get(acct["ccy"]) or 0)
+                row = [{"text": f"{lab} ({qty_str(q)} sh" + (
+                            f" ≈ {num(q * px, 0)} {acct['ccy']})" if px
+                            else ")"),
                         "callback_data": cb(nid, "s", i)}
                        for i, (lab, q) in enumerate(sell_choices(f, acct))]
                 if row:
@@ -775,6 +786,12 @@ def stale_reason(conn, n, wi, opts, clock):
 def _claim(conn, wi, key, clock):
     """Take the right to send (wi, key). True if this caller should send."""
     now = int(clock())
+    # already claimed (the usual case, every 20 s pass): look first — an
+    # ignored INSERT still burns an AUTOINCREMENT id (1,660 ids for 16 rows)
+    have = conn.execute("SELECT status FROM telegram_notices WHERE"
+                        " work_item_id=? AND state_key=?", (wi, key)).fetchone()
+    if have is not None and have["status"] != "error":
+        return False
     cur = conn.execute(
         "INSERT OR IGNORE INTO telegram_notices (work_item_id, state_key,"
         " status, created_at, updated_at) VALUES (?,?,'sending',?,?)",

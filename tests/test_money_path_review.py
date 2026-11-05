@@ -592,8 +592,8 @@ def test_m7_rebought_position_starts_a_fresh_peak():
     w.execute(st)
     w.custodian.run_once()
     assert w.repo.position("acct", "NASDAQ:NVDA")[0] == 0
-    watcher.tick()                              # flat → peak forgotten
-    assert _trail_rows(w.conn)[0]["peak_base"] is None
+    watcher.tick()                              # flat → alert removed
+    assert _trail_rows(w.conn) == []
     w.market.price = Decimal("100")
     w.execute(w.state(wi="wi_3"))
     w.custodian.run_once()

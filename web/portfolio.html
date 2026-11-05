@@ -16,11 +16,16 @@
     paper book</span></h2>
   <div id="accounts"></div>
 
-  <h2>Closed in the last 30 days</h2>
+  <h2>Price alerts</h2>
+  <p class="muted small" style="margin-top:-.3rem">Safety alerts on positions you
+    hold: if the price falls this far from its best since you bought, Claire puts
+    a "should we sell?" review on Approvals — it never sells on its own. An alert
+    is removed when the position is sold.</p>
+  <div id="alerts"></div>
+
+  <h2>Closed in the last 30 days <a href="/trades" style="font-size:.8rem;font-weight:400">every trade, with the reason →</a></h2>
   <div id="closed"></div>
 
-  <h2>Price alerts</h2>
-  <div id="alerts"></div>
 </main>
 <script>
 let DATA = null, RANGE = {}, CHARTS = {}, clockTimer = null;
@@ -71,8 +76,10 @@ async function renderSaxoLive() {
         title="open its chart on the Saxo accounts page">
         <b>${esc(p.symbol)}</b></a><br><span class="muted">${esc(p.name || '')}</span></td>
       <td style="text-align:right">${fmt(p.amount, 0)}</td>
-      <td style="text-align:right">${fmt(p.avg_open_price, 2)}</td>
-      <td style="text-align:right">${fmt(p.current_price, 2)}</td>
+      <td style="text-align:right">${fmt(p.avg_open_price, p.avg_open_price < 1 ? 4 : 2)}</td>
+      <td style="text-align:right">${p.price_missing ? '<span class="warn" title="Saxo sent no price for this market">—</span>'
+        : fmt(p.current_price, p.current_price < 1 ? 4 : 2)}${p.price_src ? `<br><span class="muted" style="font-size:.7rem"
+        title="Saxo sends no live price for this exchange on this account">via ${esc(p.price_src)}</span>` : ''}</td>
       <td style="text-align:right">${sgn(p.pnl, p.currency)}</td>
       <td style="text-align:right">${p.pnl_pct == null ? '—'
         : sgn(p.pnl_pct).replace('</span>', '%</span>')}</td>
@@ -87,7 +94,7 @@ async function renderSaxoLive() {
       <b>${m(b.MarginAvailableForTrading)}</b></p>
     <table><thead><tr><th>Instrument</th><th style="text-align:right">Qty</th>
       <th style="text-align:right">Avg cost</th>
-      <th style="text-align:right">Price</th>
+      <th style="text-align:right">Current price</th>
       <th style="text-align:right">P/L</th><th style="text-align:right">P/L %</th>
       <th style="text-align:right">Allocation</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
@@ -129,11 +136,53 @@ function renderCols() {
       </div>
       ${items.map(posCard).join('')}</div>`;
   }).join('');
-  // charts load after the cards exist
-  Object.values(ex).flat().forEach(p => loadChart(p.instrument_id));
+  // a chart is drawn only for a stock you open (it used to draw every one)
+  Object.values(ex).flat().forEach(p => { if (SHOWN.has(p.instrument_id)) loadChart(p.instrument_id); });
+}
+/* which positions have their chart open — kept across refreshes */
+const SHOWN = new Set(JSON.parse(localStorage.getItem('pfCharts') || '[]'));
+function toggleChart(id) {
+  SHOWN.has(id) ? SHOWN.delete(id) : SHOWN.add(id);
+  localStorage.setItem('pfCharts', JSON.stringify([...SHOWN]));
+  renderCols();
+  sellRestore();                      // an open Sell form survives this too
 }
 
 function pct(v) { return v == null ? '—' : (v >= 0 ? '+' : '') + fmt(v) + '%'; }
+
+/* stop-loss / take-profit for one position: the orders resting at the broker
+   when there are any (they are what actually sells), else the plan's levels
+   (no order behind them — on Claire's paper sim nothing rests at a venue) */
+function protection(p) {
+  const m = p.market || {}, lv = p.levels || {}, cur = m.price, avg = lv.avg_cost_native;
+  const ccy = esc(p.currency || '');
+  const byLeg = k => {
+    const g = {};
+    (p.legs || []).filter(l => l.leg === k).forEach(l => { g[l.price] = (g[l.price] || 0) + l.qty; });
+    return Object.entries(g).map(([px, q]) => ({price: Number(px), qty: q}));
+  };
+  const row = (label, cls, items, plan, why) => {
+    const list = items.length ? items : plan != null ? [{price: plan, qty: p.qty, plan: true}] : [];
+    if (!list.length) return `<tr><td>${label}</td><td colspan="4" class="muted">none set${why ? ' — ' + why : ''}</td></tr>`;
+    return list.map((x, i) => {
+      const dist = cur ? (x.price - cur) / cur * 100 : null;
+      const pl = avg != null ? (x.price - avg) * x.qty : null;
+      return `<tr><td>${i ? '' : label}</td>
+        <td><b class="${cls}">${fmt(x.price, x.price < 1 ? 4 : 2)}</b> ${ccy}
+          <span class="muted">× ${fmt(x.qty, x.qty % 1 ? 4 : 0)}</span></td>
+        <td class="muted">${dist == null ? '' : (dist >= 0 ? '+' : '') + fmt(dist, 1) + '% from now'}</td>
+        <td>${pl == null ? '' : `<span class="${pl >= 0 ? 'ok' : 'bad'}">${pl >= 0 ? '+' : ''}${fmt(pl, 2)}</span> if hit`}</td>
+        <td class="muted" style="font-size:.7rem">${x.plan ? 'plan only — no order at the broker' : 'order at the broker'}</td></tr>`;
+    }).join('');
+  };
+  return `<table class="prot" style="width:100%;font-size:.78rem;margin:.3rem 0">
+    ${row('🛑 Stop-loss', 'bad', byLeg('stop'), lv.stop_loss)}
+    ${row('🎯 Take-profit', 'ok', byLeg('target'), lv.take_profit, 'nothing sells automatically on the way up')}
+    ${lv.alert != null ? `<tr><td>🔔 Trailing alert</td><td><b class="warn">${fmt(lv.alert)}</b> ${ccy}</td>
+      <td class="muted">${cur ? fmt((lv.alert - cur) / cur * 100, 1) + '% from now' : ''}</td>
+      <td colspan="2" class="muted" style="font-size:.7rem">${esc(lv.alert_rule || '')} — asks you, never sells</td></tr>` : ''}
+  </table>`;
+}
 
 function posCard(p) {
   const m = p.market || {}, lv = p.levels || {};
@@ -149,7 +198,7 @@ function posCard(p) {
       ? Math.max(0, Math.min(100,
           (lv.avg_cost_native - m.week52_low) / span * 100)) : null;
     bar = `<div class="rangebar"><i style="left:${at}%"
-      title="now ${fmt(m.price)}"></i>${cost != null
+      title="current price ${fmt(m.price)}"></i>${cost != null
       ? `<u style="left:${cost}%" title="your average cost"></u>` : ''}</div>
       <div class="rangelbl"><span>52w low ${fmt(m.week52_low)}</span>
       <span>${fmt(m.week52_high)} high</span></div>`;
@@ -162,9 +211,6 @@ function posCard(p) {
     broker: p.broker, account_id: p.account_id, label: p.account_id,
     held: p.qty, price: m.price, currency: m.currency || p.currency,
     whole: String(p.broker).startsWith('saxo'), source: 'portfolio'});
-  const legs = (p.legs || []).map(l => `${l.leg === 'stop' ? 'stop'
-    : 'target'} <b class="${l.leg === 'stop' ? 'bad' : 'ok'}">${fmt(l.price)}</b>
-    ×${fmt(l.qty, 4)}`).join(' · ');
   return `<div class="poscard ${p.is_open ? '' : 'closedmkt'}" id="pc-${esc(id)}">
     <div class="poshead">
       <div><span class="tk">${esc(p.ticker)}</span>
@@ -181,7 +227,7 @@ function posCard(p) {
       ? `<p class="warn" style="font-size:.75rem">price unavailable right now
          — the position and your cost basis below are still exact</p>`
       : `<div class="mgrid">
-        <div><span>last</span><b>${fmt(m.price)} ${m.currency || ''}</b></div>
+        <div><span>current price</span><b>${fmt(m.price)} ${m.currency || ''}</b></div>
         <div><span>today</span><b class="${(m.change_pct || 0) >= 0 ? 'ok'
           : 'bad'}">${pct(m.change_pct)}</b></div>
         <div><span>day range</span><b>${fmt(m.day_low)}–${fmt(m.day_high)}</b>
@@ -198,27 +244,23 @@ function posCard(p) {
       · fees ${fmt(p.commissions)}
       ${p.realized_base ? ` · realized <b class="${p.realized_base >= 0
         ? 'ok' : 'bad'}">${fmt(p.realized_base)}</b>` : ''}
-      ${lv.stop_loss ? `<br>thesis stop <b class="bad">${fmt(lv.stop_loss)}</b>`
-        : ''}${lv.take_profit ? ` · target <b class="ok">${
-        fmt(lv.take_profit)}</b>` : ''}${lv.alert ? ` · ${lv.alert_rule
-        } at <b class="warn">${fmt(lv.alert)}</b>` : ''}
-      ${legs ? `<br><span title="orders resting at the broker that will sell
-        this position if the price gets there">at the venue: ${legs}</span>`
-        : ''}
     </div>
+    ${protection(p)}
     ${p.qty > 0 ? `<div class="row" style="margin:.1rem 0 .4rem;gap:.5rem">
       ${sellButton(sk)}<span class="muted" style="font-size:.7rem">goes to
       Approvals first — nothing sells until you approve</span></div>
       <div id="sellbox-${esc(sk)}"></div>` : ''}
 
-    <div class="row" style="justify-content:space-between;margin-bottom:.3rem">
+    <button class="ghost" style="font-size:.75rem" onclick="toggleChart(${jsArg(id)})">${
+      SHOWN.has(id) ? '▴ hide chart' : '📈 show chart'}</button>
+    ${SHOWN.has(id) ? `<div class="row" style="justify-content:space-between;margin:.3rem 0">
       <div class="tabs" style="margin:0">${RANGES.map(([r, lbl]) =>
         `<button class="${rng === r ? 'on' : ''}"
           onclick="setRange(${jsArg(id)},${jsArg(r)})">${lbl}</button>`).join('')}</div>
       <span class="muted" style="font-size:.68rem" id="src-${esc(id)}"></span>
     </div>
     <div id="ch-${esc(id)}" style="min-height:150px"><p class="muted">loading
-      chart…</p></div>
+      chart…</p></div>` : ''}
   </div>`;
 }
 
@@ -339,13 +381,9 @@ async function acct(id, action) {
 
 /* positions appear and disappear as trades fill — SSE tells us when */
 function connectSSE() {
-  const es = new EventSource('/api/events');
-  es.onmessage = ev => {
-    try {
-      const e = JSON.parse(ev.data);
-      if (['executing', 'done'].includes(e.to_state)) { CHARTS = {}; refresh(); }
-    } catch {}
-  };
+  liveEvents(e => {
+    if (['executing', 'done'].includes(e.to_state)) { CHARTS = {}; refresh(); }
+  });
 }
 refresh(); connectSSE(); setInterval(refresh, 60000);
 window.addEventListener('resize', () => {

@@ -2310,7 +2310,18 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 return {"error": "unknown work item"}
             sym = yahoo_symbol(r["ticker"], r["exchange"] or "NASDAQ")
             out = {"ticker": r["ticker"], "symbol": sym,
-                   "currency": r["currency"]}
+                   "currency": r["currency"],
+                   # board lot (mirrors wiring.prepare): a buy smaller than
+                   # one lot is refused after approval, so the card warns
+                   "lot": 100 if r["exchange"] == "SGX" else 1}
+            fx = {}
+            for (ccy,) in conn.execute(
+                    "SELECT DISTINCT base_currency FROM broker_accounts"):
+                try:
+                    fx[ccy] = float(market.fx(r["currency"] or ccy, ccy))
+                except Exception:               # noqa: BLE001 — hint only
+                    pass
+            out["fx"] = fx          # 1 unit of the stock's ccy in each account ccy
             try:
                 q = market.quote(sym)
                 out["quote"] = {k: q.get(k) for k in (

@@ -188,9 +188,14 @@ function updRetry(id) {
   if (buy && v.size_base && v.entry) {
     const acct = (DATA.accounts || []).find(a => a.broker === v.broker) || {};
     const px = p || v.entry;
-    const sh = acct.whole_shares ? Math.floor(v.size_base / px)
-      : Math.floor(v.size_base / px * 10) / 10;
-    parts.push(`≈ <b>${sh} shares</b> at ~${fmt(px, 2)}`);
+    const c = CTX[id] || {}, lot = c.lot || 1, rate = (c.fx || {})[acct.ccy] || 1;
+    const pxb = px * rate;                    // price in the account's currency
+    const sh = lot > 1 ? Math.floor(v.size_base / pxb / lot) * lot
+      : acct.whole_shares ? Math.floor(v.size_base / pxb)
+      : Math.floor(v.size_base / pxb * 10) / 10;
+    parts.push(sh > 0 ? `≈ <b>${sh} shares</b> at ~${fmt(px, 2)}`
+      : `<b class="bad">too small for one ${lot > 1 ? lot + '-share lot' : 'share'}` +
+        ` — need at least ~${fmt(Math.ceil(pxb * lot), 0)} ${esc(acct.ccy || '')}</b>`);
   }
   hint.innerHTML = parts.filter(Boolean).join('<br>');
 }
@@ -855,6 +860,17 @@ async function act(id, action, token, sell) {
     if (sell) body.qty = Number(document.getElementById('qty-' + id).value);
     else body.size_base = Number(document.getElementById('size-' + id).value);
     const a = DATA.cards.find(x => x.id === id);
+    if (!sell) {                             // refuse up front, not after approval
+      const c = CTX[id] || {}, lot = c.lot || 1, px = (c.quote || {}).price;
+      const ac = DATA.accounts.find(x => x.broker === body.broker) || {};
+      const need = px ? px * ((c.fx || {})[ac.ccy] || 1) * lot : 0;
+      if (need && body.size_base < need) {
+        alert(`${a.ticker}: ${body.size_base} ${ac.ccy || ''} is less than one ` +
+          `${lot > 1 ? lot + '-share lot' : 'share'} (~${Math.ceil(need)} ${ac.ccy || ''}). ` +
+          'Raise the size.');
+        return;
+      }
+    }
     const ot = document.getElementById('otype-' + id);
     if (ot) body.order_type = ot.value;
     const st = document.getElementById('lvstop-' + id), tg = document.getElementById('lvtgt-' + id);

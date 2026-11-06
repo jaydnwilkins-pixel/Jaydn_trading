@@ -328,7 +328,11 @@ def recommendations(exchange: str, count: int = 30, *, _client=None) -> dict:
                    # liquidity floor: no SPAC-unit / micro-cap noise at the top
                    {"left": "volume", "operation": "greater", "right": 500_000},
                    {"left": "market_cap_basic", "operation": "greater",
-                    "right": 500_000_000}]
+                    "right": 500_000_000},
+                   # shares only: depositary receipts (SGX:HBND, a Bank of
+                   # China SDR) have no Yahoo/Saxo chart and error on click
+                   {"left": "typespecs", "operation": "has",
+                    "right": ["common"]}]
         if with_exchange_filter:
             filters.append({"left": "exchange", "operation": "equal",
                             "right": code})

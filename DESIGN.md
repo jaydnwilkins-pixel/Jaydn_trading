@@ -1285,7 +1285,7 @@ custodian places it, not only when it was approved:
 | # | Lock | Where | Who can change it |
 |---|------|-------|-------------------|
 | 1 | **Enabled**: `CLAIRE_LIVE_TRADING=enabled` | `etc/claire.env` (0600), read at process start | someone with a shell on this machine; restart required |
-| 2 | **Armed** | `live_trading` row in desk.db | ARM: typed phrase `ARM LIVE TRADING`, either `bin/claire live arm` (interactive terminal) or `POST /api/live-arm` from a paired browser **on loopback only** (Mission Control / Orders switch). DISARM: anyone, any time (`bin/claire live disarm`, Mission Control / Orders / Approvals, the custodian automatically) |
+| 2 | **Armed** | `live_trading` row in desk.db | ARM: typed phrase `ARM LIVE TRADING`, either `bin/claire live arm` (interactive terminal) or `POST /api/live-arm` from a paired browser **on loopback only** (the Orders page's Live trading side panel). DISARM: anyone, any time (`bin/claire live disarm`, the Orders side panel, Approvals, the custodian automatically) |
 | 3 | **Human-approved** | the §10 token gate | the approval names broker `saxo_live` AND carries `confirm_live: "LIVE"`, typed on the card; refused unless armed |
 | 4 | **Within live limits** | `live_trading.limits`, account base ccy | `bin/claire live limits k=v`, or the Orders page (`POST /api/live-limits`, any paired device, applied at once) — every change logged to `live_trading_events` with before/after |
 
@@ -1301,11 +1301,15 @@ are unaffected.
 
 ### 22.2 Live limits (defaults; deliberately small)
 
-| limit | default | meaning |
-|---|---|---|
-| `max_order_base` | 1000 | one order's notional, account base currency |
-| `max_orders_per_day` | 2 | orders that actually reached Saxo, per Singapore day |
-| `max_daily_notional_base` | 2000 | sum of today's placed live notionals |
+Shown in the UI as **spending caps**, always with their unit: two are money
+in the live account's base currency, one is a count of buys — none is a
+number of shares. ("Limit price" in the UI always means a per-share price.)
+
+| limit | UI label | default | meaning |
+|---|---|---|---|
+| `max_order_base` | Max per buy | 1000 | one buy's cost (shares × limit price), account base currency |
+| `max_orders_per_day` | Max buys per day | 2 | buy orders that actually reached Saxo, per Singapore day |
+| `max_daily_notional_base` | Max spent per day | 2000 | sum of today's placed live buys, account base currency |
 
 The three limits apply to **entries only**. A sell that reduces a position
 the desk opened is exempt from all three and is not logged against the day's
@@ -1411,3 +1415,38 @@ dashboard key even for GET.
 5. To stop: `bin/claire live disarm` or the button on Approvals. To remove
    entirely: delete the env flag and restart.
 
+
+## 23. The maintainer (app/maintenance.py)
+
+A daily job (`maintenance`, 06:30 local, editable on Agents & Schedule) plus
+a **Run maintenance now** button on the **Maintenance** page (`/maintenance`).
+Same split as the rest of the desk: **plain code checks and cleans; the
+`maintainer` agent only writes the note.** The agent gets the results as
+text, returns text, holds no tools, and is told it cannot change anything.
+If its call fails, the run still completes and is recorded without a note.
+
+**Checks:** dashboards answering, custodian and watcher freshness and their
+warnings, per-account broker sync (`broker_sync`, §12), every schedule's
+last result, disk space, backups, Saxo sign-ins, and sizes of everything
+that grows (desk.db, checkpoints.db, logs, narratives, the agents' Claude
+transcripts, backups), plus leftover files nothing uses any more.
+
+**Housekeeping** (retention constants at the top of the module):
+
+| what | rule |
+|---|---|
+| `var/log/*.log` | over 5 MB → gzip copy + truncate in place (the services hold them open with `>>`); newest 7 kept |
+| backups | `VACUUM INTO var/backups/desk-YYYYMMDD.db` once a day; newest 7 kept (same disk — not off-site protection) |
+| checkpoints.db | threads of work items in a terminal state for 30+ days deleted; anything running or awaiting approval is never touched |
+| service_health | rows older than 30 days, keeping the latest per service |
+| narratives | runs archived 30+ days ago → `var/narratives-archive/<wi>.tar.gz` (verified before the folder is removed); `Narratives.read/list` fall back to the archive |
+| Claude SDK transcripts | `~/.claude/projects/<var/sdk slug>/*.jsonl` older than 30 days |
+| maintenance_runs | newest 90 |
+
+**Never deleted:** orders, executions, lots, cash, events (the audit trail),
+work items, agent_runs (cost metering), live-trading logs.
+
+**Reporting:** each run is a `maintenance_runs` row (status ok/warn/bad,
+headline, checks, actions, note). A run that turns **bad** sends one
+Telegram alert (on the change, not every day). claire-api also stops
+logging the dashboards' `GET /status` polls, which were 99% of api.log.

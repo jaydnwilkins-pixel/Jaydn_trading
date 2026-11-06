@@ -1,6 +1,7 @@
-// Live (real-money) trading switch, limits and metrics — DESIGN.md §22.
-// Shared by Mission Control (the switch) and Orders (switch + metrics +
-// editable limits). Turning OFF works from any paired device; turning ON
+// Live (real-money) trading switch, spending caps and usage — DESIGN.md §22.
+// Shown in the Orders page's side panel. Wording rule: a "cap" is always
+// money (account currency) or a count of orders, never shares; "limit price"
+// is always a per-share price. Turning OFF works from any paired device; turning ON
 // only from a browser on the desk's own PC, with the typed phrase — the
 // server enforces both, this file only shows what is possible.
 
@@ -31,7 +32,7 @@ function liveStateLine(st) {
 }
 
 // The switch: a big on/off control plus why ON may be unavailable.
-function liveSwitchHtml(st, {compact = false} = {}) {
+function liveSwitchHtml(st) {
   const on = st.armed;
   const btn = on
     ? `<button class="reject" onclick="liveDisarm()">Turn OFF live trading</button>`
@@ -46,24 +47,22 @@ function liveSwitchHtml(st, {compact = false} = {}) {
       display:flex;gap:1rem;align-items:center;flex-wrap:wrap;justify-content:space-between">
     <div><div>Live trading (Saxo, real money): ${liveStateLine(st)}</div>
       ${armedAt}${last}${why}
-      ${compact ? '' : `<div class="muted small">Even when ON, every live trade still needs your approval with LIVE typed, and limit orders only.</div>`}
+      <div class="muted small">Even when ON, every live trade still needs your approval with LIVE typed, and every order has a limit price (no market orders).</div>
     </div>
     <div>${btn}</div></div>`;
 }
 
 async function liveArm() {
   const st = LIVE || {};
-  const lim = st.limits || {};
   const typed = prompt(
     `⚠ TURN ON REAL-MONEY TRADING on Saxo.\n\n` +
-    `Limits: ${lim.max_order_base} per order · ${lim.max_orders_per_day} orders/day · ` +
-    `${lim.max_daily_notional_base}/day (${liveCcy()}).\n` +
+    `Spending caps (buys only): ${liveCapsLine(st.limits || {})}.\n` +
     `Each trade still needs your approval, typing LIVE.\n\n` +
     `Type exactly:  ${st.arm_phrase}`);
   if (typed === null) return;
   try {
     LIVE = await api('/api/live-arm', {phrase: typed});
-    toast('live trading is ON — armed');
+    toast('live trading is ON');
   } catch (e) { toast(e.message, false); }
   liveRefresh();
 }
@@ -77,78 +76,97 @@ async function liveDisarm() {
   liveRefresh();
 }
 
-// pages define liveRefresh() to re-render after a change
+// pages define window.onLiveChange to re-render after a change
 function liveRefresh() { if (window.onLiveChange) window.onLiveChange(); }
 
-// ── Orders page: metrics + editable limits ──────────────────────────────
-const LIMIT_LABELS = {
-  max_order_base: ['Per order', 'largest single buy'],
-  max_orders_per_day: ['Orders per day', 'live buys placed per Singapore day'],
-  max_daily_notional_base: ['Per day total', 'sum of today\'s live buys'],
-};
+// ── spending caps: what each one IS, with its unit ──────────────────────
+// money caps are in the live account's currency; the order cap is a count
+function liveCaps() {
+  const ccy = liveCcy() || 'account currency';
+  return {
+    max_order_base: {label: 'Max per buy', unit: ccy, money: true,
+      hint: `money: the most one live buy may cost (shares × limit price), in ${ccy}`},
+    max_orders_per_day: {label: 'Max buys per day', unit: 'buys', money: false,
+      hint: 'a count of buy orders (not shares), per Singapore day'},
+    max_daily_notional_base: {label: 'Max spent per day', unit: ccy, money: true,
+      hint: `money: the total cost of all live buys today, in ${ccy}`},
+  };
+}
+function liveCapValue(k, v) {
+  const c = liveCaps()[k];
+  return c && c.money ? `${fmt(v)} ${esc(c.unit)}` : `${esc(v)} ${c ? c.unit : ''}`;
+}
+function liveCapsLine(lim) {
+  const ccy = liveCcy();
+  return `max ${fmt(lim.max_order_base)} ${ccy} per buy · max ${lim.max_orders_per_day} buys a day · ` +
+         `max ${fmt(lim.max_daily_notional_base)} ${ccy} of buys a day`;
+}
 
 function liveMetricsHtml(st) {
-  const m = st.metrics || {}, lim = st.limits || {}, ccy = liveCcy();
+  const m = st.metrics || {}, lim = st.limits || {}, caps = liveCaps();
   const accts = Object.entries(m.accounts || {});
   const usage = accts.length ? accts.map(([id, a]) => {
+    const cur = esc(a.currency);
     const pctN = lim.max_daily_notional_base ? Math.min(100, 100 * a.notional_today / lim.max_daily_notional_base) : 0;
     return `<div class="statstrip">
-      <div class="stat"><span>account</span>${esc(id)} (${esc(a.currency)})</div>
-      <div class="stat"><span>buys today</span>${a.orders_today} of ${esc(lim.max_orders_per_day)} · ${a.orders_left} left</div>
-      <div class="stat"><span>spent today</span>${fmt(a.notional_today)} of ${fmt(lim.max_daily_notional_base)} · ${fmt(a.notional_left)} left</div>
-      <div class="stat"><span>exits today</span>${a.exits_today} <span class="muted" style="text-transform:none;letter-spacing:0">(not capped)</span></div>
-      <div class="stat"><span>all time</span>${a.entries_all_time} buys · ${fmt(a.notional_all_time)}</div>
+      <div class="stat"><span>account</span>${esc(id)} (${cur})</div>
+      <div class="stat"><span>buys today</span>${a.orders_today} of max ${esc(lim.max_orders_per_day)} · ${a.orders_left} left</div>
+      <div class="stat"><span>spent today</span>${fmt(a.notional_today)} of max ${fmt(lim.max_daily_notional_base)} ${cur} · ${fmt(a.notional_left)} ${cur} left</div>
+      <div class="stat"><span>sells today</span>${a.exits_today} <span class="muted" style="text-transform:none;letter-spacing:0">(never capped)</span></div>
+      <div class="stat"><span>all time</span>${a.entries_all_time} buys · ${fmt(a.notional_all_time)} ${cur}</div>
     </div>
-    <div style="height:6px;background:var(--line);border-radius:3px;max-width:520px;margin:-.4rem 0 .8rem">
+    <div style="height:6px;background:var(--line);border-radius:3px;margin:-.4rem 0 .8rem">
       <div style="height:6px;width:${pctN}%;background:${pctN >= 90 ? 'var(--bad)' : 'var(--warn)'};border-radius:3px"></div></div>`;
   }).join('') : '<p class="muted small">No live account yet, so nothing to track. Usage appears here after <code>bin/claire live setup</code>.</p>';
 
-  const limits = `<table class="ot" style="max-width:640px"><tr><th>Limit</th><th>Now</th><th>New value</th><th></th></tr>
-    ${Object.entries(LIMIT_LABELS).map(([k, [label, hint]]) => `<tr>
-      <td>${label}<div class="muted small">${hint}</div></td>
-      <td>${k === 'max_orders_per_day' ? esc(lim[k]) : fmt(lim[k]) + ' ' + esc(ccy)}</td>
-      <td><input id="lim-${k}" type="number" min="${k === 'max_orders_per_day' ? 1 : 0.01}"
-        step="${k === 'max_orders_per_day' ? 1 : 'any'}" value="${esc(lim[k])}" style="width:8rem"></td>
-      <td></td></tr>`).join('')}
+  const capsTable = `<table class="ot"><tr><th>Cap</th><th>Now</th><th>New value</th></tr>
+    ${Object.entries(caps).map(([k, c]) => `<tr>
+      <td>${c.label}<div class="muted small">${esc(c.hint)}</div></td>
+      <td>${liveCapValue(k, lim[k])}</td>
+      <td><input id="lim-${k}" type="number" min="${c.money ? 0.01 : 1}"
+        step="${c.money ? 'any' : 1}" value="${esc(lim[k])}" style="width:7rem">
+        <span class="muted small">${esc(c.unit)}</span></td></tr>`).join('')}
     </table>
-    <button onclick="liveSaveLimits()" style="margin-top:.4rem">Save limits</button>
-    <span class="muted small">Changes apply at once to the next live buy. Exits (selling what the desk bought) are never capped.</span>`;
+    <button onclick="liveSaveLimits()" style="margin-top:.4rem">Save caps</button>
+    <div class="muted small" style="margin-top:.3rem">Caps apply to <b>buys only</b>, from the next live buy. Selling shares the desk bought is never capped.</div>`;
 
   const orders = (m.orders || []).length ? `<table class="ot"><tr><th>When</th><th>Side</th><th>Instrument</th>
-      <th>Shares</th><th>Limit</th><th>Status</th></tr>
+      <th class="num">Shares</th><th class="num">Limit price<br><span class="muted small">per share</span></th><th>Status</th></tr>
       ${m.orders.map(o => `<tr><td class="small">${liveWhen(o.placed_at || o.created_at)}</td>
-        <td>${esc(o.side)}</td><td>${esc(o.instrument_id)}</td><td>${fmt(o.qty, 0)}</td>
-        <td>${livePx(o.limit_price)}</td><td>${esc(o.status)}</td></tr>`).join('')}</table>`
+        <td>${esc(o.side)}</td><td>${esc(o.instrument_id)}</td><td class="num">${fmt(o.qty, 0)}</td>
+        <td class="num">${livePx(o.limit_price)}</td><td>${esc(o.status)}</td></tr>`).join('')}</table>`
     : '<p class="muted small">No live orders yet.</p>';
 
+  const EVENT = {armed: 'turned ON', disarmed: 'turned OFF', limits: 'caps changed'};
   const events = (m.events || []).length ? `<table class="ot"><tr><th>When</th><th>What</th><th>By</th><th>Detail</th></tr>
       ${m.events.map(e => { let p = {}; try { p = JSON.parse(e.payload || '{}'); } catch (_) {}
         const detail = e.event === 'limits'
           ? Object.keys(p.after || {}).filter(k => (p.before || {})[k] !== p.after[k])
-              .map(k => `${(LIMIT_LABELS[k] || [k])[0]}: ${p.before[k]} → ${p.after[k]}`).join(' · ')
-          : (p.reason || '');
-        return `<tr><td class="small">${liveWhen(e.ts)}</td><td>${esc(e.event)}</td>
-          <td class="small">${esc(e.actor)}</td><td class="small">${esc(detail)}</td></tr>`; }).join('')}</table>`
-    : '<p class="muted small">The switch has never been turned on or off, and the limits have never been changed.</p>';
+              .map(k => `${(caps[k] || {label: k}).label}: ${liveCapValue(k, p.before[k])} → ${liveCapValue(k, p.after[k])}`).join(' · ')
+          : esc(p.reason || '');
+        return `<tr><td class="small">${liveWhen(e.ts)}</td><td>${esc(EVENT[e.event] || e.event)}</td>
+          <td class="small">${esc(e.actor)}</td><td class="small">${detail}</td></tr>`; }).join('')}</table>`
+    : '<p class="muted small">Live trading has never been turned on or off, and the caps have never been changed.</p>';
 
   return `${liveSwitchHtml(st)}
-    <h3 style="margin-top:.8rem">Today's allowance</h3>${usage}
-    <h3>Limits</h3>${limits}
+    <h3 style="margin-top:.8rem">Today</h3>${usage}
+    <h3>Spending caps</h3>${capsTable}
     <h3 style="margin-top:1rem">Live orders</h3>${orders}
-    <h3 style="margin-top:1rem">Switch &amp; limit history</h3>${events}`;
+    <h3 style="margin-top:1rem">History</h3>${events}`;
 }
 
 async function liveSaveLimits() {
-  const lim = (LIVE && LIVE.limits) || {}, changed = {};
-  for (const k of Object.keys(LIMIT_LABELS)) {
+  const lim = (LIVE && LIVE.limits) || {}, caps = liveCaps(), changed = {};
+  for (const k of Object.keys(caps)) {
     const v = Number(document.getElementById('lim-' + k).value);
-    if (!(v > 0)) { toast(`${LIMIT_LABELS[k][0]} must be a positive number`, false); return; }
+    if (!(v > 0)) { toast(`${caps[k].label} must be more than 0`, false); return; }
+    if (!caps[k].money && !Number.isInteger(v)) { toast(`${caps[k].label} must be a whole number of buys`, false); return; }
     if (v !== Number(lim[k])) changed[k] = v;
   }
   if (!Object.keys(changed).length) { toast('no changes'); return; }
   try {
     LIVE = await api('/api/live-limits', {limits: changed});
-    toast('live limits saved ✓');
+    toast('spending caps saved ✓');
   } catch (e) { toast(e.message, false); }
   liveRefresh();
 }

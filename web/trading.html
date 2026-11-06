@@ -202,7 +202,7 @@ function nextStep(r) {
           ? `<b>Held by Claire until the market opens</b>, then sent to ${esc(o.account)}: `
           : `Order working at ${esc(o.account)}: `) +
         `${esc(o.side)} ${shares(o.qty)}` +
-        (o.limit_price != null ? `, limit ${money(o.limit_price, s.currency)}` : '') +
+        (o.limit_price != null ? `, limit price ${money(o.limit_price, s.currency)}/share` : '') +
         (o.stop_loss != null ? `, stop ${money(o.stop_loss, s.currency)}` : '') +
         (o.take_profit != null ? `, target ${money(o.take_profit, s.currency)}` : '') +
         (o.status === 'partially_filled' ? ' (part filled)' : '') + '.' +
@@ -251,7 +251,7 @@ async function orderCancel(id) {
   const where = o.status === 'pending_session'
     ? 'Claire is still holding it — nothing has been sent.'
     : 'It will be cancelled at ' + (o.account || 'the broker') + ', with its stop and target.';
-  if (!confirm(`Cancel the ${esc(o.side)} of ${shares(o.qty)} ${esc(r.ticker)} at limit ${esc(o.limit_price)}?\n\n${where}`)) return;
+  if (!confirm(`Cancel the ${esc(o.side)} of ${shares(o.qty)} ${esc(r.ticker)} at a limit price of ${esc(o.limit_price)} per share?\n\n${where}`)) return;
   try {
     await api('/api/order-control', {work_item_id: id, action: 'cancel'});
     toast(r.ticker + ' order cancelled ✓');
@@ -269,10 +269,10 @@ function orderEditOpen(id) {
     <p class="muted small">${atVenue
       ? 'This order is already at the broker. Saving <b>cancels it there</b> and puts a new order with these levels on the Approvals page for you to approve.'
       : 'Claire is still holding this order (it is sent when the market opens), so it is changed in place — no new approval needed.'}
-      Saxo refuses a stop or target more than 25% from the limit.</p>
+      Saxo refuses a stop or target more than 25% from the limit price.</p>
     <div class="row" style="gap:.5rem;flex-wrap:wrap">
       <label>shares <input id="oe-qty" type="number" min="1" step="1" style="width:80px" value="${esc(o.qty)}"></label>
-      <label>limit <input id="oe-entry" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.limit_price ?? '')}"></label>
+      <label>limit price <span class="muted small">(per share)</span> <input id="oe-entry" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.limit_price ?? '')}"></label>
       <label>stop <input id="oe-stop" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.stop_loss ?? '')}"></label>
       <label>target <input id="oe-target" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.take_profit ?? '')}"></label>
       <button onclick="orderEditSend(${jsArg(id)})">Save</button>
@@ -290,11 +290,11 @@ async function orderEditSend(id) {
   if (!v.entry) { msg.innerHTML = '<b class="bad">enter a limit price</b>'; return; }
   const buy = o.side === 'buy';
   if (v.stop != null && (buy ? v.stop >= v.entry : v.stop <= v.entry)) {
-    msg.innerHTML = `<b class="bad">the stop must be ${buy ? 'below' : 'above'} the limit</b>`; return; }
+    msg.innerHTML = `<b class="bad">the stop must be ${buy ? 'below' : 'above'} the limit price</b>`; return; }
   if (v.target != null && (buy ? v.target <= v.entry : v.target >= v.entry)) {
-    msg.innerHTML = `<b class="bad">the target must be ${buy ? 'above' : 'below'} the limit</b>`; return; }
+    msg.innerHTML = `<b class="bad">the target must be ${buy ? 'above' : 'below'} the limit price</b>`; return; }
   if (o.status !== 'pending_session' && !confirm(
-      `Cancel the ${esc(r.ticker)} order at the broker and send a new one (limit ${esc(v.entry)}) to Approvals?`)) return;
+      `Cancel the ${esc(r.ticker)} order at the broker and send a new one (limit price ${esc(v.entry)} per share) to Approvals?`)) return;
   try {
     const out = await api('/api/order-control', {work_item_id: id, action: 'edit', ...v});
     msg.innerHTML = out.new_work_item_id

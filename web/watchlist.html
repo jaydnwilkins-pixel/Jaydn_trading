@@ -355,7 +355,7 @@ function buyForm(r) {
         <option value="amt">amount</option></select>
       <input id="b-qty" type="number" min="0" step="any" style="width:90px" placeholder="shares" oninput="updBuy()">
       <input id="b-amt" type="number" min="0" step="0.01" style="width:110px;display:none" placeholder="amount" oninput="updBuy()">
-      <label>limit <input id="b-px" type="number" min="0" step="any" style="width:100px" oninput="updBuy()"></label>
+      <label>limit price <span class="muted small">(per share)</span> <input id="b-px" type="number" min="0" step="any" style="width:100px" oninput="updBuy()"></label>
       <button type="button" class="ghost" onclick="buyLast()">use last price</button>
     </div>
     <div class="row" style="gap:.5rem;margin-top:.4rem">
@@ -451,7 +451,7 @@ async function buySend() {
   if (err) { msg.innerHTML = `<b class="bad">${esc(err)}</b>`; return; }
   const a = acctOf(v.broker);
   const size = v.qty ? `${v.qty} shares` : `${v.amount} ${a.ccy || ''}`;
-  if (!confirm(`Send to approval: BUY ${size} of ${v.r.ticker} at limit ${v.entry}, ` +
+  if (!confirm(`Send to approval: BUY ${size} of ${v.r.ticker} at a limit price of ${v.entry}, ` +
       `stop ${v.stop}${v.target ? ', target ' + v.target : ''} on ${a.label || v.broker}?` +
       '\n\nNothing is bought until you approve it on the Approvals page.')) return;
   try {
@@ -508,7 +508,7 @@ function triggerForm(r) {
       <input id="t-px" type="number" min="0" step="any" style="width:100px" placeholder="price" oninput="updTrig()">
     </div>
     <div class="row" style="gap:.5rem;margin-top:.4rem">
-      <label>order limit <input id="t-lim" type="number" min="0" step="any" style="width:100px"
+      <label>limit price <span class="muted small">(per share)</span> <input id="t-lim" type="number" min="0" step="any" style="width:100px"
         placeholder="= trigger" oninput="updTrig()"></label>
       <span id="t-levels" style="display:contents">
         <label id="t-stoplbl">stop <input id="t-stop" type="number" min="0" step="any" style="width:100px" oninput="updTrig()"></label>
@@ -642,16 +642,16 @@ function updTrig() {
       it will fire at the next check while the market is open.</b>`);
   }
   if (v.trig && v.dir === 'buy' && v.condition === 'gte' && v.limit <= v.trig)
-    parts.push('<span class="muted">Breakout buy: a limit at the trigger may not fill once the price is above it — consider a limit a little higher.</span>');
+    parts.push('<span class="muted">Breakout buy: a limit price at the trigger may not fill once the price is above it — consider a limit price a little higher.</span>');
   if (v.mode === 'auto') parts.push(`<b class="warn">Automatic:</b> when it hits, the desk
     approves this order for you on ${esc(a.label || v.broker)} — the usual checks (price band,
-    cash, risk limits${a.whole_shares ? ', whole shares' : ''}) still apply.`);
+    cash, the account's risk caps${a.whole_shares ? ', whole shares' : ''}) still apply.`);
   {
     const ccy = esc((r.quote || {}).currency || '');
     if (v.qty && v.limit) parts.push(`≈ <b>${fmt(v.qty * v.limit, 2)} ${ccy}</b>
-      <span class="muted">(${fmt(v.qty, 4)} shares × limit ${fmt(v.limit, 2)}, before fees)</span>`);
+      <span class="muted">(${fmt(v.qty, 4)} shares × limit price ${fmt(v.limit, 2)}, before fees)</span>`);
     else if (v.amount && v.limit) parts.push(`≈ <b>${fmt(Math.floor(v.amount / v.limit), 0)} shares</b>
-      <span class="muted">for ${fmt(v.amount, 2)} at limit ${fmt(v.limit, 2)}</span>`);
+      <span class="muted">for ${fmt(v.amount, 2)} at a limit price of ${fmt(v.limit, 2)}</span>`);
   }
   if (!r.is_open) parts.push(`<span class="muted">Market closed — it is checked from the next open (${esc(r.next_open || '?')}).</span>`);
   hint.innerHTML = parts.filter(Boolean).join('<br>');
@@ -663,7 +663,7 @@ async function trigCreate() {
   const verb = {buy: 'BUY', exit: 'SELL', short: 'SHORT-SELL'}[v.kind];
   const size = v.qty ? `${v.qty} shares` : `${v.amount} ${a.ccy || ''} worth`;
   const what = `${verb} ${size} of ${v.r.ticker} when the price is ${COND[v.condition]} ${v.trig}` +
-    ` (limit ${v.limit}${v.stop ? ', stop ' + v.stop : ''}${v.target ? ', target ' + v.target : ''})` +
+    ` (limit price ${v.limit}${v.stop ? ', stop ' + v.stop : ''}${v.target ? ', target ' + v.target : ''})` +
     ` on ${a.label || v.broker}, for ${v.days} days.`;
   const how = v.mode === 'auto'
     ? '\n\nAUTOMATIC: you are approving this order NOW. When the price hits, the desk ' +

@@ -435,7 +435,7 @@ class SaxoBroker:
         acts.sort(key=lambda a: (a.get("ActivityTime") or "",
                                  int(a.get("LogId") or 0)))
         fills, prev_filled, prev_value = [], Decimal(0), Decimal(0)
-        status = "placed"
+        status, ended = "placed", None
         for a in acts:
             st, sub = a.get("Status"), a.get("SubStatus")
             if st in ("Fill", "FinalFill") and sub != "Rejected":
@@ -452,11 +452,15 @@ class SaxoBroker:
             elif st == "Placed" and sub == "Rejected":
                 status = "rejected"
             elif st in _DONE and status not in ("filled",):
-                status = "cancelled"
+                status, ended = "cancelled", st
         last = acts[-1]
         # what the order IS at the venue, so the custodian can keep a leg's
         # row (type, price, working amount) in step with Saxo
         return {"status": status, "fills": fills,
+                # why a "cancelled" order ended: Expired / DoneForDay (a day
+                # order at the close) or Cancelled (by someone, e.g. on
+                # Saxo's own platform)
+                "ended": ended,
                 "order_type": last.get("OrderType"),
                 "price": last.get("Price"), "amount": last.get("Amount")}
 

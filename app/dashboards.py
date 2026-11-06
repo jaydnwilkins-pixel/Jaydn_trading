@@ -45,7 +45,8 @@ PAGES = {"/": "index.html", "/portfolio": "portfolio.html",
          "/claire": "claire.html", "/schedule": "agents.html",  # merged
          "/approvals": "approvals.html", "/saxo": "saxo.html",
          "/usage": "usage.html", "/watchlist": "watchlist.html",
-         "/orders": "orders.html", "/trades": "trades.html"}
+         "/orders": "orders.html", "/trades": "trades.html",
+         "/maintenance": "maintenance.html"}
 STATIC = {"/style.css": ("style.css", "text/css"),
           "/nav.js": ("nav.js", "text/javascript"),
           "/charts.js": ("charts.js", "text/javascript"),
@@ -753,6 +754,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     "/api/providers": self._providers,
                     "/api/agent-graph": self._agent_graph,
                     "/api/live-status": self._live_status,
+                    "/api/maintenance": self._maintenance,
                     "/api/exchanges": self._exchanges,
                 }.get(u.path)
                 if route:
@@ -948,6 +950,26 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     return self._send(200, self._trade_check(body))
                 if u.path == "/api/saxo-login-start":
                     return self._saxo_login_start(body)
+                if u.path == "/api/maintenance-run":
+                    # starts a run in claire-api (it owns the maintainer and
+                    # the AI agent); the page polls /api/maintenance
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    try:
+                        r = httpx.post(f"{api_base}/internal/maintenance",
+                                       headers={"x-claire-secret": secret},
+                                       timeout=10)
+                    except Exception as e:          # noqa: BLE001
+                        return self._send(502, {"error":
+                                                f"claire-api unreachable ({e})"})
+                    try:
+                        data = r.json()
+                    except ValueError:
+                        data = {}
+                    if r.status_code != 200:
+                        return self._send(r.status_code, {"error": str(
+                            data.get("detail") or f"HTTP {r.status_code}")})
+                    return self._send(200, data)
                 if u.path == "/api/live-arm":
                     # ARMING from the dashboard (§22.1): paired key + the
                     # typed phrase + a browser on THIS PC (loopback). A LAN
@@ -1723,7 +1745,40 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     r["entry_price"] = f[0] if f else None
             return {"entries": [r for r in rows if not r["leg"]],
                     "legs": [r for r in rows if r["leg"]],
-                    "triggers": trig, "quotes": quotes, "now": int(clock())}
+                    "triggers": trig, "quotes": quotes, "now": int(clock()),
+                    "sync": self._broker_sync()}
+
+        def _broker_sync(self):
+            """When the custodian last checked each broker account, and last
+            reached its venue — the Orders page's sync line."""
+            last = conn.execute(
+                "SELECT checked_at, ok FROM service_health WHERE"
+                " service='custodian' ORDER BY checked_at DESC LIMIT 1"
+            ).fetchone()
+            sched = conn.execute(
+                "SELECT spec, enabled FROM schedules WHERE job='custodian'"
+            ).fetchone()
+            every = None
+            if sched:
+                try:
+                    every = json.loads(sched["spec"]).get("minutes")
+                except (TypeError, ValueError):
+                    pass
+            accounts = []
+            for a in conn.execute(
+                    "SELECT a.id, a.broker, a.environment, s.venue,"
+                    " s.checked_at, s.contact_at, s.ok, s.orders_checked,"
+                    " s.error FROM broker_accounts a LEFT JOIN broker_sync s"
+                    " ON s.account_id=a.id ORDER BY a.id"):
+                d = dict(a)
+                d["label"] = self._account_label(a["broker"],
+                                                 a["environment"])
+                accounts.append(d)
+            return {"custodian_at": last["checked_at"] if last else None,
+                    "custodian_ok": last["ok"] if last else None,
+                    "every_min": every,
+                    "enabled": bool(sched["enabled"]) if sched else None,
+                    "accounts": accounts}
 
         def _approvals_archive(self, days):
             """Approvals you have already dealt with — they leave the
@@ -2648,6 +2703,30 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 if fx and p["pnl"] is not None:
                     p["pnl_base"] = round(p["pnl"] * fx, 2)
                     p["exposure_base"] = round(abs(amt * cur * fx), 2)
+
+        def _maintenance(self):
+            import sqlite3
+
+            from . import maintenance
+            try:
+                out = maintenance.latest(conn)
+            except sqlite3.OperationalError:    # claire-api not restarted yet
+                out = {"latest": None, "history": []}
+            job = next((r for r in scheduler.rows_with_next(conn, clock=clock)
+                        if r.get("job") == "maintenance"), None)
+            out["schedule"] = ({k: job.get(k) for k in (
+                "enabled", "spec", "next_run_at", "last_run_at")}
+                if job else None)
+            out["retention"] = {
+                "log_rotate_mb": maintenance.LOG_ROTATE_BYTES // 2 ** 20,
+                "log_keep": maintenance.LOG_KEEP,
+                "backup_keep": maintenance.BACKUP_KEEP,
+                "checkpoint_days": maintenance.CHECKPOINT_DAYS,
+                "health_days": maintenance.HEALTH_DAYS,
+                "narrative_days": maintenance.NARRATIVE_DAYS,
+                "sdk_days": maintenance.SDK_TRANSCRIPT_DAYS,
+                "runs_keep": maintenance.RUNS_KEEP}
+            return out
 
         def _from_this_pc(self):
             """The browser is on this machine (loopback), not the LAN."""

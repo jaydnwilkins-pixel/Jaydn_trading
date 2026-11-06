@@ -357,3 +357,29 @@ CREATE TABLE IF NOT EXISTS price_triggers (
 );
 CREATE INDEX IF NOT EXISTS idx_price_triggers_status
   ON price_triggers(status, ticker, exchange);
+
+-- One row per broker account: when the custodian last checked it and last
+-- reached its venue (Orders page "broker sync"). Overwritten in place each
+-- run — bounded, one row per account, not a log.
+CREATE TABLE IF NOT EXISTS broker_sync (
+  account_id TEXT PRIMARY KEY REFERENCES broker_accounts(id),
+  venue TEXT NOT NULL,                 -- 'Saxo sim' | 'built-in paper sim' …
+  checked_at INTEGER NOT NULL,         -- last custodian run that had an adapter
+  contact_at INTEGER,                  -- last successful call to the venue
+  ok INTEGER NOT NULL,
+  orders_checked INTEGER NOT NULL DEFAULT 0,
+  error TEXT
+);
+
+-- One row per maintainer run (app/maintenance.py, DESIGN.md §23). The
+-- maintainer keeps the newest 90 itself.
+CREATE TABLE IF NOT EXISTS maintenance_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL,
+  trigger TEXT NOT NULL,               -- schedule | dashboard | test
+  status TEXT NOT NULL,                -- ok | warn | bad
+  headline TEXT NOT NULL,
+  checks_json TEXT NOT NULL, actions_json TEXT NOT NULL,
+  summary TEXT,                        -- the maintainer agent's note
+  summary_error TEXT
+);

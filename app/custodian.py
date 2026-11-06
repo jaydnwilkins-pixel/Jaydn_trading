@@ -28,12 +28,12 @@ class Custodian:
     # all stopped — on every run, for as long as the bad order existed (H8)
     DUTIES = ("_place_pending_session", "_poll_fills", "_expire_orders",
               "_reprotect", "_expire_approvals", "_retry_resumes", "_orphans",
-              "_drift", "_leg_drift", "_archive")
+              "_drift", "_leg_drift", "_archive", "_broker_sync")
 
     def run_once(self) -> dict:
         report = {"placed": [], "fills": 0, "completed": [], "order_expired": [],
                   "approvals_expired": [], "resume_retried": [],
-                  "reprotected": [], "flags": []}
+                  "reprotected": [], "flags": [], "sync": {}}
         for duty in self.DUTIES:
             try:
                 getattr(self, duty)(report)
@@ -145,9 +145,13 @@ class Custodian:
             adapter = self._adapter(o["account_id"])
             if adapter is None or not o["broker_order_id"]:
                 continue
+            sync = report["sync"].setdefault(o["account_id"],
+                                             {"orders": 0, "errors": []})
+            sync["orders"] += 1
             try:
                 status = adapter.order_status(o["broker_order_id"])
             except BrokerError as e:
+                sync["errors"].append(f"order {o['id']}: {e}"[:200])
                 # the in-memory sim forgets every order on a claire-api
                 # restart; a real venue can lose one too. The book cannot know
                 # what filled, so it waits for a human rather than guessing.
@@ -156,31 +160,10 @@ class Custodian:
                     f"{o['broker_order_id']} ({e}) — fills unknown")
                 continue
             except Exception as e:              # noqa: BLE001 — per order
+                sync["errors"].append(f"order {o['id']}: {e}"[:200])
                 report["flags"].append(f"order {o['id']} poll error: {e}")
                 continue
-            unbooked = False
-            for f in status["fills"]:
-                try:
-                    # a failed FX lookup raises here and the fill waits for
-                    # the next run — it is never booked at 1.0 (H6)
-                    ex = self.repo.record_fill(
-                        o["id"], broker_fill_id=f["fill_id"],
-                        qty=to_micro(f["qty"]),
-                        price_native=to_micro(f["price"]),
-                        fx_rate=self.fx_rate_for(o["instrument_id"],
-                                                 o["account_id"]),
-                        # → slippage metric; a stop leg's intent is its stop
-                        intended_price=o["limit_price"] or o["stop_loss"],
-                        ts=int(self.clock()))
-                except Exception as e:          # noqa: BLE001 — per fill
-                    report["flags"].append(
-                        f"FILL NOT BOOKED order {o['id']} fill "
-                        f"{f['fill_id']}: {e} — the venue filled it, the book "
-                        "has not; reconcile")
-                    unbooked = True
-                    continue
-                if ex:
-                    report["fills"] += 1
+            unbooked = self._book_fills(o, status, report)
             if o["leg"]:
                 if unbooked:
                     # a terminal status now would refuse the fill the book
@@ -193,7 +176,66 @@ class Custodian:
                 except Exception as e:          # noqa: BLE001 — per order
                     report["flags"].append(f"leg {o['id']} sync error: {e}")
                 continue                        # a leg completes no item
+            if not unbooked and status["status"] in ("cancelled", "rejected"):
+                self._venue_ended(o, status, report)
+                continue
             self._maybe_complete(o["id"], report)
+
+    def _book_fills(self, o, status, report) -> bool:
+        """Record the venue's fills for one order (idempotent per fill).
+        True if any fill could NOT be booked — the book then still owes it,
+        so nothing may close the order yet."""
+        unbooked = False
+        for f in status["fills"]:
+            try:
+                # a failed FX lookup raises here and the fill waits for
+                # the next run — it is never booked at 1.0 (H6)
+                ex = self.repo.record_fill(
+                    o["id"], broker_fill_id=f["fill_id"],
+                    qty=to_micro(f["qty"]),
+                    price_native=to_micro(f["price"]),
+                    fx_rate=self.fx_rate_for(o["instrument_id"],
+                                             o["account_id"]),
+                    # → slippage metric; a stop leg's intent is its stop
+                    intended_price=o["limit_price"] or o["stop_loss"],
+                    ts=int(self.clock()))
+            except Exception as e:          # noqa: BLE001 — per fill
+                report["flags"].append(
+                    f"FILL NOT BOOKED order {o['id']} fill "
+                    f"{f['fill_id']}: {e} — the venue filled it, the book "
+                    "has not; reconcile")
+                unbooked = True
+                continue
+            if ex:
+                report["fills"] += 1
+        return unbooked
+
+    def _venue_ended(self, o, status, report):
+        """An entry (buy or sell, not a leg) the venue has finished with
+        without filling it all: a day order that expired at the close, one
+        cancelled at the venue (e.g. on Saxo's own platform), or one the
+        venue rejected. The venue is presumed right (§12), so the book
+        follows — its fills were booked first by the caller. It used to
+        stay `placed` forever: shown as working on the Orders page, and its
+        TTL cancel then failed every run with "order not found"."""
+        o = self.repo.order(o["id"])
+        if o["status"] not in ("placed", "partially_filled"):
+            return
+        ended = status.get("ended")
+        new = ("rejected" if status["status"] == "rejected" else
+               "cancelled" if ended == "Cancelled" else "expired")
+        ts = int(self.clock())
+        self.repo.mark_order(o["id"], new, ts=ts)
+        report["order_expired"].append(o["id"])
+        (fills,) = self.conn.execute(
+            "SELECT COUNT(*) FROM executions WHERE order_id=?",
+            (o["id"],)).fetchone()
+        self._close_item(
+            o, "done" if fills else {"expired": "expired",
+                                     "cancelled": "cancelled",
+                                     "rejected": "failed"}[new],
+            report, reason=f"{new} at the venue"
+            + (f" ({ended})" if ended else ""), partial_fill=bool(fills))
 
     def _maybe_complete(self, order_id, report):
         o = self.repo.order(order_id)
@@ -211,6 +253,7 @@ class Custodian:
         and used to mark live orders expired anyway — then refuse the fills
         that followed, so book and broker diverged (H8). Without an adapter
         it now skips and flags; the in-process custodian does the cancel."""
+        from .tools.brokers import BrokerError
         now = int(self.clock())
         # protective legs are GTC at the venue and are excluded outright:
         # cancelling a stop because a day order's clock ran out would strip
@@ -228,7 +271,15 @@ class Custodian:
                             "custodian has no adapter to cancel it at the "
                             "venue — left open")
                         continue
-                    adapter.cancel(o["broker_order_id"])
+                    try:
+                        adapter.cancel(o["broker_order_id"])
+                    except BrokerError:
+                        # "order not found" and the like: the venue may
+                        # already have ended it (a day order at the close).
+                        # Ask it; if it is over, close the book to match.
+                        if self._settle_ended(o, adapter, report):
+                            continue
+                        raise
                 elif o["submitted_at"] is not None:
                     report["flags"].append(
                         f"RECONCILE order {o['id']}: past its TTL, sent but "
@@ -244,6 +295,23 @@ class Custodian:
                                  reason="order TTL", partial_fill=bool(fills))
             except Exception as e:              # noqa: BLE001 — per order
                 report["flags"].append(f"order {o['id']} expiry error: {e}")
+
+    def _settle_ended(self, o, adapter, report) -> bool:
+        """True if the venue says this order is over (and the book now
+        agrees); False if it is still working there or cannot be read."""
+        try:
+            status = adapter.order_status(o["broker_order_id"])
+        except Exception:                       # noqa: BLE001
+            return False
+        if status["status"] not in ("cancelled", "rejected", "filled"):
+            return False
+        if self._book_fills(o, status, report):
+            return True                         # flagged; try again next run
+        if status["status"] == "filled":
+            self._maybe_complete(o["id"], report)
+        else:
+            self._venue_ended(o, status, report)
+        return True
 
     # ── approvals ────────────────────────────────────────────────────────
     APPROVED_TTL_S = 3600
@@ -506,6 +574,40 @@ class Custodian:
                     report["flags"].append(
                         f"POSITION DRIFT {acct['id']} {inst_id}: broker "
                         f"{broker_qty}, book {held / 1e6}")
+
+    def _broker_sync(self, report):
+        """Every account, every run: one cheap read from its venue (Saxo:
+        balances; the built-in paper sim: its in-memory book) to prove the
+        desk can still reach it, plus how many working orders were checked
+        this run. One row per account in broker_sync, overwritten in place.
+        A custodian with no adapter for a venue (the systemd timer one) does
+        not touch that account's row — it never talked to the broker."""
+        now = int(self.clock())
+        for acct in self.conn.execute(
+                "SELECT id, broker FROM broker_accounts").fetchall():
+            adapter = self.brokers.get(acct["broker"])
+            if adapter is None:
+                continue
+            seen = report["sync"].get(acct["id"], {"orders": 0, "errors": []})
+            venue = (f"Saxo {adapter.environment}"
+                     if type(adapter).__name__ == "SaxoBroker"
+                     else "built-in paper sim")
+            try:
+                adapter.snapshot()
+                error = "; ".join(seen["errors"])[:300] or None
+            except Exception as e:              # noqa: BLE001 — per account
+                error = f"cannot reach {venue}: {e}"[:300]
+            reached = not (error or "").startswith("cannot reach")
+            self.conn.execute(
+                "INSERT INTO broker_sync (account_id, venue, checked_at,"
+                " contact_at, ok, orders_checked, error) VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(account_id) DO UPDATE SET venue=excluded.venue,"
+                " checked_at=excluded.checked_at,"
+                " contact_at=COALESCE(excluded.contact_at, contact_at),"
+                " ok=excluded.ok, orders_checked=excluded.orders_checked,"
+                " error=excluded.error",
+                (acct["id"], venue, now, now if reached else None,
+                 int(error is None), seen["orders"], error))
 
     def _archive(self, report=None) -> int:
         """Terminal items > 30 days old get archived (hidden from the default

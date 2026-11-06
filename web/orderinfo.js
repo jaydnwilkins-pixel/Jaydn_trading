@@ -57,7 +57,7 @@ function orderNeeds(o) {
     parts.push(`<b>Waiting for the market to open.</b> Claire is holding the order and sends it to
       ${esc(o.account || 'the broker')} when ${esc(o.exchange || 'the market')} opens ${esc(oiWhen(o.next_open))}.`);
     parts.push(`${fillRule}. ${now}${reached
-      ? ` — already ${buy ? 'at or below' : 'at or above'} your limit, so it should fill soon after the open (if the price is still there).`
+      ? ` — already ${buy ? 'at or below' : 'at or above'} your limit price, so it should fill soon after the open (if the price is still there).`
       : `; ${oiMove(last, L)}.`}`);
     parts.push('<span class="muted">You can still edit or cancel it — nothing has been sent yet.</span>');
     return parts.join(' ');
@@ -68,7 +68,7 @@ function orderNeeds(o) {
   parts.push(o.status === 'partially_filled'
     ? `<b>Part filled:</b> ${fmt(o.filled, 0)} of ${fmt(o.qty, 0)} shares done; the other ${fmt(left, 0)} are still working at ${esc(o.account || 'the broker')}.`
     : `<b>Working at ${esc(o.account || 'the broker')}</b> — waiting for a ${buy ? 'seller' : 'buyer'} at your price.`);
-  if (reached) parts.push(`${fillRule}. ${now} — already ${buy ? 'at or below' : 'at or above'} your limit, so it should fill
+  if (reached) parts.push(`${fillRule}. ${now} — already ${buy ? 'at or below' : 'at or above'} your limit price, so it should fill
     as soon as there are enough shares on offer at that price.${o.is_open === false ? '' : ' If it stays unfilled, check it on the broker\'s platform.'}`);
   else parts.push(`${fillRule}. ${now}; ${oiMove(last, L)} before it can ${verb}.`);
   if (o.expires_at) parts.push(`<span class="muted">If it has not filled by ${esc(oiWhen(o.expires_at))}, it is cancelled.</span>`);

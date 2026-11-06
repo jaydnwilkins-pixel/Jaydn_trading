@@ -115,13 +115,13 @@ def set_limits(conn, new: dict, *, actor="terminal", clock=time.time):
     allowed = set(DEFAULT_LIMITS)
     bad = set(new) - allowed
     if bad:
-        raise ValueError(f"unknown live limits {sorted(bad)}")
+        raise ValueError(f"unknown live caps {sorted(bad)}")
     for k, v in new.items():
         if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
-            raise ValueError(f"{k} must be a positive number")
+            raise ValueError(f"{k} must be more than 0")
     if "max_orders_per_day" in new and new["max_orders_per_day"] != int(
             new["max_orders_per_day"]):
-        raise ValueError("max_orders_per_day must be a whole number")
+        raise ValueError("max_orders_per_day must be a whole number of buys")
     before = limits(conn)
     merged = {**before, **new}
     conn.execute("UPDATE live_trading SET limits=? WHERE id=1",
@@ -219,17 +219,18 @@ def check_order(conn, env, *, account_id, side, qty_micro, limit_micro,
     notional = notional_base_micro / 1e6
     if notional > lim["max_order_base"]:
         raise LiveTradingBlocked(
-            f"order {notional:.2f} {ccy} exceeds the live per-order limit "
-            f"{lim['max_order_base']} {ccy}")
+            f"this buy costs {notional:,.2f} {ccy}, over the live cap of "
+            f"{lim['max_order_base']:,.2f} {ccy} per buy")
     used = usage_today(conn, account_id, clock=clock)
     if used["orders"] + 1 > lim["max_orders_per_day"]:
         raise LiveTradingBlocked(
-            f"live limit of {lim['max_orders_per_day']} orders today reached")
+            f"live cap reached: max {int(lim['max_orders_per_day'])} buys a "
+            f"day, and {used['orders']} buys today already")
     if used["notional_base"] + notional > lim["max_daily_notional_base"]:
         raise LiveTradingBlocked(
-            f"would take today's live notional to "
-            f"{used['notional_base'] + notional:.2f} {ccy}, over the "
-            f"{lim['max_daily_notional_base']} {ccy} daily limit")
+            f"this buy would bring today's live buys to "
+            f"{used['notional_base'] + notional:,.2f} {ccy}, over the cap of "
+            f"{lim['max_daily_notional_base']:,.2f} {ccy} a day")
 
 
 def record_placed(conn, *, account_id, order_id, notional_base_micro,

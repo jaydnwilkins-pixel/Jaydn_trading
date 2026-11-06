@@ -59,6 +59,12 @@ DEFAULTS = [
     ("price_triggers", "Price triggers from the Watchlist (one-shot buy/sell"
      " rules; card, or pre-approved paper order)", "claire-api",
      {"type": "interval", "minutes": 2, "require_open": True}),
+    # the maintainer (DESIGN.md §23): checks, log rotation, backups,
+    # retention, then a short AI status note. Quiet hour, after US close.
+    ("maintenance", "Health checks, log rotation, backups, retention; "
+     "AI status note (Maintenance page)", "claire-api",
+     {"type": "daily", "time": "06:30", "tz": "local",
+      "days": [1, 2, 3, 4, 5, 6, 7]}),
 ]
 
 
@@ -73,6 +79,8 @@ JOB_INVOKES = {
     "reconcile": {"agent": None, "then": None},
     "watcher": {"agent": None, "then": "sell_review pipeline on breach"},
     "event_scan": {"agent": None, "then": "full pipeline on a volume spike"},
+    "maintenance": {"agent": "maintainer",
+                    "then": "status note only — plain code does the cleanup"},
     "price_triggers": {"agent": None,
                        "then": "approval card (or pre-approved paper order)"},
 }

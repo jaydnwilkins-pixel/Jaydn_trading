@@ -119,7 +119,8 @@ app/tools/        Yahoo market data, search, narrative jail, run_python
                   sandbox, broker adapters (paper sim + MCP configs)
 app/api/          claire-api :7788 (FastAPI): resume seam, runs, /ask
 app/dashboards.py :7787 stdlib server + approval authorization + watcher
-app/custodian.py  fills, TTLs, expiry, orphans (in-process + timer)
+app/custodian.py  fills, TTLs, expiry, orphans, broker sync (in-process + timer)
+app/maintenance.py daily checks, log rotation, backups, retention + AI note (§23)
 app/sessions.py   exchange calendars: is_open / next_open / close_of
 web/              dashboard pages (no build step)
 systemd/          claire-api/claire-dashboards/claire-custodian unit

@@ -1,11 +1,10 @@
 <meta charset="utf-8"><title>Claire — Mission Control</title>
-<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/live.js"></script>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script>nav('/')</script>
 <main>
   <h1>Mission Control <span id="conn" class="pill">connecting…</span></h1>
   <div class="statstrip" id="strip"></div>
   <div id="banner"></div>
-  <div id="live-switch"></div>
 
   <div id="pending"></div>
 
@@ -352,7 +351,7 @@ const ABOUT = {
     reads: 'Your decision, carrying a single-use token from the card or the Telegram button.',
     makes: 'Approved → execute; rejected or expired (at the market close) → recorded.',
     limits: 'No LLM can pass it. Real-money approvals also need LIVE typed on the card.'},
-  execute: {what: 'Turns an approval into an order: sizes it in shares at the live price, checks it (price band, cash, risk limits, whole shares at Saxo, the live-money switch), then sends it with its stop and target attached — or holds it until the market opens.',
+  execute: {what: 'Turns an approval into an order: sizes it in shares at the live price, checks it (price band, cash, risk caps, whole shares at Saxo, the live-money switch), then sends it with its stop and target attached — or holds it until the market opens.',
     when: 'Straight after you approve.',
     reads: 'The approval, the live quote and FX rate, the account\'s cash.',
     makes: 'An order at the broker (or queued for the open), with cash set aside for it.',
@@ -385,7 +384,7 @@ const ABOUT = {
 ABOUT['job:own'] = {what: 'Trades you start yourself go straight to the approval gate — no analysts, no debate: the Sell buttons (Portfolio, Saxo accounts, Watchlist), Buy now on the Watchlist, Buy at current price on Markets, a price trigger firing, an edit of an order already at the broker, and overriding a pass on Approvals.',
   when: 'Whenever you do one of those.', reads: 'What you entered: levels, size, account.',
   makes: 'An approval card (and a Telegram message). Nothing trades until you approve it there — except an automatic paper-account trigger you approved in advance.',
-  limits: 'The same checks as any trade: price band, cash, risk limits, Saxo\'s rules.'};
+  limits: 'The same checks as any trade: price band, cash, risk caps, Saxo\'s rules.'};
 const SCAN_ABOUT = {what: 'A scheduled scan: the Screener picks stocks on this region\'s exchanges and each pick goes through the full analysis (analysts → debate → Arbiter). Anything worth trading lands on Approvals.',
   when: '', reads: 'The screener, your Watchlist, the open positions.', makes: 'Analysis runs; buys or sells for your approval.', limits: 'It is skipped if the market is closed that day.'};
 function aboutHtml(id, extraWhen) {
@@ -396,7 +395,7 @@ function aboutHtml(id, extraWhen) {
   return `<div class="narr" style="margin-bottom:.6rem">
     <p style="margin:.1rem 0 .35rem">${esc(a.what)}</p>
     ${row('When:', extraWhen || a.when)}${row('Reads:', a.reads)}
-    ${row('Produces:', a.makes)}${row('Limits:', a.limits)}</div>`;
+    ${row('Produces:', a.makes)}${row('Boundaries:', a.limits)}</div>`;
 }
 
 /* ── drawer ──────────────────────────────────────────────────────── */
@@ -753,18 +752,8 @@ async function refresh() {
   renderStrip();
   renderPending();
   renderMap();
-  renderLiveSwitch();
   connPill('loaded');
 }
-async function renderLiveSwitch() {
-  const el = document.getElementById('live-switch');
-  try {
-    el.innerHTML = liveSwitchHtml(await liveLoad(), {compact: true}) +
-      '<div class="muted small" style="margin:-.5rem 0 1rem;text-align:right">' +
-      '<a href="/orders#live">live limits &amp; usage →</a></div>';
-  } catch (e) { el.innerHTML = ''; }
-}
-window.onLiveChange = renderLiveSwitch;
 /* warnings: each can be cleared; "failed runs" returns only for new
    failures, any other after a day if still true (or at once if it changes) */
 function renderFlags() {

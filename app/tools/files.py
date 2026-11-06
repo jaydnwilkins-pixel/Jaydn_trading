@@ -1,5 +1,10 @@
 """Narrative I/O, jailed to var/narratives/<work_item>/ (DESIGN.md §9).
-Agents cannot roam the filesystem — by construction, not by prompt."""
+Agents cannot roam the filesystem — by construction, not by prompt.
+
+Old runs' folders are packed by the maintainer into
+var/narratives-archive/<work_item>.tar.gz (§23); read() and list() fall back
+to that archive, so archived write-ups stay readable."""
+import tarfile
 from pathlib import Path
 
 
@@ -35,9 +40,27 @@ class Narratives:
         p.write_text(text)
         return str(p.relative_to(self.base.parent.parent))  # repo-relative-ish
 
+    def _archive(self, work_item: str) -> Path:
+        self._wi_dir(work_item)                     # same jail on the id
+        return self.base.parent / "narratives-archive" / f"{work_item}.tar.gz"
+
     def read(self, work_item: str, name: str) -> str:
-        return self._path(work_item, name).read_text()
+        p = self._path(work_item, name)
+        if p.exists() or not self._archive(work_item).exists():
+            return p.read_text()
+        with tarfile.open(self._archive(work_item), "r:gz") as tf:
+            try:
+                f = tf.extractfile(p.name)
+            except KeyError:
+                raise FileNotFoundError(p) from None
+            return f.read().decode()
 
     def list(self, work_item: str) -> list[str]:
         d = self._wi_dir(work_item)
-        return sorted(f.name for f in d.glob("*.md")) if d.is_dir() else []
+        if d.is_dir():
+            return sorted(f.name for f in d.glob("*.md"))
+        a = self._archive(work_item)
+        if a.exists():
+            with tarfile.open(a, "r:gz") as tf:
+                return sorted(n for n in tf.getnames() if n.endswith(".md"))
+        return []

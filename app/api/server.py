@@ -170,7 +170,24 @@ def start_runs(desk, jobs):
     return started, skipped
 
 
-def start_scheduler(conn, repo, desk, market, custodian):
+def build_maintainer(conn):
+    """The maintainer (DESIGN.md §23): plain-code checks and housekeeping,
+    plus the maintainer agent's status note; Telegram when it turns bad."""
+    import httpx
+
+    from .. import alerts, maintenance
+
+    def probe(url):
+        try:
+            return httpx.get(url, timeout=5).status_code < 500
+        except Exception:                       # noqa: BLE001
+            return False
+    return maintenance.Maintainer(
+        conn, summarize=maintenance.make_summarize(conn), alert=alerts.send,
+        probe=probe)
+
+
+def start_scheduler(conn, repo, desk, market, custodian, maintainer=None):
     """DB-backed schedules (app/scheduler.py): analysis regions, custodian,
     reconcile. The screener only scans markets that are OPEN at fire time."""
     from datetime import datetime, timezone
@@ -256,6 +273,8 @@ def start_scheduler(conn, repo, desk, market, custodian):
         "analysis_us": run_analysis,
         "event_scan": run_event_scan,
         "price_triggers": run_price_triggers,
+        **({"maintenance": lambda spec: _brief(
+            maintainer.run(trigger="schedule"))} if maintainer else {}),
     })
     sched.start()
     # keep the read-only Saxo LIVE sign-in alive (refresh tokens rotate and
@@ -282,7 +301,8 @@ def main():
         sys.exit(2)
     conn, repo, desk, claire, brokers, market = build_world()
     custodian = build_custodian(conn, repo, brokers, market, secret)
-    start_scheduler(conn, repo, desk, market, custodian)
+    maintainer = build_maintainer(conn)
+    start_scheduler(conn, repo, desk, market, custodian, maintainer)
 
     def ask_handler(body):
         text = (body or {}).get("text", "")
@@ -299,8 +319,28 @@ def main():
                                  media_type="application/x-ndjson")
 
     app = create_app(desk, conn, secret, ask_handler=ask_handler,
-                     agent_ask_handler=agent_ask_handler, brokers=brokers)
+                     agent_ask_handler=agent_ask_handler, brokers=brokers,
+                     maintenance_runner=maintainer.run)
+    _quiet_status_polls()
     uvicorn.run(app, host="127.0.0.1", port=7788, log_level="info")
+
+
+def _brief(result):
+    """What the schedules table keeps as last_result: small, not the whole
+    report (that lives in maintenance_runs)."""
+    return {k: result.get(k) for k in ("id", "status", "headline", "skipped")
+            if result.get(k) is not None}
+
+
+def _quiet_status_polls():
+    """The dashboards poll GET /status every few seconds; logging each one
+    was 99% of api.log (63k lines in 4 days). Everything else still logs."""
+    import logging
+
+    class _NoStatus(logging.Filter):
+        def filter(self, record):
+            return '"GET /status' not in record.getMessage()
+    logging.getLogger("uvicorn.access").addFilter(_NoStatus())
 
 
 if __name__ == "__main__":

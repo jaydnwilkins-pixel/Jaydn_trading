@@ -1,0 +1,134 @@
+<meta charset="utf-8"><title>Claire — Maintenance</title>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
+<script>nav('/maintenance')</script>
+<style>
+  .mt td, .mt th { vertical-align:top; font-size:.85rem; }
+  .small { font-size:.75rem; }
+  .st { font-weight:700; white-space:nowrap; }
+  .note { white-space:pre-wrap; line-height:1.5; margin:.4rem 0 0; }
+  .statusbox { border-width:2px; }
+</style>
+<main>
+  <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+    <h1>Maintenance <span id="pill" class="pill">loading…</span></h1>
+    <button id="run-btn" onclick="runNow()">Run maintenance now</button>
+  </div>
+  <p class="muted" style="margin-top:-.2rem">The maintainer checks Claire's
+    health and tidies up after her once a day. Plain code does every check
+    and every clean-up; the <b>Maintainer</b> AI agent only reads the results
+    and writes the note below — it cannot change or delete anything.</p>
+  <div id="sched" class="small muted" style="margin:-.4rem 0 .8rem"></div>
+
+  <div id="status"></div>
+
+  <h2>Checks</h2>
+  <div id="checks">loading…</div>
+
+  <h2>Housekeeping</h2>
+  <div id="actions">loading…</div>
+
+  <h2>What is kept</h2>
+  <div id="retention"></div>
+
+  <h2>History</h2>
+  <div id="history">loading…</div>
+</main>
+<script>
+let M = {};
+const ICON = {ok: '<span class="ok">✓</span>', info: '<span class="muted">·</span>',
+              warn: '<span class="warn">!</span>', bad: '<span class="bad">✗</span>'};
+const WORD = {ok: 'Healthy', warn: 'Needs a look', bad: 'Needs attention'};
+const COLOR = {ok: 'var(--good)', warn: 'var(--warn)', bad: 'var(--bad)'};
+const ACTION = {
+  rotate_logs: 'Rotate logs', backup: 'Daily backup',
+  prune_checkpoints: 'Prune finished runs\' graph state',
+  prune_health: 'Prune old health rows', archive_narratives: 'Archive old write-ups',
+  prune_sdk_transcripts: 'Delete old AI transcripts', prune_runs: 'Prune old reports'};
+
+function when(t) {
+  if (!t) return '—';
+  return new Date(t * 1000).toLocaleString([], {day: 'numeric', month: 'short',
+    hour: '2-digit', minute: '2-digit'});
+}
+function mb(n) { return n ? (n / 1048576).toFixed(1) + ' MB' : '—'; }
+
+function render() {
+  const L = M.latest, s = M.schedule;
+  const pill = document.getElementById('pill');
+  pill.textContent = L ? WORD[L.status] || L.status : 'never run';
+  pill.className = 'pill ' + (L ? L.status : 'warn');
+
+  document.getElementById('sched').innerHTML = !s
+    ? 'No maintenance schedule yet: restart claire-api to add it.'
+    : s.enabled
+      ? `Runs daily at ${esc(s.spec.time)} (${esc(s.spec.tz === 'local' ? 'this PC\'s time' : s.spec.tz)}) · next run ${when(s.next_run_at)} · change it on <a href="/agents">Agents &amp; Schedule</a>`
+      : '<b class="bad">The daily maintenance run is switched OFF</b> on <a href="/agents">Agents &amp; Schedule</a>.';
+
+  if (!L) {
+    document.getElementById('status').innerHTML = `<div class="card">No maintenance run yet.
+      Click <b>Run maintenance now</b>, or wait for the daily run.</div>`;
+    ['checks', 'actions', 'history'].forEach(id => document.getElementById(id).innerHTML = '<p class="muted small">Nothing yet.</p>');
+  } else {
+    document.getElementById('status').innerHTML = `<div class="card statusbox" style="border-color:${COLOR[L.status] || 'var(--line)'}">
+      <div><b style="color:${COLOR[L.status]}">${esc(L.headline)}</b></div>
+      <div class="muted small">Checked ${when(L.finished_at)} · ${L.trigger === 'dashboard' ? 'run from this page' : 'daily run'}</div>
+      ${L.summary ? `<h3 style="margin:.7rem 0 0;font-size:.9rem">Maintainer's note</h3><p class="note">${esc(L.summary)}</p>`
+        : `<p class="muted small" style="margin:.5rem 0 0">No AI note this time${L.summary_error ? ': ' + esc(L.summary_error) : ''}. The checks below are complete without it.</p>`}
+    </div>`;
+
+    const rank = {bad: 0, warn: 1, ok: 2, info: 3};
+    const checks = [...(L.checks || [])].sort((a, b) => rank[a.status] - rank[b.status]);
+    document.getElementById('checks').innerHTML = `<table class="mt"><tr><th></th><th>Check</th><th>Now</th><th>Detail</th></tr>
+      ${checks.map(c => `<tr><td class="st">${ICON[c.status] || ''}</td><td>${esc(c.label)}</td>
+        <td>${esc(c.value)}</td><td class="small muted">${esc(c.detail || '')}</td></tr>`).join('')}</table>
+      <p class="muted small">✓ fine · ! worth a look · ✗ needs attention · <span class="muted">·</span> for information</p>`;
+
+    document.getElementById('actions').innerHTML = `<table class="mt"><tr><th></th><th>Step</th><th>What it did</th><th>Space freed</th></tr>
+      ${(L.actions || []).map(a => `<tr><td class="st">${a.ok === false ? ICON.bad : ICON.ok}</td>
+        <td>${esc(ACTION[a.action] || a.action)}</td><td class="small">${esc(a.detail || '')}</td>
+        <td>${mb(a.freed)}</td></tr>`).join('')}</table>`;
+
+    document.getElementById('history').innerHTML = `<table class="mt"><tr><th>When</th><th></th><th>Result</th><th>Freed</th><th>Started by</th></tr>
+      ${(M.history || []).map(h => `<tr><td class="small">${when(h.finished_at)}</td><td class="st">${ICON[h.status] || ''}</td>
+        <td class="small">${esc(h.headline)}</td><td>${mb(h.freed)}</td>
+        <td class="small muted">${h.trigger === 'dashboard' ? 'this page' : 'daily run'}</td></tr>`).join('')}</table>`;
+  }
+
+  const r = M.retention || {};
+  document.getElementById('retention').innerHTML = `<div class="card small">
+    <ul style="margin:0 0 .4rem 1.1rem;padding:0;line-height:1.6">
+      <li><b>Logs</b> (var/log): rotated and compressed once over ${r.log_rotate_mb} MB; the newest ${r.log_keep} kept per log.</li>
+      <li><b>Backups</b>: one copy of desk.db a day in var/backups; the newest ${r.backup_keep} kept. Same disk as Claire, so copy them elsewhere for real protection.</li>
+      <li><b>Finished runs' graph state</b> (checkpoints.db): removed ${r.checkpoint_days} days after a run finishes. Runs still going or waiting for your approval are never touched.</li>
+      <li><b>Run write-ups</b>: packed into var/narratives-archive ${r.narrative_days} days after a run is archived. They stay readable on the Trading page.</li>
+      <li><b>AI agent transcripts</b> (Claude's own session files): deleted after ${r.sdk_days} days.</li>
+      <li><b>Health rows</b>: kept ${r.health_days} days. <b>Maintenance reports</b>: the newest ${r.runs_keep}.</li>
+    </ul>
+    <b>Never deleted, whatever their age:</b> orders, fills, positions, cash, the
+    audit trail of every decision, runs and their costs, the live-trading log.</div>`;
+}
+
+async function load() {
+  try { M = await api('/api/maintenance'); render(); }
+  catch (e) { document.getElementById('status').innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+}
+
+async function runNow() {
+  const btn = document.getElementById('run-btn');
+  const before = (M.latest || {}).id || 0;
+  btn.disabled = true; btn.textContent = 'Running…';
+  try {
+    await api('/api/maintenance-run', {});
+    toast('maintenance started — this takes up to a minute');
+    for (let i = 0; i < 60; i++) {                  // up to 3 minutes
+      await new Promise(r => setTimeout(r, 3000));
+      M = await api('/api/maintenance');
+      if (((M.latest || {}).id || 0) > before) { render(); toast('maintenance finished'); break; }
+    }
+  } catch (e) { toast(e.message, false); }
+  btn.disabled = false; btn.textContent = 'Run maintenance now';
+}
+
+load();
+setInterval(load, 60000);
+</script>

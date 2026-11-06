@@ -217,8 +217,8 @@ A live order reaches Saxo only when **all four locks** hold, re-checked at the
 moment the order is sent:
 
 1. **Enabled** — `CLAIRE_LIVE_TRADING=enabled` in `etc/claire.env`.
-2. **Armed** — **Turn ON live trading** on Mission Control or the Orders
-   page, from a browser **on the desk's own PC** (http://127.0.0.1:7787),
+2. **Armed** — **Live trading** button on the Orders page → side panel →
+   **Turn ON live trading**, from a browser **on the desk's own PC** (http://127.0.0.1:7787),
    typing `ARM LIVE TRADING`; or `bin/claire live arm` in a terminal. A
    browser on another device (phone, laptop) can turn it OFF but never ON.
    Claire's chat has no way to arm. Note: Bob runs on this PC with a shell,
@@ -227,8 +227,9 @@ moment the order is sent:
    technical stops him arming.
 3. **Your approval** — choose `⚠ Saxo LIVE 99999999 — real money` on the
    card (greyed out until armed) and type **LIVE** when asked.
-4. **Live limits** — defaults: 1,000 per order, 2 orders/day, 2,000/day in
-   total (account currency). These limit **buys only**: selling shares the
+4. **Spending caps** — money in the live account's currency, plus a count
+   of buys (never shares). Defaults: max 1,000 per buy (shares × limit
+   price), max 2 buys a day, max 2,000 of buys a day. They cap **buys only**: selling shares the
    desk bought is never capped and doesn't use up the day's allowance, so
    the desk can always get out of a position (a winner that grew past
    1,000, or an exit on a day with both orders used). Exits still need the
@@ -245,18 +246,18 @@ hold at Saxo.
 3. `bin/claire live setup` — creates the desk's `saxo-live` account for
    99999999 and copies its opening cash from Saxo.
 4. `bin/claire restart`
-5. When you are ready to trade: **Turn ON live trading** on Mission Control
-   (on this PC), or `bin/claire live arm`
+5. When you are ready to trade: Orders page → **Live trading** → **Turn ON
+   live trading** (browser on this PC), or `bin/claire live arm`
 6. Approvals now offer the live account. Start small.
 
 ### Everyday controls
 
 | Do this | Command / place |
 |---|---|
-| See the switch, limits, today's usage, live orders and the switch history | **Orders** page → *Live trading*, or `bin/claire live status` |
-| **Stop live trading now** | **Turn OFF live trading** on Mission Control or Orders (any paired device), **Disarm** on Approvals, or `bin/claire live disarm` |
-| Change limits | **Orders** page → *Limits* → Save (applies at once, logged), or `bin/claire live limits max_order_base=1500 max_orders_per_day=3` |
-| Re-arm | **Turn ON live trading** on Mission Control (browser on this PC, typed phrase), or `bin/claire live arm` |
+| See the switch, spending caps, today's usage, live orders and history | **Orders** page → **Live trading** button (opens a side panel), or `bin/claire live status` |
+| **Stop live trading now** | Orders → **Live trading** → **Turn OFF** (any paired device), **Disarm** on Approvals, or `bin/claire live disarm` |
+| Change spending caps | Orders → **Live trading** → *Spending caps* → Save caps (applies at once, logged), or `bin/claire live limits max_order_base=1500 max_orders_per_day=3` |
+| Re-arm | Orders → **Live trading** → **Turn ON** (browser on this PC, typed phrase), or `bin/claire live arm` |
 | Remove live trading entirely | delete `CLAIRE_LIVE_TRADING=enabled`, `bin/claire restart` |
 
 Disarming stops **new** live orders; orders already at Saxo keep their

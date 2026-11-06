@@ -4,7 +4,8 @@ function nav(active) {
     ["/markets", "Markets"], ["/watchlist", "Watchlist"],
     ["/claire", "Claire"], ["/trading", "Trading"],
     ["/portfolio", "Portfolio"], ["/saxo", "Saxo accounts"], ["/agents", "Agents & Schedule"],
-    ["/providers", "Providers & MCP"], ["/usage", "Usage"]];
+    ["/providers", "Providers & MCP"], ["/usage", "Usage"],
+    ["/maintenance", "Maintenance"]];
   document.write('<nav>' + items.map(([href, label]) =>
     `<a href="${href}" class="${href === active ? 'active' : ''}">${label}</a>`
   ).join('') +

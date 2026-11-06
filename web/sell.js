@@ -56,7 +56,7 @@ function sellValueLine(key) {
   if (!el || !p || !s) return;
   const q = Number(s.qty), px = Number(s.px) || p.price;
   el.innerHTML = q > 0 && px ? `≈ <b>${fmt(q * px, 2)} ${esc(p.currency || '')}</b>
-    <span class="muted">(${fmt(q, p.whole ? 0 : 4)} × ${fmt(px, 2)}${Number(s.px) ? ' limit' : ' last'}, before fees)
+    <span class="muted">(${fmt(q, p.whole ? 0 : 4)} × ${fmt(px, 2)}${Number(s.px) ? ' limit price' : ' last price'}, before fees)
     · all ${fmt(p.held, 4)} shares ≈ ${fmt(p.held * px, 2)} ${esc(p.currency || '')}</span>`
     : `<span class="muted">all ${fmt(p.held, 4)} shares ≈ ${p.price ? fmt(p.held * p.price, 2) + ' ' +
       esc(p.currency || '') : '—'} at the last price</span>`;
@@ -135,7 +135,7 @@ async function sellSend(key) {
   if (v.qty > v.p.held + 1e-9)
     return sellMsg(key, `<b class="bad">the desk holds only ${
       fmt(v.p.held, 4)} — it can only sell what it bought</b>`);
-  if (!confirm(`Send to approval: SELL ${v.qty} ${v.p.ticker} at limit ` +
+  if (!confirm(`Send to approval: SELL ${v.qty} ${v.p.ticker} at a limit price of ` +
                `${v.entry} on ${v.p.label || v.p.account_id}?\n\nNothing ` +
                'is sold until you approve it on the Approvals page.')) return;
   try {

@@ -77,6 +77,18 @@ AGENTS = [
 ]
 
 
+MAINTAINER_PROMPT = (
+    "You are the maintainer of Claire, Richard's AI trading desk. You are "
+    "given the results of today's automated health checks and housekeeping "
+    "as JSON. Write a short status note for Richard in plain English: at "
+    "most 6 sentences, no markdown tables, no headings. Lead with the overall "
+    "state. Name anything with status 'bad' or 'warn' and say concretely what "
+    "he should do about it (e.g. 'sign in to Saxo SIM on the Saxo accounts "
+    "page'). Mention what housekeeping did only briefly. Use only the facts "
+    "given; never invent numbers, causes or fixes. You cannot change "
+    "anything yourself and must not claim to have done so.")
+
+
 def seed(conn, *, ts=None):
     from .registry import supports_temperature
     ts = ts or int(time.time())
@@ -113,3 +125,16 @@ def seed(conn, *, ts=None):
             "INSERT OR IGNORE INTO agent_versions (agent_id, version,"
             " system_prompt, changed_at) VALUES (?,1,?,?)",
             (aid, _P.format(role=role, brief=brief), ts))
+    # the maintainer (DESIGN.md §23) is not a desk role analysing a ticker,
+    # so it has its own prompt rather than the _P template. Text in, text
+    # out: it holds no tools and decides nothing.
+    conn.execute(
+        "INSERT OR IGNORE INTO agents (id, display_name, system_prompt,"
+        " version, tools, requires, provider_id, model, temperature,"
+        " updated_at) VALUES ('maintainer','Maintainer',?,1,'[]','[]',?,?,"
+        "NULL,?)", (MAINTAINER_PROMPT, DEFAULT_PROVIDER, "claude-haiku-4-5",
+                    ts))
+    conn.execute(
+        "INSERT OR IGNORE INTO agent_versions (agent_id, version,"
+        " system_prompt, changed_at) VALUES ('maintainer',1,?,?)",
+        (MAINTAINER_PROMPT, ts))

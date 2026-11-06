@@ -124,7 +124,7 @@ def test_armed_live_order_places_and_is_counted(world):
 
 
 @pytest.mark.parametrize("kw,why", [
-    (dict(qty="10", limit="200"), "per-order limit"),     # 2000 > 1000
+    (dict(qty="10", limit="200"), "per buy"),     # 2000 > 1000
     (dict(limit=None), "limit orders"),
     (dict(side="sell"), "position the desk opened"),       # holds nothing
 ])
@@ -147,7 +147,7 @@ def test_daily_order_and_notional_limits(world):
                             symbol="AAPL", ts=T0).status == "accepted"
     third = submit_order(repo, venue, order(repo, oid="o9"), symbol="AAPL",
                          ts=T0)
-    assert third.status == "rejected" and "orders today" in third.detail
+    assert third.status == "rejected" and "buys a day" in third.detail
     # next Singapore day: the count resets
     assert submit_order(repo, venue, order(repo, oid="o10"), symbol="AAPL",
                         ts=T0 + 86400).status == "accepted"
@@ -155,7 +155,7 @@ def test_daily_order_and_notional_limits(world):
                                    "max_daily_notional_base": 500})
     big = submit_order(repo, venue, order(repo, oid="o11", qty="1"),
                        symbol="AAPL", ts=T0 + 86400)
-    assert big.status == "rejected" and "daily limit" in big.detail
+    assert big.status == "rejected" and "a day" in big.detail and "over the cap" in big.detail
 
 
 def test_live_exits_bypass_size_and_daily_caps(world):

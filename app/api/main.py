@@ -111,7 +111,7 @@ class OrderControlBody(BaseModel):
 
 def create_app(desk, conn, secret: str, *, clock=time.time,
                ask_handler=None, agent_ask_handler=None,
-               brokers=None) -> FastAPI:
+               brokers=None, maintenance_runner=None) -> FastAPI:
     app = FastAPI(title="claire-api")
 
     def _guard(request: Request):
@@ -261,6 +261,24 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
         except ValueError as e:                     # wrong state, already done
             raise HTTPException(409, str(e)) from e
         return {"ok": True, "work_item_id": wi}
+
+    @app.post("/internal/maintenance")
+    def internal_maintenance(request: Request):
+        """Run the maintainer now (the Maintenance page's button). Same
+        trust boundary as the other /internal routes. Runs in the background
+        — the AI note can take a while — and the page polls for the result."""
+        import threading
+
+        from .. import maintenance
+        _guard(request)
+        if maintenance_runner is None:
+            raise HTTPException(503, "maintenance is not wired in this process")
+        if maintenance._lock.locked():
+            raise HTTPException(409, "a maintenance run is already in progress")
+        threading.Thread(target=maintenance_runner,
+                         kwargs={"trigger": "dashboard"}, daemon=True,
+                         name="maintenance-now").start()
+        return {"ok": True, "started": True}
 
     @app.post("/internal/manual")
     def internal_manual(body: ManualBody, request: Request):

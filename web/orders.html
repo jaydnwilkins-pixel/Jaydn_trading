@@ -9,14 +9,16 @@
   #editor label { font-size:.85rem; }
 </style>
 <main>
-  <h1>Orders <span class="muted" id="stamp" style="font-size:.8rem"></span></h1>
+  <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem">
+    <h1>Orders <span class="muted" id="stamp" style="font-size:.8rem"></span></h1>
+    <button id="live-btn" class="ghost" onclick="liveOpen()"
+      title="Real-money trading on Saxo: on/off, spending caps and today's usage">Live trading: …</button>
+  </div>
+  <div id="sync" class="small" style="margin:-.2rem 0 .6rem"></div>
   <p class="muted">Everything still outstanding, in one place: orders you
     approved that have not filled, the stop and target orders guarding your
     positions, and your price triggers. Edit or cancel any of them here.</p>
   <div id="editor"></div>
-
-  <h2 id="live">Live trading (real money)</h2>
-  <div id="live-panel">loading…</div>
 
   <h2>Outstanding orders</h2>
   <p class="muted small" style="margin-top:-.3rem">Buys and sells you approved
@@ -55,6 +57,14 @@
       change them on Saxo's platform.</p>
   </details>
 </main>
+
+<div class="drawer" id="live-drawer">
+  <div class="row" style="justify-content:space-between">
+    <h3>Live trading (Saxo, real money)</h3>
+    <button class="ghost" onclick="liveClose()">✕ close</button>
+  </div>
+  <div id="live-panel">loading…</div>
+</div>
 <script>
 let DATA = {entries: [], legs: [], triggers: [], quotes: {}};
 const COND = {lte: '≤', gte: '≥'};
@@ -83,7 +93,7 @@ async function apiDelete(path) {
 function renderEntries() {
   const rows = DATA.entries || [], el = document.getElementById('entries');
   if (!rows.length) { el.innerHTML = '<p class="muted">No outstanding orders.</p>'; return; }
-  el.innerHTML = `<table class="ot"><tr><th>Stock</th><th>Order</th><th class="num">Shares</th><th class="num">Limit</th>
+  el.innerHTML = `<table class="ot"><tr><th>Stock</th><th>Order</th><th class="num">Shares</th><th class="num">Limit price<br><span class="muted small">per share</span></th>
     <th class="num">Value</th><th class="num">Current price</th><th class="num">Stop</th><th class="num">Target</th>
     <th>Account</th><th>Status</th><th>Expires</th><th></th></tr>${rows.map(o => {
     const p = last(o.symbol), editable = o.status !== 'partially_filled';
@@ -116,7 +126,7 @@ async function cancelOrder(id) {
   const where = o.status === 'pending_session'
     ? 'Claire is still holding it — nothing has been sent.'
     : 'It is cancelled at ' + o.account + ', together with its stop and target.';
-  if (!confirm(`Cancel ${o.side.toUpperCase()} ${fmt(o.qty, 0)} ${o.ticker} at limit ${o.limit_price}?\n\n${where}`)) return;
+  if (!confirm(`Cancel ${o.side.toUpperCase()} ${fmt(o.qty, 0)} ${o.ticker} at a limit price of ${o.limit_price} per share?\n\n${where}`)) return;
   try {
     await api('/api/order-control', {work_item_id: o.work_item_id, action: 'cancel'});
     toast(o.ticker + ' order cancelled ✓');
@@ -132,10 +142,10 @@ function editOrder(id) {
     <p class="muted small">${atVenue
       ? 'This order is at the broker. Saving <b>cancels it there</b> and puts a new order with these levels on Approvals for you to approve.'
       : 'Claire is still holding this order (sent when the market opens), so it is changed in place — no new approval needed.'}
-      Saxo refuses a stop or target more than 25% from the limit.</p>
+      Saxo refuses a stop or target more than 25% from the limit price.</p>
     <div class="row" style="gap:.5rem;flex-wrap:wrap">
       <label>shares <input id="e-qty" type="number" min="1" step="1" style="width:80px" value="${esc(o.qty)}"></label>
-      <label>limit <input id="e-entry" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.limit_price ?? '')}"></label>
+      <label>limit price <span class="muted small">(per share)</span> <input id="e-entry" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.limit_price ?? '')}"></label>
       <label>stop <input id="e-stop" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.stop_loss ?? '')}"></label>
       <label>target <input id="e-target" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.take_profit ?? '')}"></label>
       <span id="e-val" class="small"></span>
@@ -157,11 +167,11 @@ async function saveOrder(id) {
   const buy = o.side === 'buy';
   if (!v.entry) { msg.innerHTML = '<b class="bad">enter a limit price</b>'; return; }
   if (v.stop != null && (buy ? v.stop >= v.entry : v.stop <= v.entry)) {
-    msg.innerHTML = `<b class="bad">the stop must be ${buy ? 'below' : 'above'} the limit</b>`; return; }
+    msg.innerHTML = `<b class="bad">the stop must be ${buy ? 'below' : 'above'} the limit price</b>`; return; }
   if (v.target != null && (buy ? v.target <= v.entry : v.target >= v.entry)) {
-    msg.innerHTML = `<b class="bad">the target must be ${buy ? 'above' : 'below'} the limit</b>`; return; }
+    msg.innerHTML = `<b class="bad">the target must be ${buy ? 'above' : 'below'} the limit price</b>`; return; }
   if (o.status !== 'pending_session' && !confirm(
-      `Cancel the ${o.ticker} order at the broker and send a new one (limit ${v.entry}) to Approvals?`)) return;
+      `Cancel the ${o.ticker} order at the broker and send a new one (limit price ${v.entry} per share) to Approvals?`)) return;
   try {
     const out = await api('/api/order-control', {work_item_id: o.work_item_id, action: 'edit', ...v});
     msg.innerHTML = out.new_work_item_id
@@ -222,7 +232,7 @@ function editTrigger(id) {
       <label>when price <select id="g-cond"><option value="lte" ${t.condition === 'lte' ? 'selected' : ''}>falls to ≤</option>
         <option value="gte" ${t.condition === 'gte' ? 'selected' : ''}>rises to ≥</option></select></label>
       <input id="g-trig" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.trigger_price)}">
-      <label title="the most you pay (buy) or the least you accept (sell) once it fires">limit
+      <label title="the most you pay (buy) or the least you accept (sell) once it fires">limit price (per share)
         <input id="g-lim" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.limit_price)}"></label>
       <span id="g-limnote" class="muted small"></span>
       ${amount ? `<label>amount <input id="g-amt" type="number" min="0" step="0.01" style="width:100px" value="${esc(t.amount_base)}"></label>`
@@ -243,7 +253,7 @@ function editTrigger(id) {
   const trig = document.getElementById('g-trig'), lim = document.getElementById('g-lim');
   const note = document.getElementById('g-limnote');
   let linked = Number(lim.value) === Number(trig.value);
-  const show = () => { note.textContent = linked ? '= trigger price (follows it)' : 'own limit — clear it to follow the trigger price'; };
+  const show = () => { note.textContent = linked ? '= trigger price (follows it)' : 'own limit price — clear it to follow the trigger price'; };
   trig.oninput = () => { if (linked) lim.value = trig.value; show(); };
   lim.oninput = () => { linked = lim.value === '' || Number(lim.value) === Number(trig.value); show(); };
   lim.onblur = () => { if (lim.value === '') { lim.value = trig.value; linked = true; show(); } };
@@ -301,19 +311,74 @@ function liveEditing() {
     i === document.activeElement || Number(i.value) !== Number(lim[i.id.slice(4)]));
 }
 
-async function loadLive(force = false) {
-  const el = document.getElementById("live-panel");
-  if (!force && liveEditing()) return;
-  try { el.innerHTML = liveMetricsHtml(await liveLoad()); }
-  catch (e) { el.innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+/* broker sync: when the custodian last checked each broker, and whether it
+   reached it. Stale once a check is more than 3 intervals old. */
+function ago(t) {
+  if (!t) return 'never';
+  const s = Math.max(0, Math.round(Date.now() / 1000 - t));
+  return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago`
+    : s < 172800 ? `${Math.round(s / 3600)} h ago` : `${Math.round(s / 86400)} days ago`;
 }
+function renderSync() {
+  const sy = DATA.sync || {}, el = document.getElementById('sync');
+  const every = sy.every_min || 5, staleS = every * 60 * 3;
+  const fresh = t => t && Date.now() / 1000 - t < staleS;
+  const head = sy.enabled === false
+    ? '<b class="bad">Broker sync is OFF</b> (custodian schedule disabled)'
+    : `Broker sync: last check <b class="${fresh(sy.custodian_at) ? '' : 'bad'}">${ago(sy.custodian_at)}</b>
+       <span class="muted">· every ${every} min</span>`;
+  const accts = (sy.accounts || []).map(a => {
+    const ok = a.checked_at && a.ok && fresh(a.contact_at);
+    const mark = !a.checked_at ? '<span class="muted">—</span>' : ok ? '<span class="ok">✓</span>' : '<span class="bad">✗</span>';
+    const tip = !a.checked_at ? 'not checked yet'
+      : `${a.venue} · checked ${ago(a.checked_at)} · last reached ${ago(a.contact_at)}` +
+        ` · ${a.orders_checked} working order${a.orders_checked === 1 ? '' : 's'} checked` +
+        (a.error ? ` · ${a.error}` : '');
+    const real = (a.venue || '').startsWith('Saxo');
+    return `<span title="${esc(tip)}" style="margin-left:.8rem;white-space:nowrap">${mark} ${esc(a.label)}
+      <span class="muted">${a.checked_at ? (real ? esc(a.venue) + ' · ' + ago(a.contact_at)
+        : 'Claire\'s own sim — nothing external to sync') : 'not checked yet'}</span></span>`;
+  }).join('');
+  el.innerHTML = head + '<br>' + accts;
+}
+
+function liveIsOpen() {
+  return document.getElementById('live-drawer').classList.contains('open');
+}
+function renderLiveButton() {
+  const b = document.getElementById('live-btn'), st = LIVE || {};
+  b.textContent = st.armed ? '⚠ Live trading: ON' : 'Live trading: OFF';
+  b.style.cssText = st.armed
+    ? 'border-color:var(--bad);color:#fff;background:var(--bad)' : '';
+}
+async function loadLive(force = false) {
+  const el = document.getElementById('live-panel');
+  try { await liveLoad(); } catch (e) {
+    document.getElementById('live-btn').textContent = 'Live trading: ?';
+    if (liveIsOpen()) el.innerHTML = `<p class="bad">${esc(e.message)}</p>`;
+    return;
+  }
+  renderLiveButton();
+  if (liveIsOpen() && (force || !liveEditing())) el.innerHTML = liveMetricsHtml(LIVE);
+}
+function liveOpen() {
+  document.getElementById('live-drawer').classList.add('open');
+  document.body.classList.add('drawer-open');
+  loadLive(true);
+}
+function liveClose() {
+  document.getElementById('live-drawer').classList.remove('open');
+  document.body.classList.remove('drawer-open');
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && liveIsOpen()) liveClose(); });
+if (location.hash === '#live') setTimeout(liveOpen, 0);
 window.onLiveChange = () => loadLive(true);
 
 async function load() {
   loadLive();
   try {
     DATA = await api('/api/orders');
-    renderEntries(); renderTriggers(); renderLegs();
+    renderEntries(); renderTriggers(); renderLegs(); renderSync();
     document.getElementById('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
   } catch (e) {
     document.getElementById('entries').innerHTML = `<p class="bad">${esc(e.message)}</p>`;

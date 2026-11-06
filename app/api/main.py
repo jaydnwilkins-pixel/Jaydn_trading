@@ -311,7 +311,9 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
             id=body.instrument_id or f"{body.exchange}:{body.ticker}",
             ticker=body.ticker, exchange=body.exchange,
             currency=body.currency, lot_size=body.lot_size)
-        wi = desk.start_run(inst, body.kind, trigger=body.trigger)
+        # never blank: a caller that names no source is still recorded
+        wi = desk.start_run(inst, body.kind, trigger=body.trigger or
+                            "started via the API (/api/run), no source given")
         return {"work_item_id": wi}
 
     @app.get("/status")

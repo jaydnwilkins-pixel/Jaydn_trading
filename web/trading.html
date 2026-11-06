@@ -83,7 +83,8 @@ async function launch() {
   if (!t) return toast('ticker?', false);
   try {
     await api('/api/run', {ticker: t, exchange: ex,
-      currency: CCY[ex], lot_size: ex === 'SGX' ? 100 : 1});
+      currency: CCY[ex], lot_size: ex === 'SGX' ? 100 : 1,
+      trigger: 'launched from the Trading page'});
     toast(`Started researching ${t} — it will appear below`);
     lastSig = null; refresh();
   } catch (e) { toast(e.message, false); }
@@ -137,7 +138,9 @@ function origin(r) {
   const s = r.story || {};
   const d = s.origin_detail ? ` (${esc(s.origin_detail)})` : '';
   switch (s.origin) {
-    case 'you': return 'You started this run.';
+    case 'you': return `You started this run${d}.`;
+    case 'chat': return `Started from Claire's chat${d}.`;
+    case 'unrecorded': return 'Who started this run was not recorded (runs before 6 Nov; most likely you, from the Launch form).';
     case 'daily_screen': return `Picked by the daily screen${d}.`;
     case 'volume_scan': return `Started by the hourly volume scan${d}.`;
     case 'price_alert':

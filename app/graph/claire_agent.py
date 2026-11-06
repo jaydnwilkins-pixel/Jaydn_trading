@@ -14,6 +14,22 @@ MAX_TURNS_PER_THREAD = 50      # context hygiene (§17): auto-reset, desk.db is
                                # the durable record so nothing of note is lost
 
 
+# Who is talking to Claire right now, so a run she launches records it
+# (the Trading page's "started by"). Set at the start of each chat turn from
+# the chat thread and Bob's "[from Bob]" prefix. A plain holder rather than
+# a contextvar: the Claude SDK runs her tools on its own threads/loop, where
+# a contextvar set here would not be visible.
+CURRENT_ASKER = {"who": "Claire's chat"}
+
+
+def asker_for(text: str, thread: str) -> str:
+    if (text or "").lstrip().startswith("[from Bob]"):
+        return "Bob, via Claire's chat"
+    if thread == "dashboard":
+        return "you, via Claire's chat on the dashboard"
+    return "Claire's chat (/ask: voice or another assistant)"
+
+
 def build_tools(conn, repo, desk, market):
     @tool
     def run_pipeline(ticker: str, exchange: str = "NASDAQ") -> str:
@@ -26,7 +42,8 @@ def build_tools(conn, repo, desk, market):
                           exchange=exchange,
                           currency="GBP" if ccy == "GBp" else ccy,
                           lot_size=100 if exchange == "SGX" else 1)
-        return desk.start_run(inst)
+        return desk.start_run(inst,
+                              trigger=f"chat: {CURRENT_ASKER['who']}")
 
     @tool
     def pipeline_status(work_item_id: str) -> str:
@@ -260,6 +277,7 @@ class Claire:
             yield json.dumps({"kind": "error", "text": str(e)}) + "\n"
             yield json.dumps({"kind": "done"}) + "\n"
             return
+        CURRENT_ASKER["who"] = asker_for(text, thread)
         history = self._load(thread)            # survives restarts (§17)
         if len(history) > MAX_TURNS_PER_THREAD * 2:
             history.clear()                     # §17 auto-reset

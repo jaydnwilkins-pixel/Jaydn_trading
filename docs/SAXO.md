@@ -99,6 +99,13 @@ Notes:
   HK / Tokyo pick is refused with a clear reason (no exact Saxo listing).
 - The desk's book for this account (`saxo-paper`) has its own paper cash;
   Saxo SIM has €1M. The desk sizes against its book, Saxo against its own.
+- **Currencies:** the desk's `saxo-paper` book is in **SGD**, to match your
+  real Saxo account; Saxo's SIM account itself stays in **EUR** (Saxo sets
+  that). The book was converted from USD on 2026-11-06 at 1.2773 with
+  `python -m app.accounting.redenominate saxo-paper SGD --rate 1.2773`
+  (desk stopped; backup and the conversion report in
+  `var/backup-20261106-*-pre-sgd/`). Past trades are restated at that one
+  rate.
 - To go back to the built-in simulator: remove `SAXO_SIM_EXECUTION=enabled`
   from `etc/claire.env` and `bin/claire restart`.
 

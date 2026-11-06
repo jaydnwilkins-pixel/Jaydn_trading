@@ -73,7 +73,9 @@ def main(argv=None):
         r = httpx.post(f"{args.api}/api/run",
                        json={"ticker": ticker, "exchange": ex,
                              "currency": CCY[ex],
-                             "lot_size": 100 if ex == "SGX" else 1},
+                             "lot_size": 100 if ex == "SGX" else 1,
+                             "trigger": "screener (autonomous CLI): "
+                                        "most-active pick"},
                        timeout=10)
         if r.status_code == 200:
             started.append(r.json()["work_item_id"])

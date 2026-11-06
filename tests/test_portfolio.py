@@ -218,3 +218,25 @@ def test_search_prefers_twelvedata_reference_endpoint():
         raise AssertionError("Yahoo must not be used for search")
     m = Market(_get=yahoo_forbidden, primary=TD(), clock=lambda: 1000)
     assert m.search("dbs")[0]["src"] == "twelvedata"
+
+
+def test_trailing_level_is_drawn_in_the_stocks_own_currency():
+    """A USD stock in an SGD book: the watcher keeps its peak in SGD (the
+    book's base); the level shown beside USD prices must be in USD."""
+    from app.accounting import db as _db
+    from app.portfolio import levels_for
+    conn = _db.connect(":memory:")
+    _db.init(conn)
+    conn.execute("INSERT INTO price_alerts (instrument_id, rule, threshold,"
+                 " armed, peak_base, account_id, side) VALUES"
+                 " ('NYSE:STVN','trail_pct',10,1,18.872,'saxo-paper',1)")
+    pos = {"instrument_id": "NYSE:STVN", "account_id": "saxo-paper",
+           "qty": 68}
+    fills = [{"side": "buy", "qty": 68, "price_native": 14.62,
+              "fx_rate": 1.2773, "work_item_id": None}]
+    lv = levels_for(conn, pos, fills, fx=1.2773)
+    assert lv["alert"] == pytest.approx(14.775 * 0.9, rel=1e-3)   # USD
+    assert "of 14.77" in lv["alert_rule"]          # 18.872 SGD ÷ 1.2773
+    # no live rate: the rate at the opening fill is used instead
+    assert levels_for(conn, pos, fills)["alert"] == pytest.approx(
+        14.775 * 0.9, rel=1e-3)

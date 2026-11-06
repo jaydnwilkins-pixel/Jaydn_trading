@@ -113,6 +113,21 @@ pre { background:var(--bg); border:1px solid var(--line); border-radius:8px;
 .medge { fill:none; stroke:#4a6a8c; stroke-width:1.3; }
 .medge.info { stroke:#1d8a7c; stroke-dasharray:5 4; }
 .medge.loop { stroke:#b08a3a; stroke-dasharray:6 4; }
+/* animated lines: the dashes travel along each line in the direction it
+   points (start → arrowhead). Each keyframe shifts by exactly one dash
+   cycle, so the loop is seamless. Run flow moves fastest; data and the
+   shortcut paths drift more slowly so they read as secondary. */
+.medge { stroke-dasharray:9 5; animation:medge-flow 1.1s linear infinite; }
+.medge.info { animation:medge-info 1.6s linear infinite; }
+.medge.loop { animation:medge-loop 2s linear infinite; }
+@keyframes medge-flow { to { stroke-dashoffset:-14; } }
+@keyframes medge-info { to { stroke-dashoffset:-9; } }
+@keyframes medge-loop { to { stroke-dashoffset:-10; } }
+@media (prefers-reduced-motion: reduce) {
+  .medge { animation:none; stroke-dasharray:none; }
+  .medge.info { stroke-dasharray:5 4; }
+  .medge.loop { stroke-dasharray:6 4; }
+}
 /* edge labels: small, and outside the boxes (they used to inherit the page
    font and sprawl across the lines) */
 .elabel { fill:#7d93ad; font-size:9.5px; font-family:var(--mono); }

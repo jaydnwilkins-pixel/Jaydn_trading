@@ -2076,8 +2076,17 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             elif trig.startswith("screener") or kind == "screen":
                 origin = "daily_screen"
                 reason = trig.split(": ", 1)[1] if ": " in trig else None
+            elif trig.startswith("launched from the Trading page"):
+                origin, reason = "you", "the Launch form on the Trading page"
+            elif trig.startswith("launched from the Markets page"):
+                origin, reason = "you", "Research on the Markets page"
+            elif trig.startswith("manual "):
+                origin, reason = "you", trig
+            elif trig.startswith("chat: "):
+                origin, reason = "chat", trig[len("chat: "):]
             elif not trig:
-                origin = "you"
+                # runs launched before 2026-11-06 recorded no source
+                origin = "unrecorded"
             else:
                 origin = "other"
                 reason = trig

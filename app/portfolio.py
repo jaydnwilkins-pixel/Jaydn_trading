@@ -65,6 +65,7 @@ def fills_for(conn, account_id, instrument_id) -> list[dict]:
              "qty": float(_d(e["qty"])),
              "price_native": float(_d(e["price_native"])),
              "commission": float(_d(e["commission"])),
+             "fx_rate": float(_d(e["fx_rate"])),
              "work_item_id": e["work_item_id"]}
             for e in conn.execute(
                 "SELECT * FROM executions WHERE account_id=? AND"
@@ -72,9 +73,12 @@ def fills_for(conn, account_id, instrument_id) -> list[dict]:
                 (account_id, instrument_id))]
 
 
-def levels_for(conn, position, fills) -> dict:
+def levels_for(conn, position, fills, fx=None) -> dict:
     """The lines worth drawing: your average cost, the thesis stop/target
-    that justified the trade, and the watcher's alert threshold."""
+    that justified the trade, and the watcher's alert threshold — all in the
+    instrument's own currency. `fx` is native → account base (current); the
+    watcher stores its trailing peak in BASE currency, so it is converted
+    back here (falling back to the rate at the last opening fill)."""
     out = {"avg_cost_native": None, "stop_loss": None, "take_profit": None,
            "entry_low": None, "entry_high": None, "alert": None,
            "work_item_id": None}
@@ -115,7 +119,12 @@ def levels_for(conn, position, fills) -> dict:
         # draw the floor where it ACTUALLY sits — trailed from the best
         # price seen, not pinned to entry. Falls back to average cost until
         # the watcher's first tick has set a peak. A short's stop is ABOVE.
-        ref = alert["peak_base"] or out["avg_cost_native"]
+        ref = out["avg_cost_native"]
+        if alert["peak_base"]:
+            rate = float(fx) if fx else next(
+                (f.get("fx_rate") for f in reversed(opens)
+                 if f.get("fx_rate")), None)
+            ref = alert["peak_base"] / rate if rate else None
         if ref:
             sign = 1 if short else -1
             out["alert"] = ref * (1 + sign * alert["threshold"] / 100)
@@ -195,7 +204,7 @@ def build(conn, market, *, clock, cal=None) -> dict:
         p["realized_base"] = realized_for(conn, p["account_id"],
                                           p["instrument_id"])
         p["fills"] = fills_for(conn, p["account_id"], p["instrument_id"])
-        p["levels"] = levels_for(conn, p, p["fills"])
+        p["levels"] = levels_for(conn, p, p["fills"], fx=fx)
         p["legs"] = legs_for(conn, p["account_id"], p["instrument_id"])
         p["holding_days"] = (int(clock()) - (p["opened_at"] or
                                              int(clock()))) // 86400

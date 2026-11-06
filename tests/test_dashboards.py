@@ -782,7 +782,7 @@ def test_trading_page_runs_read_as_stories(web, tmp_path):
     assert fa["rows"] == 30 and fa["tries"] == 30
     assert fa["reasons"][0]["count"] == 30
     assert "whole shares" in fa["reasons"][0]["reason"]
-    assert f["origin"] == "you"
+    assert f["origin"] == "unrecorded"      # no trigger: source not recorded
     assert f["failure"]["reason"] == "the AI provider account ran out of credit"
 
     # the detail adds a short timeline and readable pipeline steps

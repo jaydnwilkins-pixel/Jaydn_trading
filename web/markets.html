@@ -312,7 +312,8 @@ async function sendToPipeline(ex) {
   try {
     const r = await api('/api/run', {ticker: sel.ticker || sel.symbol,
       exchange: ex, currency: CCY[ex],
-      lot_size: ex === 'SGX' ? 100 : 1});
+      lot_size: ex === 'SGX' ? 100 : 1,
+      trigger: 'launched from the Markets page'});
     toast('launched ' + r.work_item_id + ' — watch it on Trading');
   } catch (e) { toast(e.message, false); }
 }

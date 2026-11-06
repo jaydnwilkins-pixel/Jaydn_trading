@@ -37,6 +37,18 @@ class ThreadLocalConnection:
             self._local.conn = c
         return c
 
+    def release(self):
+        """Close the CALLING thread's connection, if it opened one. Threads
+        that live for one unit of work (a dashboard request) must call this
+        when done: each connection holds desk.db + desk.db-wal open, and
+        leaving them to thread teardown leaked ~800 descriptors in four hours
+        until the dashboards process hit its 1024-file limit (2026-11-06).
+        The next use on this thread simply opens a fresh connection."""
+        c = getattr(self._local, "conn", None)
+        if c is not None:
+            self._local.conn = None
+            c.close()
+
     def __getattr__(self, name):
         return getattr(self._conn(), name)
 

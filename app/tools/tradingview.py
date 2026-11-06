@@ -2,6 +2,8 @@
 Provides the analyst-consensus "recommended buys" list per exchange via the
 public scanner endpoint's Recommend.All technical rating.
 """
+import functools
+
 import httpx
 
 # exchange → (tradingview market, tradingview exchange code)
@@ -62,11 +64,19 @@ METRIC_COLS = ["name", "description", "close", "change", "volume",
                "market_cap_basic", "currency"]
 
 
+@functools.cache
+def _shared_client() -> httpx.Client:
+    """One pooled client for the process. A fresh Client per call was never
+    closed, and each one kept its TLS socket in CLOSE-WAIT — 217 of them
+    helped exhaust the dashboards process's file limit (2026-11-06).
+    httpx.Client is safe to share between threads."""
+    return httpx.Client(timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+
+
 def _scan_symbols(symbols, columns, _client=None) -> dict:
     """yahoo symbol -> column dict, batched one request per TradingView
     market. Works for every exchange the desk trades, no key required."""
-    client = _client or httpx.Client(
-        timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    client = _client or _shared_client()
     by_market: dict = {}
     for sym in symbols:
         mkt, ticker, ccy = _tv_ticker(sym)
@@ -170,8 +180,7 @@ def listing(exchange: str, sort: str = "mcap", start: int = 0,
     if exchange not in MARKETS:
         raise TradingViewError(f"no TradingView mapping for {exchange}")
     market, code = MARKETS[exchange]
-    client = _client or httpx.Client(
-        timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    client = _client or _shared_client()
     r = client.post(
         f"https://scanner.tradingview.com/{market}/scan",
         json={"filter": [
@@ -213,8 +222,7 @@ def index_quote(exchange: str, *, _client=None) -> dict | None:
     tick = INDEX_TICKER.get(exchange)
     if not tick:
         return None
-    client = _client or httpx.Client(
-        timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    client = _client or _shared_client()
     r = client.post("https://scanner.tradingview.com/global/scan",
                     json={"symbols": {"tickers": [tick]},
                           "columns": ["name", "description", "close",
@@ -271,8 +279,7 @@ def factor_scan(exchange: str, preset: str, count: int = 12, *,
         raise TradingViewError(f"unknown scan preset {preset!r}")
     market, code = MARKETS[exchange]
     scan = SCANS[preset]
-    client = _client or httpx.Client(
-        timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    client = _client or _shared_client()
     sort_by, sort_order = scan["sort"]
     body = {
         "filter": [
@@ -314,8 +321,7 @@ def recommendations(exchange: str, count: int = 30, *, _client=None) -> dict:
     if exchange not in MARKETS:
         raise TradingViewError(f"no TradingView mapping for {exchange}")
     market, code = MARKETS[exchange]
-    client = _client or httpx.Client(
-        timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    client = _client or _shared_client()
 
     def scan(with_exchange_filter):
         filters = [{"left": "Recommend.All", "operation": "nempty"},

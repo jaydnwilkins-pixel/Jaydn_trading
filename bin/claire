@@ -197,6 +197,9 @@ cmd_start() {
     fi
     ( set -a; . "$ENV_FILE"; set +a
       cd "$ROOT"
+      # headroom over the 1024 default (descriptor-leak outage, 2026-11-06);
+      # the soft limit can be raised to the hard limit without root
+      ulimit -n "$(ulimit -Hn | awk '{print ($1 == "unlimited" || $1 > 8192) ? 8192 : $1}')" 2>/dev/null || true
       setsid "$PY" -m "$mod" </dev/null >>"$LOG_DIR/$svc.log" 2>&1 & )
     started=1
   done

@@ -23,6 +23,7 @@ Token files live in etc/ (0600), out of reach of the sandbox and agents.
 """
 import base64
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -139,10 +140,17 @@ def authorize_url(cfg, redirect_uri, challenge, state):
         "code_challenge_method": "S256", "state": state})
 
 
+@functools.cache
+def _shared_client() -> httpx.Client:
+    """One pooled client for the process; a Client per call was never
+    closed and leaked its socket (see tradingview._shared_client)."""
+    return httpx.Client(timeout=20)
+
+
 def _token_request(cfg, data, client=None):
     data = {**data, "client_id": cfg["app_key"]}
     auth = (cfg["app_key"], cfg["secret"]) if cfg.get("secret") else None
-    c = client or httpx.Client(timeout=20)
+    c = client or _shared_client()
     r = c.post((cfg.get("auth_base") or AUTH_BASE) + "/token", data=data,
                auth=auth)
     if r.status_code != 200 and r.status_code != 201:
@@ -318,7 +326,7 @@ def _get(what, which=None, *, env=os.environ, client=None, clock=time.time,
         raise SaxoError(f"{what!r} is not a read-only Saxo endpoint")
     w = _which(which)
     token = access_token(w, env=env, client=client, clock=clock, path=path)
-    c = client or httpx.Client(timeout=20)
+    c = client or _shared_client()
     r = c.get(api_base(w) + READ_PATHS[what],
               headers={"Authorization": f"Bearer {token}"})
     if r.status_code == 401:

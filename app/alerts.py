@@ -133,8 +133,8 @@ def send(text, *, title="Claire", path=TELEGRAM_ENV, client=None):
     sent = []
     token, chat = _telegram_cfg(path)
     if token and chat:
+        c = client or httpx.Client(timeout=10)
         try:
-            c = client or httpx.Client(timeout=10)
             r = c.post(f"https://api.telegram.org/bot{token}/sendMessage",
                        data={"chat_id": chat, "text": f"{title}: {text}"})
             if r.status_code == 200:
@@ -143,6 +143,9 @@ def send(text, *, title="Claire", path=TELEGRAM_ENV, client=None):
                 print(f"alert: telegram HTTP {r.status_code}", file=sys.stderr)
         except Exception as e:                  # noqa: BLE001 — best effort
             print(f"alert: telegram failed: {e}", file=sys.stderr)
+        finally:
+            if client is None:
+                c.close()
     try:
         subprocess.run(["notify-send", "-u", "critical", title, text],
                        timeout=5, check=False, capture_output=True)

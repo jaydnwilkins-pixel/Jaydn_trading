@@ -1,6 +1,7 @@
 """Web search (DESIGN.md §9): Tavily when TAVILY_API_KEY is set, else
 DuckDuckGo (free, keyless, noticeably weaker — the recommended upgrade is a
 Tavily key)."""
+import functools
 import ipaddress
 import os
 import re
@@ -9,9 +10,22 @@ import socket
 import httpx
 
 
+# Shared pooled clients: a Client per call was never closed and leaked its
+# socket until garbage collection (see tradingview._shared_client).
+@functools.cache
+def _search_client() -> httpx.Client:
+    return httpx.Client(timeout=15, follow_redirects=True)
+
+
+@functools.cache
+def _page_client() -> httpx.Client:
+    return httpx.Client(timeout=20, follow_redirects=False,
+                        headers={"User-Agent": "Mozilla/5.0"})
+
+
 def web_search(query: str, *, max_results=8, env=os.environ,
                _client=None) -> list[dict]:
-    client = _client or httpx.Client(timeout=15, follow_redirects=True)
+    client = _client or _search_client()
     key = env.get("TAVILY_API_KEY")
     if key:
         r = client.post("https://api.tavily.com/search",
@@ -75,8 +89,7 @@ def fetch_page(url: str, *, max_chars=20000, _client=None,
     """Size-capped readability-ish extraction: strip tags, collapse space.
     Redirects are followed by hand so every hop is re-checked against
     _check_public (an open redirect must not bounce us onto loopback)."""
-    client = _client or httpx.Client(timeout=20, follow_redirects=False,
-                                     headers={"User-Agent": "Mozilla/5.0"})
+    client = _client or _page_client()
     for _ in range(MAX_REDIRECTS + 1):
         _check_public(url, _resolve)
         r = client.get(url, follow_redirects=False)

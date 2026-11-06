@@ -3021,6 +3021,17 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
         return cal or sessions.DEFAULTS
 
     class Server(ThreadingHTTPServer):
+        def process_request_thread(self, request, client_address):
+            """One thread per request, so close that thread's desk.db
+            connection when the request ends (db.ThreadLocalConnection
+            .release). A raw :memory: connection (tests) has no release."""
+            try:
+                super().process_request_thread(request, client_address)
+            finally:
+                release = getattr(conn, "release", None)
+                if callable(release):
+                    release()
+
         def handle_error(self, request, client_address):
             """A browser closing an SSE stream is normal, not an error — it
             was filling the log with tracebacks and hiding the real ones."""

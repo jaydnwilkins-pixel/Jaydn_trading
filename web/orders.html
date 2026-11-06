@@ -1,5 +1,5 @@
 <meta charset="utf-8"><title>Claire — Orders</title>
-<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/orderinfo.js"></script>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/orderinfo.js"></script><script src="/live.js"></script>
 <script>nav('/orders')</script>
 <style>
   .ot td { vertical-align:top; font-size:.85rem; }
@@ -14,6 +14,9 @@
     approved that have not filled, the stop and target orders guarding your
     positions, and your price triggers. Edit or cancel any of them here.</p>
   <div id="editor"></div>
+
+  <h2 id="live">Live trading (real money)</h2>
+  <div id="live-panel">loading…</div>
 
   <h2>Outstanding orders</h2>
   <p class="muted small" style="margin-top:-.3rem">Buys and sells you approved
@@ -291,7 +294,23 @@ function renderLegs() {
   }).join('')}</table>`;
 }
 
+function liveEditing() {
+  // don't wipe a limit you are typing when the 30-second refresh comes round
+  const lim = (LIVE && LIVE.limits) || {};
+  return [...document.querySelectorAll('[id^="lim-"]')].some(i =>
+    i === document.activeElement || Number(i.value) !== Number(lim[i.id.slice(4)]));
+}
+
+async function loadLive(force = false) {
+  const el = document.getElementById("live-panel");
+  if (!force && liveEditing()) return;
+  try { el.innerHTML = liveMetricsHtml(await liveLoad()); }
+  catch (e) { el.innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+}
+window.onLiveChange = () => loadLive(true);
+
 async function load() {
+  loadLive();
   try {
     DATA = await api('/api/orders');
     renderEntries(); renderTriggers(); renderLegs();

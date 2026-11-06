@@ -1,10 +1,11 @@
 <meta charset="utf-8"><title>Claire — Mission Control</title>
-<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
+<link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/live.js"></script>
 <script>nav('/')</script>
 <main>
   <h1>Mission Control <span id="conn" class="pill">connecting…</span></h1>
   <div class="statstrip" id="strip"></div>
   <div id="banner"></div>
+  <div id="live-switch"></div>
 
   <div id="pending"></div>
 
@@ -752,8 +753,18 @@ async function refresh() {
   renderStrip();
   renderPending();
   renderMap();
+  renderLiveSwitch();
   connPill('loaded');
 }
+async function renderLiveSwitch() {
+  const el = document.getElementById('live-switch');
+  try {
+    el.innerHTML = liveSwitchHtml(await liveLoad(), {compact: true}) +
+      '<div class="muted small" style="margin:-.5rem 0 1rem;text-align:right">' +
+      '<a href="/orders#live">live limits &amp; usage →</a></div>';
+  } catch (e) { el.innerHTML = ''; }
+}
+window.onLiveChange = renderLiveSwitch;
 /* warnings: each can be cleared; "failed runs" returns only for new
    failures, any other after a day if still true (or at once if it changes) */
 function renderFlags() {

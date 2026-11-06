@@ -192,6 +192,34 @@ def test_risk_limits(repo):
                           expires_at=T0 + 86400, ts=T0)
 
 
+def test_exits_are_exempt_from_size_and_trade_caps(repo):
+    """A cap must never trap the desk in a position: selling what it holds
+    passes even over max_order_base and after max_trades_per_day is used up.
+    Selling MORE than it holds is not an exit and still meets the caps."""
+    repo.create_account("capped", "alpaca", "paper", "USD",
+                        fee_model={"type": "flat", "per_trade": "0"},
+                        risk_limits={"max_order_base": 1000,
+                                     "max_trades_per_day": 1}, ts=T0)
+    repo.deposit("capped", to_micro("100000"), ts=T0)
+    repo.create_order(id="in", account_id="capped",
+                      instrument_id="NASDAQ:NVDA", side="buy",
+                      qty=to_micro("8"), limit_price=to_micro("100"),
+                      status="placed", expires_at=T0 + 86400, ts=T0)
+    repo.record_fill("in", broker_fill_id="f", qty=to_micro("8"),
+                     price_native=to_micro("100"), fx_rate=to_micro("1"),
+                     ts=T0)
+    # 8 × 150 = 1,200 > 1,000, and the day's one trade is already used
+    repo.create_order(id="out", account_id="capped",
+                      instrument_id="NASDAQ:NVDA", side="sell",
+                      qty=to_micro("8"), limit_price=to_micro("150"),
+                      expires_at=T0 + 86400, ts=T0)
+    with pytest.raises(RiskLimitExceeded):
+        repo.create_order(id="over", account_id="capped",
+                          instrument_id="NASDAQ:NVDA", side="sell",
+                          qty=to_micro("9"), limit_price=to_micro("100"),
+                          expires_at=T0 + 86400, ts=T0)
+
+
 def test_work_item_audit_trail(repo):
     repo.create_work_item("wi_1", "pipeline", "NVDA", ts=T0)
     repo.set_state("wi_1", "awaiting_approval", actor="system", ts=T0 + 10)

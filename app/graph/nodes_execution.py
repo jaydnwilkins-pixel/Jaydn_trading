@@ -162,7 +162,8 @@ def submit_order(repo, adapter, order_id, *, symbol, ts, claimed=False):
             protection.persist_legs(
                 repo, parent=repo.order(order_id), legs=placed.legs,
                 side=protection.leg_side(o["side"]), qty=o["qty"], ts=ts)
-        if live is not None:
+        if live is not None and o["side"] == "buy":
+            # only entries use the day's live allowance; exits are exempt
             from .. import live_trading
             live_trading.record_placed(repo.conn, account_id=o["account_id"],
                                        order_id=order_id,

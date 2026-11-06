@@ -16,6 +16,8 @@ moment of placement — not once at approval:
    the live account's base currency: per-order size, orders per day and
    total notional per day. Limit orders only. Sells only reduce positions
    THE DESK opened (it can never sell, or short, what Richard holds himself).
+   Those exits are exempt from the size and daily caps, and do not use up
+   the day's allowance: the caps limit new exposure, never getting out.
 
 Any failure refuses the order with a reason. Nothing here can make an order
 happen; it can only stop one.
@@ -109,18 +111,63 @@ def disarm(conn, *, actor, reason, clock=time.time):
     return False
 
 
-def set_limits(conn, new: dict):
+def set_limits(conn, new: dict, *, actor="terminal", clock=time.time):
     allowed = set(DEFAULT_LIMITS)
     bad = set(new) - allowed
     if bad:
         raise ValueError(f"unknown live limits {sorted(bad)}")
     for k, v in new.items():
-        if not isinstance(v, (int, float)) or v <= 0:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
             raise ValueError(f"{k} must be a positive number")
-    merged = {**limits(conn), **new}
+    if "max_orders_per_day" in new and new["max_orders_per_day"] != int(
+            new["max_orders_per_day"]):
+        raise ValueError("max_orders_per_day must be a whole number")
+    before = limits(conn)
+    merged = {**before, **new}
     conn.execute("UPDATE live_trading SET limits=? WHERE id=1",
                  (json.dumps(merged),))
+    if merged != before:
+        _event(conn, "limits", actor, clock, before=before, after=merged)
     return merged
+
+
+def metrics(conn, *, clock=time.time) -> dict:
+    """What the Orders page tracks: today's allowance per live account (used
+    and left), live orders and their outcomes, and the switch's audit log."""
+    now = int(clock())
+    start = _day_start(now)
+    lim = limits(conn)
+    accounts = {}
+    for a in live_accounts(conn):
+        u = usage_today(conn, a["id"], clock=clock)
+        (exits,) = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE account_id=? AND side='sell'"
+            " AND leg IS NULL AND placed_at >= ?", (a["id"], start)).fetchone()
+        (n_all, notional_all) = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(notional_base),0) FROM"
+            " live_order_log WHERE account_id=?", (a["id"],)).fetchone()
+        accounts[a["id"]] = {
+            "currency": a["base_currency"],
+            "orders_today": u["orders"],
+            "orders_left": max(0, int(lim["max_orders_per_day"]) - u["orders"]),
+            "notional_today": u["notional_base"],
+            "notional_left": max(0.0, lim["max_daily_notional_base"]
+                                 - u["notional_base"]),
+            "exits_today": exits,
+            "entries_all_time": n_all,
+            "notional_all_time": notional_all / 1e6,
+        }
+    orders = [dict(r) for r in conn.execute(
+        "SELECT o.id, o.account_id, o.instrument_id, o.side, o.qty / 1e6 qty,"
+        " o.limit_price / 1e6 limit_price, o.status, o.placed_at,"
+        " o.created_at, o.work_item_id FROM orders o JOIN broker_accounts a"
+        " ON a.id=o.account_id WHERE a.environment='live' AND o.leg IS NULL"
+        " ORDER BY COALESCE(o.placed_at, o.created_at) DESC LIMIT 20")]
+    events = [dict(r) for r in conn.execute(
+        "SELECT ts, actor, event, payload FROM live_trading_events"
+        " ORDER BY id DESC LIMIT 20")]
+    return {"day_start": start, "accounts": accounts, "orders": orders,
+            "events": events}
 
 
 def _event(conn, what, actor, clock, **payload):
@@ -161,6 +208,12 @@ def check_order(conn, env, *, account_id, side, qty_micro, limit_micro,
         raise LiveTradingBlocked(
             "a live sell may only reduce a position the desk opened — it "
             "would sell or short shares the desk does not hold")
+    if side == "sell":
+        # an exit from a desk-held position: the size and daily caps below
+        # exist to limit NEW exposure, and must never stop the desk getting
+        # out (a winner that grew past max_order_base, or a third order on
+        # a busy day). Locks 1-3 and limit-only still apply above.
+        return
     lim = limits(conn)
     ccy = acct["base_currency"]
     notional = notional_base_micro / 1e6

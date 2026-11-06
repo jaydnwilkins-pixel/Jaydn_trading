@@ -50,7 +50,8 @@ STATIC = {"/style.css": ("style.css", "text/css"),
           "/nav.js": ("nav.js", "text/javascript"),
           "/charts.js": ("charts.js", "text/javascript"),
           "/sell.js": ("sell.js", "text/javascript"),
-          "/orderinfo.js": ("orderinfo.js", "text/javascript")}
+          "/orderinfo.js": ("orderinfo.js", "text/javascript"),
+          "/live.js": ("live.js", "text/javascript")}
 
 PIPELINE_EDGES = [("prepare", "fundamental"), ("prepare", "technical"),
                   ("prepare", "news"), ("fundamental", "bull"),
@@ -947,10 +948,45 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     return self._send(200, self._trade_check(body))
                 if u.path == "/api/saxo-login-start":
                     return self._saxo_login_start(body)
+                if u.path == "/api/live-arm":
+                    # ARMING from the dashboard (§22.1): paired key + the
+                    # typed phrase + a browser on THIS PC (loopback). A LAN
+                    # device can disarm but never arm. Locks 1 (env flag) and
+                    # 3 (per-trade LIVE approval) are untouched by this.
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    if not self._from_this_pc():
+                        raise HTTPError(403, "live trading can only be armed "
+                                        "from a browser on the desk's own PC")
+                    from . import live_trading
+                    try:
+                        live_trading.arm(
+                            conn, env or {}, actor="dashboard:this-pc",
+                            phrase=str(body.get("phrase") or "").strip(),
+                            clock=clock)
+                    except live_trading.LiveTradingBlocked as e:
+                        return self._send(409, {"error": str(e)})
+                    return self._send(200, {"ok": True,
+                                            **self._live_status()})
+                if u.path == "/api/live-limits":
+                    if not self._paired():
+                        raise HTTPError(403, "dashboard not paired")
+                    from . import live_trading
+                    new = body.get("limits")
+                    if not isinstance(new, dict) or not new:
+                        return self._send(400, {"error": "limits: {name: "
+                                                "value, ...} required"})
+                    try:
+                        live_trading.set_limits(
+                            conn, new, actor="dashboard ("
+                            f"{self.client_address[0]})", clock=clock)
+                    except ValueError as e:
+                        return self._send(400, {"error": str(e)})
+                    return self._send(200, {"ok": True,
+                                            **self._live_status()})
                 if u.path == "/api/live-disarm":
-                    # DISARM is always one click away (§22). ARMING is
-                    # deliberately not offered here: only from a terminal on
-                    # this machine, `bin/claire live arm`.
+                    # DISARM is always one click away, from any paired
+                    # device (§22). Arming: /api/live-arm (this PC only).
                     if not self._paired():
                         raise HTTPError(403, "dashboard not paired")
                     from . import live_trading
@@ -2613,9 +2649,28 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     p["pnl_base"] = round(p["pnl"] * fx, 2)
                     p["exposure_base"] = round(abs(amt * cur * fx), 2)
 
+        def _from_this_pc(self):
+            """The browser is on this machine (loopback), not the LAN."""
+            ip = (self.client_address or ("",))[0]
+            return ip in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
         def _live_status(self):
             from . import live_trading
-            return live_trading.status(conn, env or {}, clock=clock)
+            st = live_trading.status(conn, env or {}, clock=clock)
+            # why arming is not possible right now, in the order to fix it
+            if not st["enabled_in_env"]:
+                why = (f"{live_trading.ENV_FLAG}=enabled is not set in "
+                       "etc/claire.env (then bin/claire restart)")
+            elif not st["accounts"]:
+                why = "no live account yet: run bin/claire live setup"
+            elif not self._from_this_pc():
+                why = ("arming is only accepted from a browser on the desk's "
+                       "own PC (http://127.0.0.1:7787)")
+            else:
+                why = None
+            return {**st, "metrics": live_trading.metrics(conn, clock=clock),
+                    "arm_phrase": live_trading.ARM_PHRASE,
+                    "can_arm_here": why is None, "arm_blocked": why}
 
         def _agent_graph(self):
             """Every node carries a status the UI renders identically:

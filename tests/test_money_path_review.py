@@ -228,17 +228,18 @@ def test_h7_market_order_uses_reference_price():
                         None, T0)
 
 
-def test_h7_execute_market_sell_is_capped():
+def test_h7_execute_exit_is_not_trapped_by_the_cap():
+    """Orders are still measured (tests above); but selling what the
+    desk holds is an exit, and a size cap must never trap the desk in a
+    position. Before exits were exempt, this ~$1000 sell under a $500 cap
+    was refused — leaving the position unsellable through the desk."""
     w = World(fill_mode="instant")
     w.execute(w.state())                        # buy 10
     w.custodian.run_once()
     w.conn.execute("UPDATE broker_accounts SET risk_limits=?",
                    (json.dumps({"max_order_base": 500}),))
-    st = w.state(wi="wi_s", direction="sell")
-    st = st.model_copy(update={"thesis": Thesis(
-        ticker="NVDA", direction="sell", conviction=0.6, currency="USD")})
-    with pytest.raises(RiskLimitExceeded):      # ~$1000 market sell > $500
-        w.execute(st)
+    w.execute(w.state(wi="wi_s", direction="sell"))   # ~$1000 exit > $500
+    assert len(w.broker.orders) == 2            # the venue saw the sell
 
 
 # ── H8: custodian isolation, reserved cash, restarts, expiry ────────────────

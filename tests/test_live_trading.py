@@ -158,6 +158,40 @@ def test_daily_order_and_notional_limits(world):
     assert big.status == "rejected" and "daily limit" in big.detail
 
 
+def test_live_exits_bypass_size_and_daily_caps(world):
+    """Getting out is never capped: a desk-held position that grew past the
+    per-order limit can be sold on a day whose allowance is used up, and
+    the exit does not eat into the allowance. Locks 1-3 still apply."""
+    conn, repo = world
+    arm(conn)
+    venue = Venue()
+    for i in range(2):                    # use up today's 2 live orders
+        assert submit_order(repo, venue, order(repo, oid=f"b{i}"),
+                            symbol="AAPL", ts=T0).status == "accepted"
+    repo.record_fill("b0", broker_fill_id="f0", qty=to_micro("2"),
+                     price_native=to_micro("200"), fx_rate=to_micro("1"),
+                     ts=T0)
+    # 2 × 600 = 1,200 > 1,000 per-order limit, and 0 orders left today
+    out = submit_order(repo, venue,
+                       order(repo, oid="s1", side="sell", limit="600"),
+                       symbol="AAPL", ts=T0)
+    assert out.status == "accepted"
+    used = live_trading.usage_today(conn, "saxo-live", clock=lambda: T0)
+    assert used == {"orders": 2, "notional_base": 800.0}     # buys only
+    # still limit-only, and still never more than the desk holds
+    assert "limit orders" in submit_order(
+        repo, venue, order(repo, oid="s2", side="sell", limit=None),
+        symbol="AAPL", ts=T0).detail
+    assert "position the desk opened" in submit_order(
+        repo, venue, order(repo, oid="s3", side="sell", qty="3"),
+        symbol="AAPL", ts=T0).detail
+    # and disarmed means no exits either: a human re-arms or sells at Saxo
+    live_trading.disarm(conn, actor="test", reason="t", clock=lambda: T0)
+    assert "disarmed" in submit_order(
+        repo, venue, order(repo, oid="s4", side="sell"),
+        symbol="AAPL", ts=T0).detail
+
+
 def test_paper_orders_are_untouched_by_the_switch():
     conn = db.connect(":memory:")
     db.init(conn)

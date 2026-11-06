@@ -232,6 +232,12 @@ class Repo:
         limits = json.loads(acct["risk_limits"])
         if not limits:
             return
+        if self._is_exit(account_id, instrument_id, side, qty):
+            # An order that only shrinks an existing position reduces risk:
+            # a size or trades-per-day cap must never trap the desk in a
+            # position it is trying to leave (same reasoning as protective
+            # legs, record_leg). Exits still need approval like any order.
+            return
         notional_caps = (limits.get("max_order_base") is not None or
                          (side == "buy" and
                           limits.get("max_position_pct") is not None))
@@ -297,6 +303,14 @@ class Repo:
                 (account_id, start, end)).fetchone()
             if n + 1 > cap:
                 raise RiskLimitExceeded(f"would exceed max_trades_per_day {cap}")
+
+    def _is_exit(self, account_id, instrument_id, side, qty) -> bool:
+        """True when the order only reduces the desk's position: a sell of
+        no more than is held long, or a buy of no more than is held short."""
+        held, _, _ = self.position(account_id, instrument_id)
+        if side == "sell":
+            return 0 < qty <= held
+        return side == "buy" and held < 0 and qty <= -held
 
     def _local_day(self, instrument_id, ts) -> tuple[int, int]:
         """[start, end) unix seconds of the exchange-local calendar day that

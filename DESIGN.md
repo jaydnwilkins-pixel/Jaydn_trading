@@ -1285,14 +1285,19 @@ custodian places it, not only when it was approved:
 | # | Lock | Where | Who can change it |
 |---|------|-------|-------------------|
 | 1 | **Enabled**: `CLAIRE_LIVE_TRADING=enabled` | `etc/claire.env` (0600), read at process start | someone with a shell on this machine; restart required |
-| 2 | **Armed** | `live_trading` row in desk.db | ARM: only `bin/claire live arm` — interactive terminal, typed phrase `ARM LIVE TRADING`. DISARM: anyone, any time (`bin/claire live disarm`, the Approvals page button, the custodian automatically) |
+| 2 | **Armed** | `live_trading` row in desk.db | ARM: typed phrase `ARM LIVE TRADING`, either `bin/claire live arm` (interactive terminal) or `POST /api/live-arm` from a paired browser **on loopback only** (Mission Control / Orders switch). DISARM: anyone, any time (`bin/claire live disarm`, Mission Control / Orders / Approvals, the custodian automatically) |
 | 3 | **Human-approved** | the §10 token gate | the approval names broker `saxo_live` AND carries `confirm_live: "LIVE"`, typed on the card; refused unless armed |
-| 4 | **Within live limits** | `live_trading.limits`, account base ccy | `bin/claire live limits k=v` (terminal) |
+| 4 | **Within live limits** | `live_trading.limits`, account base ccy | `bin/claire live limits k=v`, or the Orders page (`POST /api/live-limits`, any paired device, applied at once) — every change logged to `live_trading_events` with before/after |
 
 Lock 1 caps the blast radius of everything else: a desk.db that says "armed"
-means nothing without the file flag. Arming is not offered by the dashboards,
-Claire's chat, Bob, or any agent tool — deliberately, because those are
-reachable from the network or by an LLM.
+means nothing without the file flag. Arming is not offered to the LAN,
+Claire's chat, or any agent tool. **Amendment (2026-11-06, Richard's
+decision):** the dashboards may arm, but only for a request from loopback
+(a browser on the desk's own PC) carrying the dashboard key and the typed
+phrase; a LAN device gets 403. Accepted trade-off: a local process with
+shell access (Bob) could reach that endpoint, as it could already run
+`bin/claire live arm` — locks 1 and 3 (file flag, per-trade typed LIVE)
+are unaffected.
 
 ### 22.2 Live limits (defaults; deliberately small)
 
@@ -1301,6 +1306,14 @@ reachable from the network or by an LLM.
 | `max_order_base` | 1000 | one order's notional, account base currency |
 | `max_orders_per_day` | 2 | orders that actually reached Saxo, per Singapore day |
 | `max_daily_notional_base` | 2000 | sum of today's placed live notionals |
+
+The three limits apply to **entries only**. A sell that reduces a position
+the desk opened is exempt from all three and is not logged against the day's
+allowance: the limits bound new exposure, and must never trap the desk in a
+position it is trying to leave. Exits still pass locks 1–3 and limit-only.
+The same exemption applies to the per-account `risk_limits` (§7):
+`max_order_base` and `max_trades_per_day` skip any order that only shrinks
+an existing position (`Repo._is_exit`), on every account.
 
 Always, regardless of limits:
 - **Limit orders only.** No market orders on real money.

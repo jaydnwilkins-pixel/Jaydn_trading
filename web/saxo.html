@@ -43,14 +43,13 @@
   <b>Sell</b> (shown only for shares the desk bought on that account) sends a
   sell to <a href="/approvals">Approvals</a>, where you approve it.</p>
   <div class="tabs" id="tabs">
-    <button data-env="live" class="live">Saxo LIVE — real money</button>
     <button data-env="sim">Saxo SIM — paper</button>
   </div>
   <div id="view">loading…</div>
 </main>
 <script>
 const ACCOUNT = {live: 'Saxo LIVE', sim: 'Saxo SIM'};
-let ENV = new URLSearchParams(location.search).get('env') || 'live';
+let ENV = new URLSearchParams(location.search).get('env') || 'sim';
 
 function money(v, ccy) {
   /* a per-share price under 1 (PRO at 0.065) needs more than 2 decimals */

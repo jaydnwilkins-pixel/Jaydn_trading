@@ -156,6 +156,8 @@ def test_token_release_requires_pairing(web):
         assert alpaca["fee_model"]["type"] == "flat"
         # NVDA instrument isn't registered in this fixture → no session block
         assert data["cards"][0]["session"] == {}
+        # no Saxo live account exists, so none is offered — not even greyed out
+        assert not any(a["environment"] == "live" for a in data["accounts"])
 
 
 def test_thesis_action_authorization_over_http(web):

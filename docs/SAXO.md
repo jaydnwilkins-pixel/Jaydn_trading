@@ -1,8 +1,15 @@
 # Ronathan × Saxo — operating guide
 
-How Ronathan connects to your two Saxo accounts, how to sign in, how paper and
-real-money trading work, and what to do when something goes wrong. The design
+How Ronathan connects to your Saxo SIM (paper) account, how to sign in, how
+paper trading works, and what to do when something goes wrong. The design
 behind it is in [DESIGN.md §22](../DESIGN.md).
+
+**Ronathan has no Saxo live account.** Only Saxo SIM is set up, and the
+screens show no Saxo LIVE tab, section or approval choice. The live-trading
+code is still there (`bin/ronathan live`, §22); adding a live account later
+means setting `SAXO_LIVE_ACCOUNT_ID`, `SAXO_LIVE_APP_KEY` and
+`SAXO_LIVE_APP_URL`, then `bin/ronathan live setup`. The LIVE parts of this
+guide describe that future setup.
 
 | | Saxo account | Money | On Ronathan's approval card | Saxo app (developer portal) |
 |---|---|---|---|---|
@@ -24,16 +31,15 @@ from then on (§2).
 1. On the Ronathan PC, open **http://localhost:7797/saxo** — it must be
    `localhost`, not the LAN address, because Saxo sends your browser back to
    `localhost` after you log in.
-2. Pick the **Saxo LIVE** or **Saxo SIM** tab.
-3. Click **Sign in to Saxo LIVE** (or SIM), log in on Saxo's page, approve.
-   You land back on the Saxo accounts page with "Signed in ✓".
+2. Click **Sign in to Saxo SIM**, log in on Saxo's page, approve.
+      You land back on the Saxo accounts page with "Signed in ✓".
 
 The dashboard key (🔑 in the menu bar) must be set in that browser.
 
 ### From a terminal (same result)
 
 ```
-~/jaydn_trading/bin/saxo login live     # or: login sim
+~/jaydn_trading/bin/saxo login sim
 ```
 
 ### The account check
@@ -72,10 +78,9 @@ Saxo login can never point the desk at a different account.
 
 | Where | What |
 |---|---|
-| **Saxo accounts** page (`/saxo`) | Tabs for LIVE and SIM, straight from Saxo: total value, cash, unrealised P/L, available to trade; positions with P/L, P/L % and allocation; working orders (incl. stop-loss / take-profit legs held at Saxo). **Click a position to chart it** (daily prices, SMA 20/50, volume, your average cost as a dashed line; ranges 1 month – 5 years). Refreshes every 30 s. |
-| **Portfolio** page (`/portfolio`) | A "Saxo LIVE — your real account" section with the same totals and positions; click a position to open its chart on the Saxo accounts page. The desk's own paper book is shown separately below it. |
-| Ronathan / Bob / Telegram | Ask "what's in my Saxo account?" — Ronathan reads live or SIM on request and says which. |
-| Terminal | `bin/saxo positions [live|sim]` |
+| **Saxo accounts** page (`/saxo`) | Your Saxo SIM account, straight from Saxo: total value, cash, unrealised P/L, available to trade; positions with P/L, P/L % and allocation; working orders (incl. stop-loss / take-profit legs held at Saxo). **Click a position to chart it** (daily prices, SMA 20/50, volume, your average cost as a dashed line; ranges 1 month – 5 years). Refreshes every 30 s. |
+| Ronathan / Bob / Telegram | Ask "what's in my Saxo account?" — Ronathan reads your Saxo SIM account. |
+| Terminal | `bin/saxo positions sim` |
 
 None of these pages trades by itself. The only action on them is **Sell**
 (§4a), which sends a sell to the Approvals page — it is shown only for shares

@@ -146,13 +146,12 @@ def build_tools(conn, repo, desk, market):
         return json.dumps({"thesis": row and row["thesis_json"]}, default=str)
 
     @tool
-    def saxo_account(account: str = "live") -> str:
-        """Jaydn's Saxo accounts, read-only: cash, total value, open
-        positions with P/L, and working orders. account="live" is his REAL
-        money account (SAXO_LIVE_ACCOUNT_ID); account="sim" is his Saxo paper account
-        (SAXO_SIM_ACCOUNT_ID). Both are separate from the desk's own paper book — say
-        which one you are describing, and never mix real and simulated
-        figures. There is no way to trade from here."""
+    def saxo_account(account: str = "sim") -> str:
+        """Jaydn's Saxo SIM (paper) account, read-only: cash, total value,
+        open positions with P/L, and working orders (SAXO_SIM_ACCOUNT_ID).
+        It is separate from the desk's own paper book — say which one you
+        are describing. There is no Saxo live account; account="live" only
+        works if one is set up later. There is no way to trade from here."""
         from ..tools import saxo_live
         if account not in ("live", "sim"):
             return json.dumps({"error": "account must be 'live' or 'sim'"})

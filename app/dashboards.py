@@ -801,7 +801,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
                     if not self._paired():
                         return self._send(403, {"error":
                                                 "dashboard not paired"})
-                    which = q.get("env", "live")
+                    which = q.get("env", "sim")
                     if which not in ("sim", "live"):
                         return self._send(400, {"error":
                                                 "env must be sim or live"})
@@ -1471,15 +1471,6 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
             live = live_trading.status(conn, env or {})
             accounts = [_approval_account(a, repo, env or {}, live)
                         for a in conn.execute("SELECT * FROM broker_accounts")]
-            if not any(a["environment"] == "live" for a in accounts):
-                # always SHOW the real account, so it is obvious where it
-                # is and why it cannot be chosen yet (§22)
-                lid = (env or {}).get("SAXO_LIVE_ACCOUNT_ID") or ""
-                accounts.append({
-                    "id": "saxo-live", "broker": "saxo_live", "ccy": "",
-                    "environment": "live", "cash": 0, "fee_model": {},
-                    "label": f"Saxo LIVE {lid} — real money".strip(),
-                    "disabled": "not set up yet (bin/ronathan live setup)"})
             cards = []
             now = int(clock())
             for r in conn.execute(

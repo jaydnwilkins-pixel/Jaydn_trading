@@ -9,9 +9,6 @@
   <div class="exchcols" id="cols"></div>
   <div id="empty"></div>
 
-  <h2>Saxo LIVE — your real account at the broker</h2>
-  <div id="saxolive"><p class="muted">loading…</p></div>
-
   <h2>Accounts <span class="muted" style="font-size:.8rem">the desk's own
     paper book</span></h2>
   <div id="accounts"></div>
@@ -40,64 +37,6 @@ async function refresh() {
   renderStrip(); renderCols(); renderRest();
   sellRestore();                      // an open Sell form survives refresh
   startClocks();
-  renderSaxoLive();                   // independent: a Saxo hiccup never
-}                                     // blanks the rest of the page
-
-/* Real money, read-only, straight from Saxo (same data as /saxo?env=live).
-   Kept visibly apart from the desk's paper book above and below it. */
-async function renderSaxoLive() {
-  const el = document.getElementById('saxolive');
-  let d;
-  try { d = await api('/api/saxo-account?env=live'); }
-  catch (e) {
-    el.innerHTML = `<div class="card"><p class="muted">${esc(e.message)} —
-      this section needs the dashboard key (🔑) because it shows your real
-      account.</p></div>`;
-    return;
-  }
-  const link = `<a href="/saxo?env=live">Saxo accounts page →</a>`;
-  if (d.error) {
-    el.innerHTML = `<div class="card" style="border:2px solid var(--bad)">
-      <b class="bad">⚠ REAL MONEY</b> · account ${esc(d.account_id || '')} ·
-      <span class="muted">${esc(d.error)}</span> · ${link}
-      (sign in there)</div>`;
-    return;
-  }
-  const b = d.balance || {}, ccy = b.Currency || '', pos = d.positions || [];
-  const m = v => v == null ? '—' : fmt(v, 2) + ' ' + esc(ccy);
-  const sgn = (v, c) => v == null ? '—' :
-    `<span class="${v > 0 ? 'ok' : v < 0 ? 'bad' : ''}">${v > 0 ? '+' : ''}${
-      fmt(v, 2)}${c ? ' ' + esc(c) : ''}</span>`;
-  const upl = pos.some(p => p.pnl_base != null)
-    ? pos.reduce((s, p) => s + (p.pnl_base || 0), 0)
-    : b.UnrealizedMarginProfitLoss;
-  const rows = pos.length ? pos.map(p => `<tr>
-      <td><a href="/saxo?env=live&pos=${encodeURIComponent(p.symbol || '')}"
-        title="open its chart on the Saxo accounts page">
-        <b>${esc(p.symbol)}</b></a><br><span class="muted">${esc(p.name || '')}</span></td>
-      <td style="text-align:right">${fmt(p.amount, 0)}</td>
-      <td style="text-align:right">${fmt(p.avg_open_price, p.avg_open_price < 1 ? 4 : 2)}</td>
-      <td style="text-align:right">${p.price_missing ? '<span class="warn" title="Saxo sent no price for this market">—</span>'
-        : fmt(p.current_price, p.current_price < 1 ? 4 : 2)}${p.price_src ? `<br><span class="muted" style="font-size:.7rem"
-        title="Saxo sends no live price for this exchange on this account">via ${esc(p.price_src)}</span>` : ''}</td>
-      <td style="text-align:right">${sgn(p.pnl, p.currency)}</td>
-      <td style="text-align:right">${p.pnl_pct == null ? '—'
-        : sgn(p.pnl_pct).replace('</span>', '%</span>')}</td>
-      <td style="text-align:right">${p.weight_pct == null ? '—'
-        : fmt(p.weight_pct, 1) + '%'}</td></tr>`).join('')
-    : `<tr><td colspan="7" class="muted">No open positions.</td></tr>`;
-  el.innerHTML = `<div class="card" style="border:2px solid var(--bad)">
-    <p><b class="bad">⚠ REAL MONEY</b> · Saxo account
-      ${esc(d.account_id || '')} · read-only · ${link}</p>
-    <p>Total value <b>${m(b.TotalValue)}</b> · cash <b>${m(b.CashBalance)}</b>
-      · unrealised P/L <b>${sgn(upl, ccy)}</b> · available to trade
-      <b>${m(b.MarginAvailableForTrading)}</b></p>
-    <table><thead><tr><th>Instrument</th><th style="text-align:right">Qty</th>
-      <th style="text-align:right">Avg cost</th>
-      <th style="text-align:right">Current price</th>
-      <th style="text-align:right">P/L</th><th style="text-align:right">P/L %</th>
-      <th style="text-align:right">Allocation</th></tr></thead>
-      <tbody>${rows}</tbody></table></div>`;
 }
 
 function renderStrip() {

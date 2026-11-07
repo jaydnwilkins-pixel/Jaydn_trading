@@ -394,7 +394,7 @@ def test_sim_trading_prefers_the_oauth_sign_in():
     src = wiring.sim_token_source(env)
     assert src.which == "sim"                        # bound to SIM, always
     b = wiring.build_brokers(env)["saxo"]
-    assert b.environment == "sim" and b._token.which == "sim"
+    assert b.environment == "sim" and b.venue._token.which == "sim"
     # the LIVE sign-in alone never serves SIM trading
     saxo_live.token_file("sim").unlink()
     saxo_live.token_file("live").write_text("{}")

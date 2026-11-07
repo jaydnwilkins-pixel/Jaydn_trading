@@ -38,13 +38,17 @@ def build_brokers(env=os.environ, conn=None):
     brokers = {"alpaca": PaperSimBroker(fill_mode="instant"),
                "saxo": PaperSimBroker(fill_mode="instant"),
                "moomoo": PaperSimBroker(fill_mode="instant")}
-    from .tools.saxo_broker import SaxoBroker
+    from .tools.saxo_broker import SaxoBroker, SaxoSimWithLocalMarkets
     if (env.get("SAXO_SIM_EXECUTION") or "").lower() == "enabled" and \
             env.get("SAXO_SIM_ACCOUNT_KEY"):
         token = sim_token_source(env)
         if token is not None:
-            brokers["saxo"] = SaxoBroker(
-                "sim", token=token, account_key=env["SAXO_SIM_ACCOUNT_KEY"])
+            # SGX shares are not offered at Saxo SIM (CFDs only): those
+            # orders are simulated in-process; everything else is Saxo's
+            brokers["saxo"] = SaxoSimWithLocalMarkets(
+                SaxoBroker("sim", token=token,
+                           account_key=env["SAXO_SIM_ACCOUNT_KEY"]),
+                PaperSimBroker(fill_mode="instant"))
     from . import live_trading
     if conn is not None and live_trading.env_enabled(env):
         acct = conn.execute("SELECT * FROM broker_accounts WHERE"

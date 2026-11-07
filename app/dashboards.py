@@ -2812,7 +2812,10 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 if adapter == "saxo-sim":
                     bstate, bdetail = "ok", ("orders go to Saxo SIM — real "
                                              "Saxo order handling, "
-                                             "simulated money")
+                                             "simulated money; SGX shares "
+                                             "are simulated by the desk "
+                                             "(Saxo SIM lists them only as "
+                                             "CFDs)")
                 elif adapter == "saxo-live":
                     bstate, bdetail = "warn", ("REAL MONEY at Saxo — only "
                                                "while live trading is armed")

@@ -589,9 +589,10 @@ class Custodian:
             if adapter is None:
                 continue
             seen = report["sync"].get(acct["id"], {"orders": 0, "errors": []})
-            venue = (f"Saxo {adapter.environment}"
-                     if type(adapter).__name__ == "SaxoBroker"
-                     else "built-in paper sim")
+            venue = getattr(adapter, "venue_label", None) or (
+                f"Saxo {adapter.environment}"
+                if type(adapter).__name__ == "SaxoBroker"
+                else "built-in paper sim")
             try:
                 adapter.snapshot()
                 error = "; ".join(seen["errors"])[:300] or None

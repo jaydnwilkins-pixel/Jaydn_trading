@@ -480,3 +480,85 @@ class SaxoBroker:
                 "cash": bal.get("CashBalance"),
                 "currency": bal.get("Currency"),
                 "total_value": bal.get("TotalValue")}
+
+
+# Markets Saxo's SIM environment does not offer as shares (2026-11-06: every
+# SGX name — D05, O39, U11, Z74, C6L … — is listed there only as
+# CfdOnStock). Never applied to the LIVE adapter: Richard's real Saxo
+# account trades SGX shares.
+SIM_LOCAL_SUFFIXES = ("SI",)
+
+
+class SaxoSimWithLocalMarkets:
+    """The saxo-paper venue: Saxo SIM for everything it offers as shares,
+    the desk's own in-process paper sim for the markets it does not
+    (SIM_LOCAL_SUFFIXES). Same interface as SaxoBroker. Orders are routed by
+    symbol on the way in and by order id after that (the local sim's ids
+    start "sim-"; Saxo's are numeric). A locally simulated order behaves
+    exactly like the Alpaca/moomoo paper books: it fills at its limit on
+    placement, keeps no resting stop/target (the watcher's trailing alert is
+    the backstop) and does not exist at Saxo — so Saxo's working orders and
+    balances never include it."""
+
+    def __init__(self, venue, local, *, suffixes=SIM_LOCAL_SUFFIXES):
+        self.venue, self.local = venue, local
+        self.suffixes = tuple(suffixes)
+        self.environment = venue.environment
+        self.fractional = venue.fractional
+        self.venue_label = (f"Saxo {venue.environment} + built-in paper sim "
+                            f"for {', '.join('.' + s for s in self.suffixes)}")
+
+    def is_local(self, symbol) -> bool:
+        return split_symbol(symbol or "")[1] in self.suffixes
+
+    def _owner(self, broker_order_id):
+        return self.local if str(broker_order_id or "").startswith("sim-") \
+            else self.venue
+
+    def place_bracket(self, *, symbol, side, qty, limit=None, stop_loss=None,
+                      take_profit=None, client_order_id=None) -> PlacedOrder:
+        to = self.local if self.is_local(symbol) else self.venue
+        return to.place_bracket(symbol=symbol, side=side, qty=qty, limit=limit,
+                                stop_loss=stop_loss, take_profit=take_profit,
+                                client_order_id=client_order_id)
+
+    def place_oco(self, *, symbol, side, qty, stop_loss=None,
+                  take_profit=None, client_order_id=None) -> PlacedOrder:
+        if self.is_local(symbol):
+            return PlacedOrder("", "rejected", "this market is simulated "
+                               "locally — it keeps no resting stop/target")
+        return self.venue.place_oco(symbol=symbol, side=side, qty=qty,
+                                    stop_loss=stop_loss,
+                                    take_profit=take_profit,
+                                    client_order_id=client_order_id)
+
+    def precheck(self, *, symbol, side, qty, limit=None, stop_loss=None,
+                 take_profit=None) -> dict:
+        if self.is_local(symbol):
+            return {"ok": None, "simulated": True, "note":
+                    "Saxo's practice account offers these shares only as "
+                    "CFDs, so the desk simulates this order itself: it fills "
+                    "at your limit and never reaches Saxo"}
+        return self.venue.precheck(symbol=symbol, side=side, qty=qty,
+                                   limit=limit, stop_loss=stop_loss,
+                                   take_profit=take_profit)
+
+    def order_status(self, broker_order_id) -> dict:
+        return self._owner(broker_order_id).order_status(broker_order_id)
+
+    def cancel(self, broker_order_id):
+        return self._owner(broker_order_id).cancel(broker_order_id)
+
+    def related_order_ids(self, order_id) -> list:
+        if self._owner(order_id) is self.local:
+            return []
+        return self.venue.related_order_ids(order_id)
+
+    def working_orders(self) -> list:
+        return self.venue.working_orders()
+
+    def resolve(self, symbol):
+        return self.venue.resolve(symbol)
+
+    def snapshot(self) -> dict:
+        return {**self.venue.snapshot(), "local": self.local.snapshot()}

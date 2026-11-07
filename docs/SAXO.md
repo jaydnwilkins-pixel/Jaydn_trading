@@ -95,8 +95,18 @@ Saxo's simulator: limit entry plus stop-loss and take-profit legs, all held
 at Saxo. Fills are picked up by the custodian within a few minutes.
 
 Notes:
-- The SIM account currently only lists **US and European** stocks. An SGX /
-  HK / Tokyo pick is refused with a clear reason (no exact Saxo listing).
+- The SIM account offers only **US and European** stocks as shares. SGX,
+  HK, Tokyo and ASX names are listed there only as CFDs (checked
+  2026-11-06), so:
+  - **SGX** buys and sells on `saxo-paper` are **simulated by the desk
+    itself**, like the Alpaca/moomoo paper books: they fill at your limit,
+    never reach Saxo, and keep no resting stop/target at a venue (the
+    watcher's trailing alert is the backstop). They do not appear in Saxo's
+    own positions or working orders. The approval card says so instead of
+    asking Saxo. (`SIM_LOCAL_SUFFIXES` in `app/tools/saxo_broker.py`;
+    never applied to LIVE, where your real account trades SGX shares.)
+  - HK / Tokyo / ASX picks are still refused with a clear reason (no exact
+    Saxo listing).
 - The desk's book for this account (`saxo-paper`) has its own paper cash;
   Saxo SIM has €1M. The desk sizes against its book, Saxo against its own.
 - **Currencies:** the desk's `saxo-paper` book is in **SGD**, to match your

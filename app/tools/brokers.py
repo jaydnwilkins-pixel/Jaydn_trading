@@ -129,9 +129,11 @@ MCP_BROKERS = {
         note="official server; paper endpoint only"),
     "saxo": MCPBrokerConfig(
         broker="saxo",
-        command=["python", "mcp/saxo_mcp.py"],
-        env_refs=["SAXO_SIM_TOKEN"],
-        note="custom FastMCP server; SIM only, token expires every 24h"),
+        command=["venv/bin/python", "mcp/saxo_mcp.py"],
+        env_refs=["SAXO_SIM_APP_KEY"],
+        note="Ronathan's own server, SIM only; uses the desk's Saxo SIM "
+             "sign-in (renews itself), no daily token. Claude Code runs it "
+             "as the 'saxo' MCP"),
     "moomoo": MCPBrokerConfig(
         broker="moomoo",
         command=["moomoo-api-mcp"],

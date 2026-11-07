@@ -6,10 +6,13 @@ placement as MCP tools. No community/official Saxo MCP existed, so this wraps
 the OpenAPI directly with stdlib HTTP.
 
 Environment:
-  SAXO_ACCESS_TOKEN  - bearer token. For SIM: free 24h token from
-                       https://www.developer.saxo (Developer Portal -> Get Token).
-                       For live: OAuth app token (read-only use here).
   SAXO_ENV           - "sim" (default) or "live".
+  SAXO_ACCESS_TOKEN  - optional bearer token. On SIM, leave it unset: the
+                       server then uses the desk's own Saxo SIM sign-in
+                       (bin/saxo login sim, or the Saxo accounts page), which
+                       ronathan-api renews every 10 minutes — no daily token.
+                       Set it only to override that with a 24h developer-
+                       portal token. For live: OAuth app token (read-only).
 
 SAFETY: order placement and cancellation REFUSE to run unless SAXO_ENV=sim.
 Live is read-only by design (the desk's paper-only rule).
@@ -17,24 +20,51 @@ Live is read-only by design (the desk's paper-only rule).
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("saxo")
+mcp = MCPServer("saxo")
 
 ENV = os.environ.get("SAXO_ENV", "sim").strip().lower()
 BASE = ("https://gateway.saxobank.com/sim/openapi" if ENV == "sim"
         else "https://gateway.saxobank.com/openapi")
 
 
-def _call(method, path, payload=None):
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _desk_token():
+    """The desk's Saxo SIM sign-in (etc/saxo_sim_token.json), refreshed under
+    the desk's own file lock when close to expiry, so this server and
+    ronathan-api can share it safely. SIM only: never the live sign-in."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from app.api.server import load_env          # app key for a refresh
+    from app.tools import saxo_live
+    load_env(ROOT / "etc" / "ronathan.env")
+    return saxo_live.access_token("sim")
+
+
+def _token():
     token = os.environ.get("SAXO_ACCESS_TOKEN", "").strip()
+    if token or ENV != "sim":
+        return token, None
+    try:
+        return _desk_token(), None
+    except Exception as e:                       # noqa: BLE001 — reported
+        return "", (f"no Saxo SIM sign-in: {e}. Sign in on the desk's Saxo "
+                    "accounts page (or bin/saxo login sim), or pass a 24h "
+                    "token with claude mcp add -e SAXO_ACCESS_TOKEN=...")
+
+
+def _call(method, path, payload=None):
+    token, problem = _token()
     if not token:
-        return {"error": "SAXO_ACCESS_TOKEN is not set. Get a 24h SIM token "
-                         "from https://www.developer.saxo and put it in "
-                         "etc/ronathan.env"}
+        return {"error": problem or "SAXO_ACCESS_TOKEN is not set"}
     req = urllib.request.Request(
         BASE + path, method=method,
         data=json.dumps(payload).encode() if payload is not None else None,
@@ -47,7 +77,10 @@ def _call(method, path, payload=None):
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:500]
         if e.code == 401:
-            detail = "token expired or invalid — get a fresh 24h token from developer.saxo"
+            detail = ("token expired or invalid — sign in again on the "
+                      "desk's Saxo accounts page" if not os.environ.get(
+                          "SAXO_ACCESS_TOKEN") else "token expired or "
+                      "invalid — get a fresh 24h token from developer.saxo")
         return {"error": f"HTTP {e.code}", "detail": detail}
     except Exception as e:
         return {"error": str(e)}

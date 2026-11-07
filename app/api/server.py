@@ -16,7 +16,13 @@ def load_env(path=None):
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+                v = v.strip()
+                # bin/ronathan sources this file with bash, so a value with
+                # shell characters (a Saxo AccountKey has '|') is quoted;
+                # read it the same way bash does
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+                    v = v[1:-1]
+                os.environ.setdefault(k.strip(), v)
 
 
 def build_world():

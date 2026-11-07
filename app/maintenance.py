@@ -170,7 +170,10 @@ class Maintainer:
     def _check_services(self, now):
         out = []
         if self.probe is not None:
-            up = self.probe("http://127.0.0.1:7797/")
+            host = (os.environ.get("RONATHAN_DASHBOARD_BIND") or "").strip()
+            if host in ("", "0.0.0.0", "::", "localhost"):
+                host = "127.0.0.1"          # a wildcard bind answers here too
+            up = self.probe(f"http://{host}:7797/")
             out.append(_check("dashboards", "Dashboards (:7797)",
                               "ok" if up else "bad",
                               "answering" if up else "NOT answering",

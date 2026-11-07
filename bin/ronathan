@@ -31,7 +31,12 @@ DRAIN_STATE="$ROOT/var/.drain-schedules.json"
 API_PAT='-m app\.api\.server( |$)'
 DASH_PAT='-m app\.dashboards( |$)'
 API_URL='http://127.0.0.1:7798'
-DASH_URL='http://127.0.0.1:7797'
+# the dashboards answer on RONATHAN_DASHBOARD_BIND (loopback by default); a
+# wildcard bind still answers on loopback
+DASH_HOST=""
+[ -f "$ENV_FILE" ] && DASH_HOST="$(sed -n 's/^RONATHAN_DASHBOARD_BIND=//p' "$ENV_FILE" | tail -1 | tr -d "\"' ")"
+case "$DASH_HOST" in ''|0.0.0.0|::|localhost) DASH_HOST=127.0.0.1 ;; esac
+DASH_URL="http://$DASH_HOST:7797"
 DRAIN_TIMEOUT="${RONATHAN_DRAIN_TIMEOUT:-300}"
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'
@@ -221,7 +226,8 @@ cmd_status() {
     ok "ronathan-dashboards pid ${dash//$'\n'/ }  HTTP $code  → $DASH_URL"
     # when it is on the LAN, print the address another machine can use —
     # nobody should have to go looking for their own IP
-    if grep -qs '^RONATHAN_DASHBOARD_BIND=0\.0\.0\.0' "$ENV_FILE"; then
+    if [ "$DASH_HOST" != 127.0.0.1 ]; then :
+    elif grep -qs '^RONATHAN_DASHBOARD_BIND=0\.0\.0\.0' "$ENV_FILE"; then
       local lan; lan="$(hostname -I 2>/dev/null | awk '{print $1}')"
       if [ -n "$lan" ]; then
         dim "    from another device: http://$lan:7797"

@@ -37,3 +37,4 @@ pyparsing==3.3.3
 pyflakes==3.4.0
 # optional, install when activating IBKR market data (see app/tools/ibkr.py):
 # ib-insync
+mcp==2.3.0

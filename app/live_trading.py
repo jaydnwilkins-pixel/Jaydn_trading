@@ -3,11 +3,11 @@
 A real-money order can only reach Saxo when ALL of these hold, checked at the
 moment of placement — not once at approval:
 
-1. ENABLED — `CLAIRE_LIVE_TRADING=enabled` in etc/claire.env. A file on this
+1. ENABLED — `RONATHAN_LIVE_TRADING=enabled` in etc/ronathan.env. A file on this
    machine, read at process start: nothing reachable over the network (the
-   dashboards, Claire's chat, an agent) can set it.
+   dashboards, Ronathan's chat, an agent) can set it.
 2. ARMED — the `live_trading` row in desk.db says armed. Arming is done only
-   from a terminal on this machine (`bin/claire live arm`, typed
+   from a terminal on this machine (`bin/ronathan live arm`, typed
    confirmation). Disarming is one click/command from anywhere, and the desk
    disarms ITSELF when anything about a live order is in doubt.
 3. HUMAN-APPROVED — the trade went through the normal approval token gate
@@ -15,7 +15,7 @@ moment of placement — not once at approval:
 4. WITHIN THE LIVE LIMITS — separate, deliberately small caps (below), in
    the live account's base currency: per-order size, orders per day and
    total notional per day. Limit orders only. Sells only reduce positions
-   THE DESK opened (it can never sell, or short, what Richard holds himself).
+   THE DESK opened (it can never sell, or short, what Jaydn holds personally).
    Those exits are exempt from the size and daily caps, and do not use up
    the day's allowance: the caps limit new exposure, never getting out.
 
@@ -25,11 +25,11 @@ happen; it can only stop one.
 import json
 import time
 
-ENV_FLAG = "CLAIRE_LIVE_TRADING"
+ENV_FLAG = "RONATHAN_LIVE_TRADING"
 ARM_PHRASE = "ARM LIVE TRADING"
 
 # Conservative on purpose: the first weeks of live trading are for proving
-# the plumbing, not for size. Raise them with `bin/claire live limits`.
+# the plumbing, not for size. Raise them with `bin/ronathan live limits`.
 DEFAULT_LIMITS = {
     "max_order_base": 1000,           # one order, in the account base ccy
     "max_orders_per_day": 2,          # placed live orders per day (UTC+8 day)
@@ -86,11 +86,11 @@ def status(conn, env, *, clock=time.time) -> dict:
 def arm(conn, env, *, actor, phrase, clock=time.time):
     if not env_enabled(env):
         raise LiveTradingBlocked(f"{ENV_FLAG}=enabled is not set in "
-                                 "etc/claire.env — live trading cannot be armed")
+                                 "etc/ronathan.env — live trading cannot be armed")
     if phrase != ARM_PHRASE:
         raise LiveTradingBlocked(f"type exactly: {ARM_PHRASE}")
     if not live_accounts(conn):
-        raise LiveTradingBlocked("no live account — run `bin/claire live "
+        raise LiveTradingBlocked("no live account — run `bin/ronathan live "
                                  "setup` first")
     _row(conn)
     conn.execute("UPDATE live_trading SET armed=1, armed_at=?, armed_by=?,"
@@ -178,7 +178,7 @@ def _event(conn, what, actor, clock, **payload):
 
 # ── lock 4: live limits ──────────────────────────────────────────────────
 def _day_start(ts):
-    # Richard trades from Singapore (UTC+8, no DST): a "day" is his day
+    # The desk keeps Singapore time (UTC+8, no DST): a "day" is a Singapore day
     return ts - (ts + 8 * 3600) % 86400
 
 

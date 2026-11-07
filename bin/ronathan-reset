@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Return the desk to a fresh paper book: no trades, no runs, no history.
 #
-# Deliberately a separate command from bin/claire. Start and stop are routine;
+# Deliberately a separate command from bin/ronathan. Start and stop are routine;
 # this is not, and it should not sit one typo away from them.
 #
 # What survives is the desk's identity — providers, agents and their prompts,
@@ -24,7 +24,7 @@ ok()   { printf '%s✔%s %s\n' "$c_grn" "$c_off" "$*"; }
 die()  { printf '%s✘%s %s\n' "$c_red" "$c_off" "$*" >&2; exit 1; }
 dim()  { printf '%s%s%s\n' "$c_dim" "$*" "$c_off"; }
 
-# this user's processes running from this checkout only (see bin/claire)
+# this user's processes running from this checkout only (see bin/ronathan)
 pids_for() {
   local p cwd
   for p in $(pgrep -u "$(id -u)" -f -- "$1" 2>/dev/null || true); do
@@ -37,13 +37,13 @@ pids_for() {
 ASSUME_YES=0
 case "${1:-}" in
   --yes|-y) ASSUME_YES=1 ;;
-  --help|-h) say "usage: claire-reset [--yes]"; exit 0 ;;
+  --help|-h) say "usage: ronathan-reset [--yes]"; exit 0 ;;
   '') ;;
   *) die "unknown option $1" ;;
 esac
 
 [ -z "$(pids_for "$API_PAT")$(pids_for "$DASH_PAT")" ] || \
-  die "the desk is running — stop it first: bin/claire stop"
+  die "the desk is running — stop it first: bin/ronathan stop"
 
 if [ "$ASSUME_YES" != 1 ]; then
   say "This erases every trade and every run, and returns the desk to a"
@@ -129,4 +129,4 @@ rm -f "$ROOT/var/checkpoints.db" "$ROOT/var/checkpoints.db-wal" \
       "$ROOT/var/checkpoints.db-shm"
 rm -rf "$ROOT/var/narratives"
 ok "desk reset to base"
-dim "  run 'bin/claire start' — accounts and opening balances are recreated"
+dim "  run 'bin/ronathan start' — accounts and opening balances are recreated"

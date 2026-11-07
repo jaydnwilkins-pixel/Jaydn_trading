@@ -1,4 +1,4 @@
-"""The bin/claire control script's contract with the schema.
+"""The bin/ronathan control script's contract with the schema.
 
 The script is bash, but the two things that make it dangerous are SQL: which
 tables a reset wipes, and which rows count as "a trade in flight". Both are
@@ -19,8 +19,8 @@ import pytest
 from app.accounting import db
 
 BIN = Path(__file__).resolve().parent.parent / "bin"
-SCRIPT = BIN / "claire"
-RESET = BIN / "claire-reset"
+SCRIPT = BIN / "ronathan"
+RESET = BIN / "ronathan-reset"
 
 
 def _tables():
@@ -130,15 +130,15 @@ def test_dashboards_bind_is_configurable_but_defaults_to_loopback():
     assert sig.parameters["bind"].default == "127.0.0.1"
 
 
-def test_claire_api_is_never_exposed_off_loopback():
-    """The dashboards may go on the LAN; claire-api may not. It owns
+def test_ronathan_api_is_never_exposed_off_loopback():
+    """The dashboards may go on the LAN; ronathan-api may not. It owns
     /internal/resume — the one endpoint that turns a click into a trade — and
     its host guard is the last line of defence, so the bind must not become
     configurable alongside the dashboards'."""
     src = (Path(__file__).resolve().parent.parent / "app" / "api"
            / "server.py").read_text()
     assert 'host="127.0.0.1"' in src
-    assert "CLAIRE_DASHBOARD_BIND" not in src
+    assert "RONATHAN_DASHBOARD_BIND" not in src
 
 
 def test_the_money_path_is_gated_by_the_key_not_by_the_network():
@@ -165,7 +165,7 @@ def _fake_root(tmp_path, name="desk"):
     (root / "bin").mkdir(parents=True)
     (root / "var").mkdir()
     (root / "etc").mkdir()
-    for script in ("claire", "claire-reset"):
+    for script in ("ronathan", "ronathan-reset"):
         dst = root / "bin" / script
         dst.write_text((BIN / script).read_text())
         dst.chmod(0o755)
@@ -203,8 +203,8 @@ def _fake_service(cwd, module="app.api.server"):
 
 
 def _run(root, *args, timeout=60, **kw):
-    env = {**os.environ, "CLAIRE_DRAIN_TIMEOUT": "20"}
-    return subprocess.run(["bash", str(root / "bin" / "claire"), *args],
+    env = {**os.environ, "RONATHAN_DRAIN_TIMEOUT": "20"}
+    return subprocess.run(["bash", str(root / "bin" / "ronathan"), *args],
                           capture_output=True, text=True, timeout=timeout,
                           env=env, **kw)
 
@@ -266,8 +266,8 @@ def test_signal_mid_drain_restores_schedules_and_exits(tmp_path, procs,
     svc = _fake_service(root)
     procs.append(svc)
     time.sleep(0.3)
-    env = {**os.environ, "CLAIRE_DRAIN_TIMEOUT": "60"}
-    stop = subprocess.Popen(["bash", str(root / "bin" / "claire"), "stop"],
+    env = {**os.environ, "RONATHAN_DRAIN_TIMEOUT": "60"}
+    stop = subprocess.Popen(["bash", str(root / "bin" / "ronathan"), "stop"],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, env=env)
     procs.append(stop)
@@ -286,11 +286,11 @@ def test_signal_mid_drain_restores_schedules_and_exits(tmp_path, procs,
 
 
 def test_unit_stop_timeout_covers_the_drain():
-    unit = (REPO / "systemd" / "claire.service").read_text()
+    unit = (REPO / "systemd" / "ronathan.service").read_text()
     stop = int(re.search(r"^TimeoutStopSec=(\d+)", unit, re.M).group(1))
-    drain = int(re.search(r"^Environment=CLAIRE_DRAIN_TIMEOUT=(\d+)", unit,
+    drain = int(re.search(r"^Environment=RONATHAN_DRAIN_TIMEOUT=(\d+)", unit,
                           re.M).group(1))
-    script_default = int(re.search(r"CLAIRE_DRAIN_TIMEOUT:-(\d+)",
+    script_default = int(re.search(r"RONATHAN_DRAIN_TIMEOUT:-(\d+)",
                                    SCRIPT.read_text()).group(1))
     assert drain == script_default
     assert stop >= drain + 60          # kill wait (17 s) + restore + margin
@@ -326,7 +326,7 @@ def test_reset_backup_includes_wal_and_removes_checkpoint_sidecars(tmp_path):
     assert (root / "var" / "checkpoints.db-wal").exists()
     assert (root / "var" / "checkpoints.db-shm").exists()
 
-    r = subprocess.run(["bash", str(root / "bin" / "claire-reset"), "--yes"],
+    r = subprocess.run(["bash", str(root / "bin" / "ronathan-reset"), "--yes"],
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
     raw.close(); ck.close(); conn.close()

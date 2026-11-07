@@ -484,7 +484,7 @@ class SaxoBroker:
 
 # Markets Saxo's SIM environment does not offer as shares (2026-11-06: every
 # SGX name — D05, O39, U11, Z74, C6L … — is listed there only as
-# CfdOnStock). Never applied to the LIVE adapter: Richard's real Saxo
+# CfdOnStock). Never applied to the LIVE adapter: the owner's real Saxo
 # account trades SGX shares.
 SIM_LOCAL_SUFFIXES = ("SI",)
 

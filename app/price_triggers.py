@@ -2,7 +2,7 @@
 5.00", "sell my 20 when it reaches 9.50".
 
 A trigger is a ONE-SHOT rule the owner sets on the Watchlist page. While the
-instrument's market is open, the `price_triggers` schedule (claire-api, every
+instrument's market is open, the `price_triggers` schedule (ronathan-api, every
 2 minutes) prices every active rule; on a hit it claims the rule atomically
 and hands the trade to `Desk.manual_trade` — the same path as the Buy and
 Sell buttons — so from the gate on it is an ordinary approval: token, cash
@@ -514,7 +514,7 @@ def _alert(alert, text):
     if alert is None:
         return
     try:
-        alert(text, title="Claire trigger")
+        alert(text, title="Ronathan trigger")
     except Exception:                           # noqa: BLE001 — best effort
         pass
 

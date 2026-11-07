@@ -1,6 +1,6 @@
 """Dashboard web-security fixes from REVIEW-2026-11-03 (C1, H1, H2, H3 and
 the Low items owned by dashboards.py / web / desk.py). Real HTTP against the
-stdlib server, offline: claire-api is never reachable, and httpx.post inside
+stdlib server, offline: ronathan-api is never reachable, and httpx.post inside
 the server is trapped so a test fails loudly if a refused request would have
 reached it."""
 import json
@@ -62,7 +62,7 @@ def web(server):
 
 @pytest.fixture
 def no_upstream(monkeypatch):
-    """Record (and refuse) every call the server would make to claire-api."""
+    """Record (and refuse) every call the server would make to ronathan-api."""
     calls = []
 
     def trap(*a, **k):
@@ -114,7 +114,7 @@ def test_every_post_route_requires_the_key(web, no_upstream, route):
             r = c.post(base + route, json=POST_ROUTES[route],
                        headers=headers)
         assert r.status_code == 403, (route, headers, r.text)
-    assert no_upstream == []                     # nothing reached claire-api
+    assert no_upstream == []                     # nothing reached ronathan-api
     after = {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
              for t in before}
     assert after == before
@@ -141,7 +141,7 @@ def test_pairing_uses_constant_time_compare():
 def test_provider_key_ref_allowlist(web):
     base, conn = web
     with paired(base) as c:
-        for bad in ("CLAIRE_DASHBOARD_KEY", "CLAIRE_INTERNAL_SECRET",
+        for bad in ("RONATHAN_DASHBOARD_KEY", "RONATHAN_INTERNAL_SECRET",
                     "ALPACA_PAPER_SECRET", "SAXO_SIM_TOKEN", "GROQ_API_KEY",
                     "anthropic_api_key", "PATH"):
             r = c.post("/api/provider", json={
@@ -180,7 +180,7 @@ def test_probe_refuses_a_legacy_row_with_a_secret_key_ref(web, monkeypatch):
     conn.execute("INSERT INTO providers (id, display_name, kind, base_url,"
                  " api_key_ref, capabilities, enabled) VALUES ('legacy',"
                  " 'L', 'openai_compatible', 'http://attacker/v1',"
-                 " 'CLAIRE_DASHBOARD_KEY', '{}', 1)")
+                 " 'RONATHAN_DASHBOARD_KEY', '{}', 1)")
     with paired(base) as c:
         assert c.post("/api/provider-test",
                       json={"provider_id": "legacy"}).status_code == 400
@@ -194,8 +194,8 @@ def test_probe_refuses_a_legacy_row_with_a_secret_key_ref(web, monkeypatch):
 def test_mcp_env_refs_cannot_name_desk_secrets(web):
     base, conn = web
     with paired(base) as c:
-        for refs in ("CLAIRE_INTERNAL_SECRET", "ANTHROPIC_API_KEY",
-                     "OK_TOKEN, CLAIRE_DASHBOARD_KEY"):
+        for refs in ("RONATHAN_INTERNAL_SECRET", "ANTHROPIC_API_KEY",
+                     "OK_TOKEN, RONATHAN_DASHBOARD_KEY"):
             assert c.post("/api/mcp", json={"id": "m1", "command": "x",
                                             "env_refs": refs}
                           ).status_code == 400, refs
@@ -314,8 +314,8 @@ def test_allowed_hosts_follow_the_bind():
     assert {"127.0.0.1", "localhost"} <= lan
     assert socket.gethostname().lower() in lan
     assert "0.0.0.0" not in lan
-    assert dashboards.host_only("[::1]:7787") == "::1"
-    assert dashboards.host_only("Box.Local.:7787") == "box.local"
+    assert dashboards.host_only("[::1]:7797") == "::1"
+    assert dashboards.host_only("Box.Local.:7797") == "box.local"
     assert dashboards.host_only("127.0.0.1") == "127.0.0.1"
 
 
@@ -482,7 +482,7 @@ def test_dashboard_run_route_validates_before_forwarding(web, no_upstream):
         assert c.post("/api/watchlist", json={
             "ticker": "<b>", "exchange": "NASDAQ"}).status_code == 400
         assert no_upstream == []
-        # a valid request is forwarded (and claire-api being down is a 502)
+        # a valid request is forwarded (and ronathan-api being down is a 502)
         assert c.post("/api/run", json={
             "ticker": "NVDA", "exchange": "NASDAQ", "currency": "USD"}
         ).status_code == 502
@@ -524,7 +524,7 @@ def test_pages_do_not_interpolate_raw_server_strings():
 def test_streaming_posts_send_the_dash_key():
     """/api/ask and /api/agent-ask bypass api() (they stream), so they must
     add the header themselves or the paired UI breaks."""
-    for page, route in (("claire.html", "/api/ask"),
+    for page, route in (("ronathan.html", "/api/ask"),
                         ("index.html", "/api/agent-ask")):
         src = (WEB / page).read_text()
         i = src.index(f"fetch('{route}'")

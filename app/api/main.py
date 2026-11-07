@@ -1,4 +1,4 @@
-"""claire-api (:7788) — graph runtime, resume authorization seam (DESIGN.md §10).
+"""ronathan-api (:7798) — graph runtime, resume authorization seam (DESIGN.md §10).
 
 `Command(resume=…)` will resume for ANY caller; LangGraph performs no
 authorization. Therefore /internal/resume: localhost only, shared secret,
@@ -114,13 +114,13 @@ class OrderControlBody(BaseModel):
 def create_app(desk, conn, secret: str, *, clock=time.time,
                ask_handler=None, agent_ask_handler=None,
                brokers=None, maintenance_runner=None) -> FastAPI:
-    app = FastAPI(title="claire-api")
+    app = FastAPI(title="ronathan-api")
 
     def _guard(request: Request):
         host = request.client.host if request.client else ""
         if host not in LOCAL_HOSTS:
             raise HTTPException(403, "localhost only")
-        if not secret or not _same(request.headers.get("x-claire-secret"),
+        if not secret or not _same(request.headers.get("x-ronathan-secret"),
                                    secret):
             raise HTTPException(403, "bad internal secret")
 

@@ -269,7 +269,7 @@ def build_llm(conn, provider_id, model, temperature=None, max_tokens=None,
     ref = p["api_key_ref"] or ""
     if ref and ref not in PROVIDER_KEY_REFS:
         # a providers row is sent `env[api_key_ref]` as a bearer token, so a
-        # row naming CLAIRE_INTERNAL_SECRET (or any non-LLM secret) would leak
+        # row naming RONATHAN_INTERNAL_SECRET (or any non-LLM secret) would leak
         # it to whatever base_url the row points at — refuse, whatever wrote it
         raise ProviderError(f"provider {provider_id!r} names key {ref!r}, "
                             "which is not an LLM provider key")

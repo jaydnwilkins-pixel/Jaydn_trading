@@ -1,4 +1,4 @@
-"""Out-of-band alerts to Richard: Telegram via Bob's bot, plus a desktop
+"""Out-of-band alerts to Jaydn: Telegram via Bob's bot, plus a desktop
 notification. Used for things that need a human BEFORE they bite — e.g. the
 Saxo sign-in about to lapse (app/tools/saxo_live.py).
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-TELEGRAM_ENV = Path(os.environ.get("CLAIRE_TELEGRAM_ENV",
+TELEGRAM_ENV = Path(os.environ.get("RONATHAN_TELEGRAM_ENV",
                                    Path.home() / "bob" / "telegram.env"))
 
 
@@ -128,7 +128,7 @@ def edit_message(token, chat_id, message_id, html, *, keyboard=None,
         raise
 
 
-def send(text, *, title="Claire", path=TELEGRAM_ENV, client=None):
+def send(text, *, title="Ronathan", path=TELEGRAM_ENV, client=None):
     """Best effort on every channel; returns which ones accepted it."""
     sent = []
     token, chat = _telegram_cfg(path)

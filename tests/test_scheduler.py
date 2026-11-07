@@ -221,7 +221,7 @@ def test_local_tz_falls_back_to_etc_localtime(monkeypatch):
 
 
 def test_a_job_that_causes_other_writes_still_records_its_run(tmp_path):
-    """Regression (2026-11-04): the custodian's retry made claire-api write
+    """Regression (2026-11-04): the custodian's retry made ronathan-api write
     from another connection while tick() still held its SELECT cursor open;
     the stale read snapshot could not be upgraded, the last_run_at UPDATE
     failed with 'database is locked', and the job re-fired every 20 s."""
@@ -238,7 +238,7 @@ def test_a_job_that_causes_other_writes_still_records_its_run(tmp_path):
                  " 'watcher', 'event_scan')")
 
     def custodian_like(spec):
-        other = sqlite3.connect(path, isolation_level=None)   # e.g. claire-api
+        other = sqlite3.connect(path, isolation_level=None)   # e.g. ronathan-api
         other.execute("INSERT INTO service_health (service, checked_at, ok)"
                       " VALUES ('x', 1, 'ok')")
         other.close()

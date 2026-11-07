@@ -58,7 +58,7 @@ MAX_REDIRECTS = 5
 
 
 def _check_public(url: str, resolve=socket.getaddrinfo) -> None:
-    """Refuse anything but http(s) to public addresses: loopback (claire-api,
+    """Refuse anything but http(s) to public addresses: loopback (ronathan-api,
     the dashboards), RFC1918/ULA, link-local incl. cloud metadata
     169.254.169.254, CGNAT, multicast, reserved, unspecified. Hostnames are
     resolved and EVERY address must be public."""

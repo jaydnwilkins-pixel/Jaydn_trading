@@ -1,5 +1,5 @@
 """Dashboards server tests — real HTTP against the stdlib server, offline
-(fake market, no claire-api: the approve path 502s but authorization rules
+(fake market, no ronathan-api: the approve path 502s but authorization rules
 still enforce). Includes the pairing-key rules: tokens only for a paired
 browser."""
 import json
@@ -88,14 +88,14 @@ def test_pages_and_apis_serve(web):
     base, conn = web
     with paired(base) as c:
         for page in ("/", "/portfolio", "/markets", "/trading", "/agents",
-                     "/providers", "/claire"):
+                     "/providers", "/ronathan"):
             assert c.get(page).status_code == 200, page
         for asset in ("/style.css", "/nav.js", "/charts.js"):
             assert c.get(asset).status_code == 200, asset
         ov = c.get("/api/overview").json()
         assert ov["pending"] == 1
         assert ov["cash"][0]["cash"] == 1000
-        assert any("claire-api" in f for f in ov["flags"])   # api_base is down
+        assert any("ronathan-api" in f for f in ov["flags"])   # api_base is down
         runs = c.get("/api/runs").json()
         assert "approval_token" not in runs[0]
         assert c.get("/api/quote?symbols=NVDA").json()["NVDA"]["price"] == "101"
@@ -170,7 +170,7 @@ def test_thesis_action_authorization_over_http(web):
                          "size_base": 500, "broker": "alpaca",
                          "token": "wrong"})
         assert r.status_code == 403
-        # right token but claire-api is down: authorized, saved, 502 surfaced
+        # right token but ronathan-api is down: authorized, saved, 502 surfaced
         r = c.post("/api/thesis-action",
                    json={"work_item_id": "wi_1", "action": "approve",
                          "size_base": 500, "broker": "alpaca",
@@ -387,7 +387,7 @@ def test_mission_control_map_is_one_svg(web):
         assert "class=\"mapwrap\"" in page
         assert "position:absolute" not in page      # no overlay layer
         for piece in ("renderMap", "SCREEN · scans only",
-                      "OTHER SYSTEMS", "BACK OFFICE", "claire_chat",
+                      "OTHER SYSTEMS", "BACK OFFICE", "ronathan_chat",
                       "VENUES", "mcp:", "id === 'book'"):
             assert piece in page, piece
         css = c.get("/style.css").text
@@ -526,7 +526,7 @@ def test_saxo_sign_in_button_flow(web, monkeypatch):
     monkeypatch.setattr(saxo_live, "app_config",
                         lambda env, which=None: {
                             "which": which, "app_key": "k", "secret": None,
-                            "redirect_uri": "http://localhost/claire-saxo",
+                            "redirect_uri": "http://localhost/ronathan-saxo",
                             "auth_base": "https://sim.logonvalidation.net"})
     port = base.rsplit(":", 1)[1]
     r = httpx.post(base + "/api/saxo-login-start", json={"env": "sim"})
@@ -534,8 +534,8 @@ def test_saxo_sign_in_button_flow(web, monkeypatch):
     with paired(base) as c:
         url = c.post("/api/saxo-login-start", json={"env": "sim"}).json()["url"]
         assert url.startswith("https://sim.logonvalidation.net/authorize?")
-        assert f"localhost%3A{port}%2Fclaire-saxo" in url
-        bad = c.get("/claire-saxo?state=forged&code=x")
+        assert f"localhost%3A{port}%2Fronathan-saxo" in url
+        bad = c.get("/ronathan-saxo?state=forged&code=x")
         assert bad.status_code == 400 and "sign-in failed" in bad.text.lower()
 
 
@@ -566,7 +566,7 @@ def test_trade_check_needs_the_key_and_explains_the_built_in_sim(web):
 def test_usage_source_attribution_rules():
     from app.dashboards import usage_source as src
     # no work item: decided by the agent
-    assert src("claire_chat", linked=None) == "chat"
+    assert src("ronathan_chat", linked=None) == "chat"
     assert src("screener", linked=None) == "screener"
     assert src("recorder", linked=None) == "journal"
     assert src("fundamental", linked=None) == "agent_qa"
@@ -596,7 +596,7 @@ def _usage_rows(conn):
         " 'NVDA', 'done', 'wi_scan', ?, ?, 'event scan: volume 4x')",
         (T0 - 60, T0 - 60))
     rows = [  # agent, wi, provider, model, at, in, out, cw, cr, cost, status
-        ("claire_chat", None, "claude_max", "claude-opus-5", T0, 10_000, 500,
+        ("ronathan_chat", None, "claude_max", "claude-opus-5", T0, 10_000, 500,
          3_000, 6_000, 0, "ok"),
         ("news", "wi_scan", "claude_max", "claude-haiku-4-5", T0 - 30, 4_000,
          1_000, 0, 0, 0, "ok"),
@@ -605,7 +605,7 @@ def _usage_rows(conn):
         ("arbiter", "wi_1", "claude_max", "claude-opus-5", T0 - 20, 1_000,
          100, 0, 0, 0, "ok"),
         # 3 days ago: inside 7d, not today
-        ("claire_chat", None, "claude_max", "claude-opus-5", T0 - 3 * 86400,
+        ("ronathan_chat", None, "claude_max", "claude-opus-5", T0 - 3 * 86400,
          1_000, 100, 0, 0, 0, "ok"),
         # 20 days ago: inside 30d only
         ("bull", "wi_1", "anthropic", "claude-sonnet-5", T0 - 20 * 86400,
@@ -648,13 +648,13 @@ def test_usage_api_totals_breakdowns_and_value(web, tmp_path, monkeypatch):
     # API-equivalent: opus 5 chat call = fresh 1k + 3k write + 6k read + 500 out
     chat = 1 * .005 + 3 * .005 * 1.25 + 6 * .005 * .1 + .5 * .025
     agent = {b["key"]: b for b in d["by_agent"]}
-    assert agent["claire_chat"]["label"] == "Claire chat"
+    assert agent["ronathan_chat"]["label"] == "Ronathan chat"
     assert agent["fundamental"]["label"] == "Fundamental analyst"
-    assert agent["claire_chat"]["calls"] == 2
-    assert agent["claire_chat"]["api_value"] == pytest.approx(
+    assert agent["ronathan_chat"]["calls"] == 2
+    assert agent["ronathan_chat"]["api_value"] == pytest.approx(
         chat + 1 * .005 + .1 * .025)
     src = {b["key"]: b for b in d["by_source"]}
-    assert src["chat"]["label"] == "Claire chat"
+    assert src["chat"]["label"] == "Ronathan chat"
     assert src["volume_scan"]["calls"] == 2 and \
         src["volume_scan"]["errors"] == 1
     assert src["manual"]["calls"] == 1             # wi_1 has no trigger

@@ -37,7 +37,7 @@ def world():
 
     def resume_post(body):
         r = client.post("/internal/resume", json=body,
-                        headers={"x-claire-secret": SECRET})
+                        headers={"x-ronathan-secret": SECRET})
         return r.status_code, r.json()
 
     wi = desk.start_run(NVDA, background=False)     # runs to the interrupt
@@ -128,10 +128,10 @@ def test_resume_requires_secret_and_valid_token(world):
             "token": token_of(conn, wi), "size_base": 1000, "broker": "alpaca"}
     assert client.post("/internal/resume", json=body).status_code == 403
     assert client.post("/internal/resume", json=body,
-                       headers={"x-claire-secret": "wrong"}).status_code == 403
+                       headers={"x-ronathan-secret": "wrong"}).status_code == 403
     bad = dict(body, token="0" * 32)
     assert client.post("/internal/resume", json=bad,
-                       headers={"x-claire-secret": SECRET}).status_code == 403
+                       headers={"x-ronathan-secret": SECRET}).status_code == 403
     assert "execute" not in script.calls
 
 
@@ -147,7 +147,7 @@ def test_resume_refuses_non_localhost(world):
                 "/internal/resume",
                 json={"work_item_id": wi, "status": "approved",
                       "actor": "human", "token": token_of(conn, wi)},
-                headers={"x-claire-secret": SECRET})
+                headers={"x-ronathan-secret": SECRET})
     assert asyncio.run(from_remote_host()).status_code == 403
 
 
@@ -169,7 +169,7 @@ def test_crash_between_authorize_and_resume_retries_burns_once(world):
     conn, desk, client, resume_post, wi, script, app = world
 
     def down(body):
-        raise ConnectionError("claire-api restarting")
+        raise ConnectionError("ronathan-api restarting")
     with pytest.raises(AuthError) as e:
         thesis_action(conn, approve_payload(conn, wi), down, clock=CLOCK)
     assert e.value.code == 502

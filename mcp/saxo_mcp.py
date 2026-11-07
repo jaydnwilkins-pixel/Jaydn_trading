@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Saxo Bank OpenAPI MCP server for Richard's trading desk.
+"""Saxo Bank OpenAPI MCP server for Jaydn's trading desk.
 
 Exposes Saxo account data, instrument search, quotes, and (SIM-only) order
 placement as MCP tools. No community/official Saxo MCP existed, so this wraps
@@ -12,7 +12,7 @@ Environment:
   SAXO_ENV           - "sim" (default) or "live".
 
 SAFETY: order placement and cancellation REFUSE to run unless SAXO_ENV=sim.
-Live is read-only by design (Richard's paper-only rule).
+Live is read-only by design (the desk's paper-only rule).
 """
 
 import json
@@ -34,7 +34,7 @@ def _call(method, path, payload=None):
     if not token:
         return {"error": "SAXO_ACCESS_TOKEN is not set. Get a 24h SIM token "
                          "from https://www.developer.saxo and put it in "
-                         "etc/claire.env"}
+                         "etc/ronathan.env"}
     req = urllib.request.Request(
         BASE + path, method=method,
         data=json.dumps(payload).encode() if payload is not None else None,

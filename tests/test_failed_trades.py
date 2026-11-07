@@ -120,7 +120,7 @@ def test_transient_failures_are_still_retried_automatically(conn):
 
 
 @pytest.mark.parametrize("err,transient", [
-    ("venue down", True), ("claire-api unreachable", True),
+    ("venue down", True), ("ronathan-api unreachable", True),
     ("broker rejected order: quantity 9.6 is not a whole multiple", False),
     ("live trading: live trading is disarmed", False),
     ("order needs 1000.00 USD but acct holds 10.00", False),

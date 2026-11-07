@@ -115,13 +115,13 @@ def test_provider_health_gate_and_model_capture():
 
 
 def test_chat_threads_persist():
-    from app.graph.claire_agent import Claire
+    from app.graph.ronathan_agent import Ronathan
     conn = db.connect(":memory:")
     db.init(conn)
-    c1 = Claire(conn, None, None, None)
+    c1 = Ronathan(conn, None, None, None)
     c1._load("t1").extend([{"role": "user", "content": "hello"}])
     c1._save("t1")
-    c2 = Claire(conn, None, None, None)             # "restart"
+    c2 = Ronathan(conn, None, None, None)             # "restart"
     assert c2._load("t1") == [{"role": "user", "content": "hello"}]
 
 

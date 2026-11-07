@@ -3,7 +3,7 @@ rate-limits this machine (Twelve Data's free tier covers US listings only, so
 an SGX/HKEX/... chart otherwise has no source at all).
 
 Read-only: two GET endpoints (instrument search, chart bars), on the SIM
-sign-in by default (CLAIRE_SAXO_CHART_ENV=live to use the live one). Nothing
+sign-in by default (RONATHAN_SAXO_CHART_ENV=live to use the live one). Nothing
 here touches /trade/. Where Saxo lists a market only as a CFD (e.g. SGX
 shares on SIM), the CFD's bars are used: a CFD on a stock tracks the
 stock's own price, which is all a chart needs.
@@ -35,7 +35,7 @@ class SaxoChartError(Exception):
 
 
 def _env():
-    w = (os.environ.get("CLAIRE_SAXO_CHART_ENV") or "sim").lower()
+    w = (os.environ.get("RONATHAN_SAXO_CHART_ENV") or "sim").lower()
     return w if w in saxo_live.ENVS else "sim"
 
 

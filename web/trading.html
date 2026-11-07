@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Trading</title>
+<meta charset="utf-8"><title>Ronathan — Trading</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/orderinfo.js"></script>
 <script>nav('/trading')</script>
 <style>
@@ -56,7 +56,7 @@
 </style>
 <main>
   <h1>Runs</h1>
-  <p class="muted">Start a research run on a stock. Claire's analysts research
+  <p class="muted">Start a research run on a stock. Ronathan's analysts research
     it, a bull and a bear argue it out, and the arbiter gives a verdict. Any
     trade waits for your approval on <a href="/approvals">Approvals</a>.</p>
   <div class="row">
@@ -139,7 +139,7 @@ function origin(r) {
   const d = s.origin_detail ? ` (${esc(s.origin_detail)})` : '';
   switch (s.origin) {
     case 'you': return `You started this run${d}.`;
-    case 'chat': return `Started from Claire's chat${d}.`;
+    case 'chat': return `Started from Ronathan's chat${d}.`;
     case 'unrecorded': return 'Who started this run was not recorded (runs before 6 Nov; most likely you, from the Launch form).';
     case 'daily_screen': return `Picked by the daily screen${d}.`;
     case 'volume_scan': return `Started by the hourly volume scan${d}.`;
@@ -189,7 +189,7 @@ function nextStep(r) {
     `${shares(f.qty)} at ${money(f.avg_price, f.currency)} on ${
       esc(f.account)} (${when(f.at)})`).join('; ');
   switch (r.state) {
-    case 'running': return 'Claire is researching this now…';
+    case 'running': return 'Ronathan is researching this now…';
     case 'awaiting_approval':
       return `<b>Waiting for your approval</b> — <a href="/approvals" ` +
         `onclick="event.stopPropagation()">review it on Approvals</a>` +
@@ -202,7 +202,7 @@ function nextStep(r) {
       const entries = working.filter(o => !o.leg);
       return `${apText}. ` + (entries.length ? entries.map(o =>
         (o.status === 'pending_session'
-          ? `<b>Held by Claire until the market opens</b>, then sent to ${esc(o.account)}: `
+          ? `<b>Held by Ronathan until the market opens</b>, then sent to ${esc(o.account)}: `
           : `Order working at ${esc(o.account)}: `) +
         `${esc(o.side)} ${shares(o.qty)}` +
         (o.limit_price != null ? `, limit price ${money(o.limit_price, s.currency)}/share` : '') +
@@ -252,7 +252,7 @@ async function orderCancel(id) {
   const {r, o} = orderOf(id);
   if (!o) return toast('no working order to cancel', false);
   const where = o.status === 'pending_session'
-    ? 'Claire is still holding it — nothing has been sent.'
+    ? 'Ronathan is still holding it — nothing has been sent.'
     : 'It will be cancelled at ' + (o.account || 'the broker') + ', with its stop and target.';
   if (!confirm(`Cancel the ${esc(o.side)} of ${shares(o.qty)} ${esc(r.ticker)} at a limit price of ${esc(o.limit_price)} per share?\n\n${where}`)) return;
   try {
@@ -271,7 +271,7 @@ function orderEditOpen(id) {
     <h3 style="font-size:1rem;margin:0">Edit ${esc(r.ticker)} — ${esc(o.side)} order on ${esc(o.account || '')}</h3>
     <p class="muted small">${atVenue
       ? 'This order is already at the broker. Saving <b>cancels it there</b> and puts a new order with these levels on the Approvals page for you to approve.'
-      : 'Claire is still holding this order (it is sent when the market opens), so it is changed in place — no new approval needed.'}
+      : 'Ronathan is still holding this order (it is sent when the market opens), so it is changed in place — no new approval needed.'}
       Saxo refuses a stop or target more than 25% from the limit price.</p>
     <div class="row" style="gap:.5rem;flex-wrap:wrap">
       <label>shares <input id="oe-qty" type="number" min="1" step="1" style="width:80px" value="${esc(o.qty)}"></label>
@@ -302,7 +302,7 @@ async function orderEditSend(id) {
     const out = await api('/api/order-control', {work_item_id: id, action: 'edit', ...v});
     msg.innerHTML = out.new_work_item_id
       ? `<b class="ok">✔ old order cancelled</b> — approve the new one on <a href="/approvals">Approvals →</a>`
-      : '<b class="ok">✔ saved</b> — Claire will send these levels when the market opens.';
+      : '<b class="ok">✔ saved</b> — Ronathan will send these levels when the market opens.';
     toast(r.ticker + ' order updated ✓');
     refresh();
   } catch (e) { msg.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
@@ -472,7 +472,7 @@ function render(id) {
     const stage = {fundamental: 'Research', technical: 'Research',
       news: 'Research', bull: 'Debate', bear: 'Debate', arbiter: 'Decision'};
     let last = null;
-    html += '<h3>How Claire got there</h3><div class="steps">' +
+    html += '<h3>How Ronathan got there</h3><div class="steps">' +
       steps.map(st => {
         const h = stage[st.agent] !== last
           ? `<div class="stage">${esc(stage[st.agent] || '')}</div>` : '';
@@ -480,7 +480,7 @@ function render(id) {
         return h + stepHtml(id, st);
       }).join('') + '</div>';
   } else if (s.origin === 'override' && s.override_of) {
-    html += `<h3>How Claire got there</h3><p>This run is your override, so
+    html += `<h3>How Ronathan got there</h3><p>This run is your override, so
       it has no research of its own — the research is on ${
       runLink(s.override_of, 'the original run')}.</p>`;
   }

@@ -1,0 +1,13 @@
+[Unit]
+Description=Ronathan trading desk — graph runtime + chat (:7798)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/Ronathan
+EnvironmentFile=/opt/Ronathan/etc/ronathan.env
+ExecStart=/opt/Ronathan/venv/bin/python -m app.api.server
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

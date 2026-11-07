@@ -1,6 +1,6 @@
 """Twelve Data provider (https://twelvedata.com) — a real, keyed market-data
 API covering all ten desk exchanges. Activates when TWELVEDATA_API_KEY is in
-etc/claire.env; Market then prefers it over Yahoo for quotes, charts, and FX.
+etc/ronathan.env; Market then prefers it over Yahoo for quotes, charts, and FX.
 
 Free tier ≈ 800 credits/day (1 credit per symbol-request) — the Market cache
 layer keeps usage well inside that; paid tiers lift the ceiling.

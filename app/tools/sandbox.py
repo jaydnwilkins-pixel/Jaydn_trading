@@ -8,7 +8,7 @@ Isolation (enforced by the kernel, not by Python-level monkeypatching):
 - the filesystem is a fresh root containing ONLY read-only /usr (plus the
   /bin, /lib... symlinks), the venv (read-only, at /venv), a private /proc,
   a minimal /dev and size-capped tmpfs /work and /tmp. $HOME, the repo,
-  etc/claire.env, var/desk.db and ~/.claude are simply not in the namespace;
+  etc/ronathan.env, var/desk.db and ~/.claude are simply not in the namespace;
 - clean environment (`--clearenv`), all capabilities dropped, new session;
 - RLIMIT_NPROC / AS / CPU / FSIZE / NOFILE / CORE applied before the agent
   code runs (hard limits, cannot be raised again);
@@ -156,7 +156,7 @@ def run_python(code: str, data: dict, *, timeout=15,
         return {"error": UNAVAILABLE}
     argv = _bwrap_argv(_find_bwrap(), python)
     payload = json.dumps({"code": code, "data": data}, default=str)
-    with tempfile.TemporaryDirectory(prefix="claire-sbx-") as td:
+    with tempfile.TemporaryDirectory(prefix="ronathan-sbx-") as td:
         td = Path(td)
         (td / "in.json").write_text(payload)
         with open(td / "in.json", "rb") as fin, \

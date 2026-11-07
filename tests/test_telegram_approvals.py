@@ -1,6 +1,6 @@
 """Telegram trade approvals (app/telegram_approvals.py, app/chart_png.py,
 POST /api/telegram-decision). Offline: a fake Telegram transport and a fake
-market; the claire-api resume is a recorded callable.
+market; the ronathan-api resume is a recorded callable.
 
 The properties that matter most:
 * the approval token never appears in callback data (Telegram sees it);
@@ -8,7 +8,7 @@ The properties that matter most:
 * nothing is submitted without the second (✔) tap, and live money needs
   LIVE typed within 2 minutes;
 * stale buttons say so and change nothing;
-* the audit event lands BEFORE claire-api's own rows, so a refusal stays
+* the audit event lands BEFORE ronathan-api's own rows, so a refusal stays
   parked (never auto-resent by the custodian).
 """
 import json
@@ -28,9 +28,9 @@ from app.chart_png import render_chart
 T0 = 1_793_725_000                  # 2026-11-04
 OWNER = "123456789"
 TOKEN = "tok_SECRET_abc123"
-BASE = "http://192.168.1.50:7787"
+BASE = "http://192.168.1.50:7797"
 ENV = {"SAXO_SIM_EXECUTION": "enabled", "SAXO_SIM_ACCOUNT_ID": "11111111",
-       "CLAIRE_DASHBOARD_URL": BASE}
+       "RONATHAN_DASHBOARD_URL": BASE}
 
 
 def bars(n=120, start=100.0):
@@ -384,7 +384,7 @@ def test_size_tap_only_confirms_then_tick_approves(conn):
     sent = []
 
     def resume(b):
-        # what claire-api does: append its own rows after the resume
+        # what ronathan-api does: append its own rows after the resume
         conn.execute("INSERT INTO events (item_id, ts, actor, from_state,"
                      " to_state) VALUES ('wi_1', ?, 'human',"
                      " 'awaiting_approval', 'approved')", (T0,))
@@ -407,7 +407,7 @@ def test_size_tap_only_confirms_then_tick_approves(conn):
         "SELECT actor, to_state, payload FROM events WHERE item_id='wi_1'"
         " ORDER BY id")]
     states = [r["to_state"] for r in rows]
-    # gate's authorize row, then ours, then claire-api's — in that order
+    # gate's authorize row, then ours, then ronathan-api's — in that order
     assert states[-3:] == ["authorize:approve", "telegram:approve",
                            "approved"]
     ev = rows[-2]
@@ -629,7 +629,7 @@ def test_decision_endpoint_requires_the_key_and_the_approver(conn, web):
                    headers={"X-Dash-Key": DKEY})
         assert r.status_code == 200 and r.json()["ok"]
         assert "Reject</b> BUY CSCO?" in tg.edits[-1][2]
-        # ✔ reaches thesis_action; claire-api (port 9) is down → recorded,
+        # ✔ reaches thesis_action; ronathan-api (port 9) is down → recorded,
         # custodian finishes it
         r = c.post(base + "/api/telegram-decision", json={
             **body, "data": tg.edits[-1][3][0][0]["callback_data"]},

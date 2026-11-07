@@ -15,7 +15,7 @@ class Custodian:
                  fx_rate_for, clock=time.time, cal=None, alert=None):
         self.conn, self.repo = conn, repo
         # out-of-band channel for what must reach a human NOW (an unprotected
-        # position): app.alerts.send in claire-api; None = flags only
+        # position): app.alerts.send in ronathan-api; None = flags only
         self.alert = alert
         self.brokers = brokers                  # broker name -> adapter
         self.resume_post = resume_post
@@ -71,7 +71,7 @@ class Custodian:
     def _adapter(self, account_id):
         """None when this custodian instance has no adapter for the venue —
         the timer-run custodian does DB-only duties; fill polling happens in
-        the claire-api process, which owns the (possibly in-memory) venues."""
+        the ronathan-api process, which owns the (possibly in-memory) venues."""
         return self.brokers.get(self.account_broker(account_id))
 
     def _place_pending_session(self, report):
@@ -152,7 +152,7 @@ class Custodian:
                 status = adapter.order_status(o["broker_order_id"])
             except BrokerError as e:
                 sync["errors"].append(f"order {o['id']}: {e}"[:200])
-                # the in-memory sim forgets every order on a claire-api
+                # the in-memory sim forgets every order on a ronathan-api
                 # restart; a real venue can lose one too. The book cannot know
                 # what filled, so it waits for a human rather than guessing.
                 report["flags"].append(
@@ -480,7 +480,7 @@ class Custodian:
             if self.alert is not None and o["protect_alerted_at"] is None:
                 try:
                     self.alert(f"⚠ {o['protect_note']} (after desk order "
-                               f"{o['id']})", title="Claire — UNPROTECTED")
+                               f"{o['id']})", title="Ronathan — UNPROTECTED")
                 except Exception:               # noqa: BLE001 — flag stands
                     continue
                 self.conn.execute("UPDATE orders SET protect_alerted_at=?"
@@ -543,7 +543,7 @@ class Custodian:
                         f"{acct['id']}: {w.get('type')} {w.get('side') or ''} "
                         f"{w.get('amount')} {w.get('symbol')} @ "
                         f"{w.get('price')} — not on the book; it could sell "
-                        "the desk's shares (bin/claire legs-backfill adopts "
+                        "the desk's shares (bin/ronathan legs-backfill adopts "
                         "a bracket's legs)")
 
     def _drift(self, report):
@@ -647,10 +647,10 @@ def _account_broker_from_db(conn):
 
 
 def main(argv=None):
-    """Timer entrypoint (claire-custodian.timer): DB-side duties — approval
+    """Timer entrypoint (ronathan-custodian.timer): DB-side duties — approval
     expiry, authorize-crash retries, orphan flags — plus --snapshot for the
     daily reconcile and a nightly VACUUM backup. Fill polling runs inside
-    claire-api, which owns the broker adapters."""
+    ronathan-api, which owns the broker adapters."""
     import argparse
     import os
 
@@ -670,7 +670,7 @@ def main(argv=None):
     db.init(conn)
     repo = Repo(conn)
     resume_post = default_resume_post(
-        "http://127.0.0.1:7788", os.environ.get("CLAIRE_INTERNAL_SECRET", ""))
+        "http://127.0.0.1:7798", os.environ.get("RONATHAN_INTERNAL_SECRET", ""))
     def no_fx(instrument_id, account_id):
         # this custodian has no adapters, so it never books a fill; if that
         # ever changes, a rate of 1.0 must not be what it books (H6)

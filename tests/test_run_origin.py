@@ -4,8 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.main import create_app
-from app.graph import claire_agent
-from app.graph.claire_agent import asker_for
+from app.graph import ronathan_agent
+from app.graph.ronathan_agent import asker_for
 
 
 class Desk:
@@ -19,24 +19,24 @@ class Desk:
 
 
 @pytest.mark.parametrize("text,thread,who", [
-    ("[from Bob] research NVDA", "main", "Bob, via Claire's chat"),
-    ("  [from Bob] hi", "dashboard", "Bob, via Claire's chat"),
-    ("research NVDA", "dashboard", "you, via Claire's chat on the dashboard"),
+    ("[from Bob] research NVDA", "main", "Bob, via Ronathan's chat"),
+    ("  [from Bob] hi", "dashboard", "Bob, via Ronathan's chat"),
+    ("research NVDA", "dashboard", "you, via Ronathan's chat on the dashboard"),
     ("research NVDA", "main",
-     "Claire's chat (/ask: voice or another assistant)"),
+     "Ronathan's chat (/ask: voice or another assistant)"),
 ])
 def test_chat_asker(text, thread, who):
     assert asker_for(text, thread) == who
 
 
-def test_claire_run_tool_records_the_asker(monkeypatch):
+def test_ronathan_run_tool_records_the_asker(monkeypatch):
     desk = Desk()
-    tools = {t.name: t for t in claire_agent.build_tools(None, None, desk,
+    tools = {t.name: t for t in ronathan_agent.build_tools(None, None, desk,
                                                           None)}
-    monkeypatch.setitem(claire_agent.CURRENT_ASKER, "who",
-                        "Bob, via Claire's chat")
+    monkeypatch.setitem(ronathan_agent.CURRENT_ASKER, "who",
+                        "Bob, via Ronathan's chat")
     tools["run_pipeline"].invoke({"ticker": "NVDA", "exchange": "NASDAQ"})
-    assert desk.calls[-1][2] == "chat: Bob, via Claire's chat"
+    assert desk.calls[-1][2] == "chat: Bob, via Ronathan's chat"
 
 
 def test_api_run_without_a_source_is_still_recorded():

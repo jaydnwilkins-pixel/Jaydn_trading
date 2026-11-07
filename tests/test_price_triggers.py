@@ -372,7 +372,7 @@ def test_auto_rechecks_the_account_at_fire_time():
 
 
 def _live_gate(w, desk):
-    """claire-api's real /internal/resume, called in-process."""
+    """ronathan-api's real /internal/resume, called in-process."""
     from fastapi.testclient import TestClient
 
     from app.api.main import create_app
@@ -380,7 +380,7 @@ def _live_gate(w, desk):
 
     def resume_post(b):
         r = client.post("/internal/resume", json=b,
-                        headers={"x-claire-secret": "sec"})
+                        headers={"x-ronathan-secret": "sec"})
         return r.status_code, r.json()
     return resume_post
 

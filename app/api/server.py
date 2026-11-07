@@ -1,5 +1,5 @@
-"""claire-api entrypoint: python -m app.api.server (systemd: claire-api.service).
-Builds the production world from var/ + etc/claire.env and serves :7788."""
+"""ronathan-api entrypoint: python -m app.api.server (systemd: ronathan-api.service).
+Builds the production world from var/ + etc/ronathan.env and serves :7798."""
 import os
 import sqlite3
 import sys
@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def load_env(path=None):
-    p = Path(path or ROOT / "etc" / "claire.env")
+    p = Path(path or ROOT / "etc" / "ronathan.env")
     if p.exists():
         for line in p.read_text().splitlines():
             line = line.strip()
@@ -26,7 +26,7 @@ def build_world():
     from ..accounting import db
     from ..accounting.money import to_micro
     from ..accounting.repo import Repo
-    from ..graph.claire_agent import Claire
+    from ..graph.ronathan_agent import Ronathan
     from ..providers import seeds
     from ..tools.files import Narratives
     from ..tools.market import build_market
@@ -64,8 +64,8 @@ def build_world():
     saver = SqliteSaver(sqlite3.connect(var / "checkpoints.db",
                                         check_same_thread=False), serde=serde)
     desk = Desk(conn, deps, saver, repo, session_cal=sessions.load(conn) or None)
-    claire = Claire(conn, repo, desk, market, env=os.environ)
-    return conn, repo, desk, claire, brokers, market
+    ronathan = Ronathan(conn, repo, desk, market, env=os.environ)
+    return conn, repo, desk, ronathan, brokers, market
 
 
 def build_custodian(conn, repo, brokers, market, secret):
@@ -76,12 +76,12 @@ def build_custodian(conn, repo, brokers, market, secret):
     from ..custodian import Custodian, _account_broker_from_db
 
     return Custodian(conn, repo, brokers,
-                     resume_post=default_resume_post("http://127.0.0.1:7788",
+                     resume_post=default_resume_post("http://127.0.0.1:7798",
                                                      secret),
                      account_broker=_account_broker_from_db(conn),
                      fx_rate_for=make_fx_rate_for(conn, market),
                      cal=sessions.load(conn) or None,
-                     # an unprotected position reaches Richard on Telegram,
+                     # an unprotected position reaches Jaydn on Telegram,
                      # not only as a flag on a dashboard tile (§11a)
                      alert=alerts.send)
 
@@ -252,7 +252,7 @@ def start_scheduler(conn, repo, desk, market, custodian, maintainer=None):
 
     def run_price_triggers(spec):
         """Watchlist price triggers (DESIGN.md §15a). Runs here because
-        claire-api owns the desk: a hit becomes desk.manual_trade, and a
+        ronathan-api owns the desk: a hit becomes desk.manual_trade, and a
         pre-approved (paper-only) rule is approved through the same
         token-checked resume as a click on the card."""
         from .. import alerts, price_triggers
@@ -260,8 +260,8 @@ def start_scheduler(conn, repo, desk, market, custodian, maintainer=None):
         return price_triggers.run_once(
             conn, desk, market,
             resume_post=default_resume_post(
-                "http://127.0.0.1:7788",
-                os.environ.get("CLAIRE_INTERNAL_SECRET", "")),
+                "http://127.0.0.1:7798",
+                os.environ.get("RONATHAN_INTERNAL_SECRET", "")),
             alert=alerts.send, cal=sessions.load(conn) or None,
             env=os.environ, require_open=spec.get("require_open", True))
 
@@ -294,12 +294,12 @@ def main():
     from .main import create_app
 
     load_env()
-    secret = os.environ.get("CLAIRE_INTERNAL_SECRET", "")
+    secret = os.environ.get("RONATHAN_INTERNAL_SECRET", "")
     if not secret:
-        print("FATAL: CLAIRE_INTERNAL_SECRET not set in etc/claire.env",
+        print("FATAL: RONATHAN_INTERNAL_SECRET not set in etc/ronathan.env",
               file=sys.stderr)
         sys.exit(2)
-    conn, repo, desk, claire, brokers, market = build_world()
+    conn, repo, desk, ronathan, brokers, market = build_world()
     custodian = build_custodian(conn, repo, brokers, market, secret)
     maintainer = build_maintainer(conn)
     start_scheduler(conn, repo, desk, market, custodian, maintainer)
@@ -307,7 +307,7 @@ def main():
     def ask_handler(body):
         text = (body or {}).get("text", "")
         thread = (body or {}).get("thread", "main")
-        return StreamingResponse(claire.ask_stream(text, thread),
+        return StreamingResponse(ronathan.ask_stream(text, thread),
                                  media_type="application/x-ndjson")
 
     from ..tools.files import Narratives
@@ -322,7 +322,7 @@ def main():
                      agent_ask_handler=agent_ask_handler, brokers=brokers,
                      maintenance_runner=maintainer.run)
     _quiet_status_polls()
-    uvicorn.run(app, host="127.0.0.1", port=7788, log_level="info")
+    uvicorn.run(app, host="127.0.0.1", port=7798, log_level="info")
 
 
 def _brief(result):

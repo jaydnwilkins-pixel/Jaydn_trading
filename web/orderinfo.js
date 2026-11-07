@@ -54,7 +54,7 @@ function orderNeeds(o) {
     : `A sell limit fills only at <b>${oiPx(L)}</b> or higher`;
   const reached = last != null && L && (buy ? last <= L : last >= L);
   if (o.status === 'pending_session' && !o.submitted_at) {
-    parts.push(`<b>Waiting for the market to open.</b> Claire is holding the order and sends it to
+    parts.push(`<b>Waiting for the market to open.</b> Ronathan is holding the order and sends it to
       ${esc(o.account || 'the broker')} when ${esc(o.exchange || 'the market')} opens ${esc(oiWhen(o.next_open))}.`);
     parts.push(`${fillRule}. ${now}${reached
       ? ` — already ${buy ? 'at or below' : 'at or above'} your limit price, so it should fill soon after the open (if the price is still there).`

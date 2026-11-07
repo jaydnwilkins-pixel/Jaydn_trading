@@ -7,7 +7,7 @@ import pytest
 from app.tools import saxo_live
 
 ENV = {"SAXO_LIVE_APP_KEY": "appkey",
-       "SAXO_LIVE_APP_URL": "http://localhost/claire-saxo"}
+       "SAXO_LIVE_APP_URL": "http://localhost/ronathan-saxo"}
 T0 = 1_800_000_000
 
 
@@ -21,7 +21,7 @@ def tok(tmp_path):
     path.write_text(json.dumps({
         "access_token": "A1", "refresh_token": "R1",
         "access_expires_at": T0 + 1200, "refresh_expires_at": T0 + 2400,
-        "code_verifier": "v", "redirect_uri": "http://localhost:5555/claire-saxo"}))
+        "code_verifier": "v", "redirect_uri": "http://localhost:5555/ronathan-saxo"}))
     return path
 
 
@@ -218,7 +218,7 @@ def test_sim_and_live_are_independent(tmp_path):
     assert cfg_s["auth_base"] == "https://sim.logonvalidation.net"
     assert cfg_l["auth_base"] == "https://live.logonvalidation.net"
     assert cfg_s["redirect_uri"] == cfg_l["redirect_uri"] == \
-        "http://localhost/claire-saxo"
+        "http://localhost/ronathan-saxo"
     with pytest.raises(saxo_live.NotSignedIn, match="SAXO_LIVE_APP_KEY"):
         saxo_live.app_config({"SAXO_SIM_APP_KEY": "s"}, "live")
     seen = []
@@ -280,7 +280,7 @@ SIMENV = {"SAXO_SIM_APP_KEY": "s", "SAXO_SIM_ACCOUNT_ID": "11111111"}
 
 
 def test_sign_in_installs_tokens_for_the_expected_account():
-    url = saxo_live.begin_login("sim", "http://localhost:7787/claire-saxo",
+    url = saxo_live.begin_login("sim", "http://localhost:7797/ronathan-saxo",
                                 env=SIMENV, clock=lambda: T0)
     assert url.startswith("https://sim.logonvalidation.net/authorize?")
     state = url.split("state=")[1]
@@ -296,7 +296,7 @@ def test_sign_in_installs_tokens_for_the_expected_account():
 
 def test_wrong_account_is_refused_and_the_old_sign_in_survives():
     saxo_live.token_file("sim").write_text('{"access_token": "OLD"}')
-    url = saxo_live.begin_login("sim", "http://localhost/claire-saxo",
+    url = saxo_live.begin_login("sim", "http://localhost/ronathan-saxo",
                                 env=SIMENV, clock=lambda: T0)
     with pytest.raises(saxo_live.SaxoError, match="11111111"):
         saxo_live.complete_login(url.split("state=")[1], "code", env=SIMENV,

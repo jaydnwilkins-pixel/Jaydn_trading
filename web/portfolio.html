@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Portfolio</title>
+<meta charset="utf-8"><title>Ronathan — Portfolio</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script src="/charts.js"></script>
 <script src="/sell.js"></script>
@@ -18,7 +18,7 @@
 
   <h2>Price alerts</h2>
   <p class="muted small" style="margin-top:-.3rem">Safety alerts on positions you
-    hold: if the price falls this far from its best since you bought, Claire puts
+    hold: if the price falls this far from its best since you bought, Ronathan puts
     a "should we sell?" review on Approvals — it never sells on its own. An alert
     is removed when the position is sold.</p>
   <div id="alerts"></div>
@@ -152,7 +152,7 @@ function pct(v) { return v == null ? '—' : (v >= 0 ? '+' : '') + fmt(v) + '%';
 
 /* stop-loss / take-profit for one position: the orders resting at the broker
    when there are any (they are what actually sells), else the plan's levels
-   (no order behind them — on Claire's paper sim nothing rests at a venue) */
+   (no order behind them — on Ronathan's paper sim nothing rests at a venue) */
 function protection(p) {
   const m = p.market || {}, lv = p.levels || {}, cur = m.price, avg = lv.avg_cost_native;
   const ccy = esc(p.currency || '');

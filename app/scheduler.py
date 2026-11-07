@@ -1,5 +1,5 @@
 """DB-backed job scheduling (schedules table). The systemd timers used to own
-cadence; now the UI does — the claire-api scheduler thread and the dashboards
+cadence; now the UI does — the ronathan-api scheduler thread and the dashboards
 watcher loop both read this table live, so edits apply without restarts.
 
 Two spec shapes:
@@ -33,36 +33,36 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 DAILY_GRACE_SECONDS = 10 * 60
 
 DEFAULTS = [
-    ("analysis_asia", "Screen + pipeline: SGX·HKEX·TSE·ASX", "claire-api",
+    ("analysis_asia", "Screen + pipeline: SGX·HKEX·TSE·ASX", "ronathan-api",
      {"type": "daily", "time": "10:00", "tz": "Asia/Singapore",
       "days": [1, 2, 3, 4, 5], "region": "asia", "require_open": True}),
-    ("analysis_eu", "Screen + pipeline: LSE·XETRA·PARIS", "claire-api",
+    ("analysis_eu", "Screen + pipeline: LSE·XETRA·PARIS", "ronathan-api",
      {"type": "daily", "time": "09:00", "tz": "Europe/London",
       "days": [1, 2, 3, 4, 5], "region": "eu", "require_open": True}),
-    ("analysis_us", "Screen + pipeline: NASDAQ·NYSE", "claire-api",
+    ("analysis_us", "Screen + pipeline: NASDAQ·NYSE", "ronathan-api",
      {"type": "daily", "time": "10:00", "tz": "America/New_York",
       "days": [1, 2, 3, 4, 5], "region": "us", "require_open": True}),
     ("custodian", "Fills, order TTLs, approval expiry, orphan checks",
-     "claire-api", {"type": "interval", "minutes": 5}),
+     "ronathan-api", {"type": "interval", "minutes": 5}),
     ("reconcile", "Broker snapshots, drift check, desk.db backup",
-     "claire-api", {"type": "daily", "time": "09:00", "tz": "local",
+     "ronathan-api", {"type": "daily", "time": "09:00", "tz": "local",
                     "days": [1, 2, 3, 4, 5, 6, 7]}),
     ("watcher", "Price alerts on open positions", "dashboards",
      {"type": "interval", "minutes": 10}),
     ("event_scan", "Intraday unusual-volume sweep on open markets "
-     "(no LLM; wakes the pipeline only on a real move)", "claire-api",
+     "(no LLM; wakes the pipeline only on a real move)", "ronathan-api",
      {"type": "interval", "minutes": 60, "require_open": True,
       "threshold": 3.0, "max_runs": 1}),
     # price triggers (DESIGN.md §15a): one-shot "buy/sell when price ≤/≥ X"
     # rules from the Watchlist page. Deterministic; evaluated only while
     # each rule's market is open, so an overnight quote never fires one.
     ("price_triggers", "Price triggers from the Watchlist (one-shot buy/sell"
-     " rules; card, or pre-approved paper order)", "claire-api",
+     " rules; card, or pre-approved paper order)", "ronathan-api",
      {"type": "interval", "minutes": 2, "require_open": True}),
     # the maintainer (DESIGN.md §23): checks, log rotation, backups,
     # retention, then a short AI status note. Quiet hour, after US close.
     ("maintenance", "Health checks, log rotation, backups, retention; "
-     "AI status note (Maintenance page)", "claire-api",
+     "AI status note (Maintenance page)", "ronathan-api",
      {"type": "daily", "time": "06:30", "tz": "local",
       "days": [1, 2, 3, 4, 5, 6, 7]}),
 ]
@@ -235,7 +235,7 @@ def update(conn, job: str, *, enabled=None, spec_patch=None):
 
 
 class Scheduler:
-    """Runs inside claire-api. `runners`: job -> fn(spec) -> result dict.
+    """Runs inside ronathan-api. `runners`: job -> fn(spec) -> result dict.
     Jobs whose `runs_in` isn't this process (watcher) are displayed by the UI
     but executed elsewhere."""
 
@@ -247,7 +247,7 @@ class Scheduler:
         fired = []
         # fetchall FIRST: iterating the cursor kept a read snapshot open on
         # this connection while jobs ran. A job that makes ANOTHER connection
-        # write (the custodian's resume retry → claire-api's request thread)
+        # write (the custodian's resume retry → ronathan-api's request thread)
         # left that snapshot stale, SQLite refused to upgrade it to a write
         # ("database is locked", immediately — busy_timeout does not apply),
         # last_run_at was never saved, and the job re-fired on every 20 s tick.

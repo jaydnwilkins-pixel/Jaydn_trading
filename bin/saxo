@@ -7,6 +7,6 @@
 # Nothing here can place, change or cancel an order.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-set -a; . "$ROOT/etc/claire.env"; set +a
+set -a; . "$ROOT/etc/ronathan.env"; set +a
 cd "$ROOT"
 exec "$ROOT/venv/bin/python3" -m app.tools.saxo_cli "$@"

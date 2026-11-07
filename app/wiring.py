@@ -31,8 +31,8 @@ def build_brokers(env=os.environ, conn=None):
     - saxo (SIM): SAXO_SIM_EXECUTION=enabled + SAXO_SIM_TOKEN +
       SAXO_SIM_ACCOUNT_KEY route the saxo-paper account to Saxo's SIM
       environment — real Saxo order handling, simulated money.
-    - saxo_live (REAL MONEY): only when CLAIRE_LIVE_TRADING=enabled AND a
-      live account exists (`bin/claire live setup`). Even then every
+    - saxo_live (REAL MONEY): only when RONATHAN_LIVE_TRADING=enabled AND a
+      live account exists (`bin/ronathan live setup`). Even then every
       placement passes the live switch (DESIGN.md §22) in submit_order, and
       the adapter re-checks that the desk is armed as a second lock."""
     brokers = {"alpaca": PaperSimBroker(fill_mode="instant"),
@@ -72,7 +72,7 @@ def sim_token_source(env=os.environ):
     """Where Saxo SIM trading gets its login, best first:
 
     1. the SIM OAuth sign-in (`bin/saxo login sim`) — renewed by
-       claire-api's keepalive, alerts on Telegram when it lapses, and
+       ronathan-api's keepalive, alerts on Telegram when it lapses, and
        exercises exactly the path live trading uses;
     2. a pasted 24-hour developer-portal token (SAXO_SIM_TOKEN) — legacy,
        dies after a day with no renewal.

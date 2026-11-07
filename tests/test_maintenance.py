@@ -168,9 +168,9 @@ def test_old_ai_transcripts_deleted_new_kept(world):
 
 
 def test_sdk_folder_name_matches_the_claude_cli():
-    p = maintenance.sdk_transcript_dir("/mnt/projects/claire_trading", "/h")
+    p = maintenance.sdk_transcript_dir("/home/jaydn/jaydn_trading", "/h")
     assert str(p) == ("/h/.claude/projects/"
-                      "-mnt-projects-claire-trading-var-sdk")
+                      "-home-jaydn-jaydn-trading-var-sdk")
 
 
 def test_a_full_run_never_touches_money_or_the_audit_trail(world):
@@ -253,7 +253,7 @@ def test_page_and_run_button(world):
         assert d["latest"]["summary"] == "Fine."
         assert d["retention"]["backup_keep"] == 7
         assert len(d["history"]) == 1
-        # unpaired: refused; paired: forwarded (claire-api is down here)
+        # unpaired: refused; paired: forwarded (ronathan-api is down here)
         assert httpx.post(base + "/api/maintenance-run",
                           json={}).status_code == 403
         assert httpx.post(base + "/api/maintenance-run", json={},
@@ -272,8 +272,8 @@ def test_internal_run_endpoint_needs_the_secret(world):
                                    maintenance_runner=lambda trigger:
                                    ran.set()))
     assert client.post("/internal/maintenance").status_code == 403
-    r = client.post("/internal/maintenance", headers={"x-claire-secret": "sec"})
+    r = client.post("/internal/maintenance", headers={"x-ronathan-secret": "sec"})
     assert r.status_code == 200 and ran.wait(2)
     with maintenance._lock:
         assert client.post("/internal/maintenance", headers={
-            "x-claire-secret": "sec"}).status_code == 409
+            "x-ronathan-secret": "sec"}).status_code == 409

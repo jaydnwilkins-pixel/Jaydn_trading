@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Maintenance</title>
+<meta charset="utf-8"><title>Ronathan — Maintenance</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script>nav('/maintenance')</script>
 <style>
@@ -13,8 +13,8 @@
     <h1>Maintenance <span id="pill" class="pill">loading…</span></h1>
     <button id="run-btn" onclick="runNow()">Run maintenance now</button>
   </div>
-  <p class="muted" style="margin-top:-.2rem">The maintainer checks Claire's
-    health and tidies up after her once a day. Plain code does every check
+  <p class="muted" style="margin-top:-.2rem">The maintainer checks Ronathan's
+    health and tidies up after it once a day. Plain code does every check
     and every clean-up; the <b>Maintainer</b> AI agent only reads the results
     and writes the note below — it cannot change or delete anything.</p>
   <div id="sched" class="small muted" style="margin:-.4rem 0 .8rem"></div>
@@ -59,7 +59,7 @@ function render() {
   pill.className = 'pill ' + (L ? L.status : 'warn');
 
   document.getElementById('sched').innerHTML = !s
-    ? 'No maintenance schedule yet: restart claire-api to add it.'
+    ? 'No maintenance schedule yet: restart ronathan-api to add it.'
     : s.enabled
       ? `Runs daily at ${esc(s.spec.time)} (${esc(s.spec.tz === 'local' ? 'this PC\'s time' : s.spec.tz)}) · next run ${when(s.next_run_at)} · change it on <a href="/agents">Agents &amp; Schedule</a>`
       : '<b class="bad">The daily maintenance run is switched OFF</b> on <a href="/agents">Agents &amp; Schedule</a>.';
@@ -98,7 +98,7 @@ function render() {
   document.getElementById('retention').innerHTML = `<div class="card small">
     <ul style="margin:0 0 .4rem 1.1rem;padding:0;line-height:1.6">
       <li><b>Logs</b> (var/log): rotated and compressed once over ${r.log_rotate_mb} MB; the newest ${r.log_keep} kept per log.</li>
-      <li><b>Backups</b>: one copy of desk.db a day in var/backups; the newest ${r.backup_keep} kept. Same disk as Claire, so copy them elsewhere for real protection.</li>
+      <li><b>Backups</b>: one copy of desk.db a day in var/backups; the newest ${r.backup_keep} kept. Same disk as Ronathan, so copy them elsewhere for real protection.</li>
       <li><b>Finished runs' graph state</b> (checkpoints.db): removed ${r.checkpoint_days} days after a run finishes. Runs still going or waiting for your approval are never touched.</li>
       <li><b>Run write-ups</b>: packed into var/narratives-archive ${r.narrative_days} days after a run is archived. They stay readable on the Trading page.</li>
       <li><b>AI agent transcripts</b> (Claude's own session files): deleted after ${r.sdk_days} days.</li>

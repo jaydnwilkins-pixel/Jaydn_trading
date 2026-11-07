@@ -15,7 +15,7 @@ from app.tools.brokers import PlacedOrder
 from app.tools.saxo_broker import SaxoBroker, round_price, split_symbol
 
 T0 = 1_786_456_800                       # Tue 2026-08-11 14:00 UTC
-ON = {"CLAIRE_LIVE_TRADING": "enabled"}
+ON = {"RONATHAN_LIVE_TRADING": "enabled"}
 
 AAPL_DETAILS = {"Symbol": "AAPL:xnas", "TickSize": None,
                 "TickSizeScheme": {"DefaultTickSize": 0.01, "Elements": [

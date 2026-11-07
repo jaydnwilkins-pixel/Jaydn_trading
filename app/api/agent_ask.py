@@ -78,7 +78,7 @@ def make_agent_ask(conn, narratives, *, llm_factory=None, clock=time.time):
                 return
             context = gather_context(conn, narratives, agent_id, clock=clock)
             system = (row["system_prompt"] +
-                      "\n\nRichard is asking you a DIRECT question from the "
+                      "\n\nJaydn is asking you a DIRECT question from the "
                       "dashboard. You are not running your pipeline role right "
                       "now. Answer plainly and first-person from the activity "
                       "context below; say so when something is not in your "

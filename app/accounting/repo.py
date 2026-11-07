@@ -36,7 +36,7 @@ class Repo:
     def create_account(self, id, broker, environment, base_currency,
                        fee_model: dict, risk_limits: dict | None = None, *, ts,
                        allow_live=False, external_ref=None):
-        # A live account is created ONLY by `bin/claire live setup`, which
+        # A live account is created ONLY by `bin/ronathan live setup`, which
         # passes allow_live after checking the machine-local switch
         # (DESIGN.md §22). Every other caller still cannot make one.
         if environment not in ("paper", "sim") and not (

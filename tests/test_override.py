@@ -346,7 +346,7 @@ def test_override_api_rejects_a_silly_floor():
         def override(self, *a, **k):
             raise AssertionError("must not be reached")
     client = TestClient(create_app(D(), None, "sec"))
-    r = client.post("/internal/override", headers={"x-claire-secret": "sec"},
+    r = client.post("/internal/override", headers={"x-ronathan-secret": "sec"},
                     json={"work_item_id": "w", "direction": "buy",
                           "entry": 10, "stop": 9, "trail_pct": 95,
                           "actor": "human"})

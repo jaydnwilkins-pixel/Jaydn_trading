@@ -6,9 +6,9 @@ Setup, when you're ready:
      (Configure → API → Settings: socket port 4002 for paper).
   2. `venv/bin/pip install ib-insync` (deliberately not pinned in
      requirements.txt until you activate this).
-  3. In etc/claire.env: IBKR_ENABLED=1, IBKR_HOST=127.0.0.1, IBKR_PORT=4002
+  3. In etc/ronathan.env: IBKR_ENABLED=1, IBKR_HOST=127.0.0.1, IBKR_PORT=4002
   4. Subscribe to market data per exchange in IBKR account management.
-Restart claire-api/dashboards; the Providers page data-sources panel goes
+Restart ronathan-api/dashboards; the Providers page data-sources panel goes
 green when the gateway answers.
 """
 from decimal import Decimal

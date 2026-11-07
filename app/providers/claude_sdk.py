@@ -3,7 +3,7 @@ subscription instead of the metered API.
 
 The SDK drives the bundled `claude` CLI, which signs in with the machine's
 claude.ai login (~/.claude). That only happens when no ANTHROPIC_API_KEY is
-visible to the CLI, so every call explicitly blanks it: claire.env still
+visible to the CLI, so every call explicitly blanks it: ronathan.env still
 carries the key for the `anthropic` provider, and inheriting it would silently
 move these calls back onto the API bill.
 
@@ -17,7 +17,7 @@ the desk's LangChain tools re-exposed as an in-process MCP server.
 Isolation matters: every session starts with NO built-in tools (no Bash, no
 file access), no user/project settings, no plugins and no MCP servers except
 the desk's own in-process one. Agents see exactly the tools the `agents` table
-grants them and nothing from Richard's personal Claude Code setup.
+grants them and nothing from Jaydn's personal Claude Code setup.
 """
 import asyncio
 import json
@@ -52,7 +52,7 @@ def _sdk():
 def subprocess_env():
     """Blank the API key so the CLI falls back to the claude.ai (Max) login."""
     return {"ANTHROPIC_API_KEY": "", "ANTHROPIC_AUTH_TOKEN": "",
-            "CLAUDE_CODE_ENTRYPOINT": "claire-desk"}
+            "CLAUDE_CODE_ENTRYPOINT": "ronathan-desk"}
 
 
 def base_options(*, model, fallback_model=None, system_prompt="",
@@ -112,7 +112,7 @@ class Meter:
         self.run_id = None
 
     def fork(self):
-        """A fresh meter per conversation: one SdkChat can be shared (Claire's
+        """A fresh meter per conversation: one SdkChat can be shared (Ronathan's
         chat agent is cached), and each call needs its own agent_runs row."""
         return Meter(self.conn, self.agent_id, self.work_item_id,
                      self.provider_id, self.model)
@@ -196,9 +196,9 @@ def render_history(turns, latest):
     prompt per query; the conversation itself lives in desk.db (§17)."""
     lines = ["Conversation so far:"]
     for role, content in turns:
-        who = "Richard" if role in ("user", "human") else "You"
+        who = "Jaydn" if role in ("user", "human") else "You"
         lines.append(f"{who}: {content}")
-    return "\n".join(lines) + f"\n\nRichard's new message:\n{latest}"
+    return "\n".join(lines) + f"\n\nJaydn's new message:\n{latest}"
 
 
 class _Msg:
@@ -415,7 +415,7 @@ def stream_chat(chat: SdkChat, system, prompt, lc_tools, *, max_turns=25):
     meter = chat.meter.fork() if chat.meter else None
     if meter:
         meter.start()
-    threading.Thread(target=worker, daemon=True, name="claire-sdk").start()
+    threading.Thread(target=worker, daemon=True, name="ronathan-sdk").start()
     final, result, err = "", None, None
     while True:
         item = out.get()

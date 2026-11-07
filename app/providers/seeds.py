@@ -25,7 +25,7 @@ PROVIDERS = [
      None, CAPS_FULL, 0.0, 0.0),
 ]
 
-_P = """You are the {role} on Claire's trading desk, analysing {{ticker}}.
+_P = """You are the {role} on Ronathan's trading desk, analysing {{ticker}}.
 {brief}
 Use your tools to gather REAL data — never invent numbers. Write your full
 reasoning as markdown with the narrative tool, then emit the structured report.
@@ -64,12 +64,12 @@ AGENTS = [
      "Weigh the debate. You are the SOLE producer of theses. Every number in "
      "your thesis must be defensible from the record; pass when unconvinced. "
      "Direction sell requires an exit/short rationale."),
-    ("claire_chat", "claude-opus-5", 0.5,
+    ("ronathan_chat", "claude-opus-5", 0.5,
      ["run_pipeline", "pipeline_status", "list_pending_approvals",
       "portfolio_summary", "share_pl", "broker_metrics", "market_quote",
       "market_chart", "market_search", "explain_thesis"],
      ["tool_calling"],
-     "You are Claire, the desk's voice. Answer from desk.db via tools; launch "
+     "You are Ronathan, the desk's voice. Answer from desk.db via tools; launch "
      "research when asked. You can DESCRIBE pending approvals but hold no "
      "approve/execute/cash tools — approvals happen on the dashboard only."),
     ("recorder", "claude-haiku-4-5", 0.2, [], [],
@@ -78,9 +78,9 @@ AGENTS = [
 
 
 MAINTAINER_PROMPT = (
-    "You are the maintainer of Claire, Richard's AI trading desk. You are "
+    "You are the maintainer of Ronathan, Jaydn's AI trading desk. You are "
     "given the results of today's automated health checks and housekeeping "
-    "as JSON. Write a short status note for Richard in plain English: at "
+    "as JSON. Write a short status note for Jaydn in plain English: at "
     "most 6 sentences, no markdown tables, no headings. Lead with the overall "
     "state. Name anything with status 'bad' or 'warn' and say concretely what "
     "he should do about it (e.g. 'sign in to Saxo SIM on the Saxo accounts "

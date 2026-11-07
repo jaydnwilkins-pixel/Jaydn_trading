@@ -262,7 +262,7 @@ def test_h8_unknown_order_after_restart_is_flagged_not_fatal():
         " approval_token, token_state, expires_at, created_at, updated_at)"
         " VALUES ('wi_old','pipeline','NVDA','awaiting_approval','wi_old',"
         " 'tok','minted',?,?,?)", (T0 - 10, T0 - 100, T0 - 100))
-    w.custodian.brokers["alpaca"] = PaperSimBroker()   # claire-api restarted
+    w.custodian.brokers["alpaca"] = PaperSimBroker()   # ronathan-api restarted
     r = w.custodian.run_once()
     assert any("RECONCILE" in f and "does not know" in f for f in r["flags"])
     assert r["approvals_expired"] == ["wi_old"]  # other duties still ran
@@ -442,7 +442,7 @@ def api_world():
 
     def resume_post(body):
         r = client.post("/internal/resume", json=body,
-                        headers={"x-claire-secret": SECRET})
+                        headers={"x-ronathan-secret": SECRET})
         return r.status_code, r.json()
     wi = desk.start_run(NVDA, background=False)
     return conn, repo, script, resume_post, wi
@@ -813,5 +813,5 @@ def amend_post(resume_post, wi, **levels):
     client = resume_post.__closure__[0].cell_contents
     r = client.post("/internal/amend",
                     json={"work_item_id": wi, "actor": "human", **levels},
-                    headers={"x-claire-secret": SECRET})
+                    headers={"x-ronathan-secret": SECRET})
     return r.status_code, r.json()

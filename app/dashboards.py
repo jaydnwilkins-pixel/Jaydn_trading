@@ -1,9 +1,9 @@
-"""Dashboards server (:7787, stdlib, no build step — DESIGN.md §13) + the
+"""Dashboards server (:7797, stdlib, no build step — DESIGN.md §13) + the
 price watcher loop (§15). Serves pages from web/, JSON APIs over desk.db, and
 is the ONLY component that converts a human click into a resume (§10).
 
 Pairing: approval tokens are released only to a browser that presents the
-dashboard key (X-Dash-Key, pasted once from etc/claire.env) — closing the
+dashboard key (X-Dash-Key, pasted once from etc/ronathan.env) — closing the
 "any localhost curl can read the card API" hole. EVERY POST needs the key
 too (review 2026-11-03 C1/H1): starting paid runs, repointing agents and
 editing providers are as dangerous as approving.
@@ -38,11 +38,11 @@ from .tools.brokers import seed_mcps
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
-SAXO_CALLBACK = "/claire-saxo"   # the path registered on both Saxo apps
+SAXO_CALLBACK = "/ronathan-saxo"   # the path registered on both Saxo apps
 PAGES = {"/": "index.html", "/portfolio": "portfolio.html",
          "/markets": "markets.html", "/trading": "trading.html",
          "/agents": "agents.html", "/providers": "providers.html",
-         "/claire": "claire.html", "/schedule": "agents.html",  # merged
+         "/ronathan": "ronathan.html", "/schedule": "agents.html",  # merged
          "/approvals": "approvals.html", "/saxo": "saxo.html",
          "/usage": "usage.html", "/watchlist": "watchlist.html",
          "/orders": "orders.html", "/trades": "trades.html",
@@ -62,8 +62,8 @@ PIPELINE_EDGES = [("prepare", "fundamental"), ("prepare", "technical"),
 
 # The only env var NAMES a provider row may point at. build_llm sends
 # env[api_key_ref] as a bearer token to the row's base_url, so a free-form
-# name let anyone who could write a provider exfiltrate CLAIRE_DASHBOARD_KEY,
-# CLAIRE_INTERNAL_SECRET or a broker secret to a URL of their choosing (C1).
+# name let anyone who could write a provider exfiltrate RONATHAN_DASHBOARD_KEY,
+# RONATHAN_INTERNAL_SECRET or a broker secret to a URL of their choosing (C1).
 # claude_sdk needs no key at all; None/"" means "no key".
 from .providers.registry import PROVIDER_KEY_REFS  # noqa: E402 — one list
 PROVIDER_KINDS = ("anthropic", "claude_sdk", "openai_compatible", "custom")
@@ -113,7 +113,7 @@ def _levels(c):
 
 
 def venue_adapter(acct, env) -> str:
-    """Which adapter claire-api builds for this account (wiring.build_brokers
+    """Which adapter ronathan-api builds for this account (wiring.build_brokers
     is the rule; this mirrors it for display — it places nothing)."""
     b = acct["broker"]
     if b == "saxo" and (env.get("SAXO_SIM_EXECUTION") or "").lower() == \
@@ -138,7 +138,7 @@ def background_loops(env) -> list:
                     "state": "ok" if signed else "idle",
                     "detail": "refreshes the Saxo sign-in every 10 min"
                               " and warns you (Telegram + desktop) before or"
-                              " when it lapses · runs in claire-api"})
+                              " when it lapses · runs in ronathan-api"})
     except Exception:                            # noqa: BLE001 — display only
         pass
     try:
@@ -220,7 +220,7 @@ def default_allowed_hosts(bind):
 
 
 def host_only(value):
-    """'127.0.0.1:7787' → '127.0.0.1', '[::1]:7787' → '::1'."""
+    """'127.0.0.1:7797' → '127.0.0.1', '[::1]:7797' → '::1'."""
     h = (value or "").strip().lower()
     if h.startswith("["):
         end = h.find("]")
@@ -281,7 +281,7 @@ USAGE_AGENT_LABELS = {
     "screener": "Screener", "fundamental": "Fundamental analyst",
     "technical": "Technical analyst", "news": "News analyst",
     "bull": "Bull researcher", "bear": "Bear researcher",
-    "arbiter": "Arbiter", "claire_chat": "Claire chat",
+    "arbiter": "Arbiter", "ronathan_chat": "Ronathan chat",
     "recorder": "Recorder (trade journal)"}
 
 USAGE_SOURCE_LABELS = {
@@ -289,7 +289,7 @@ USAGE_SOURCE_LABELS = {
     "daily_us": "Daily screen (US)", "daily": "Daily screen",
     "volume_scan": "Volume scan", "exit_review": "Exit review",
     "override": "Your override", "manual": "Your manual run",
-    "chat": "Claire chat", "agent_qa": "Agent Q&A", "screener": "Screener",
+    "chat": "Ronathan chat", "agent_qa": "Agent Q&A", "screener": "Screener",
     "journal": "Trade journal", "other": "Other research run"}
 
 
@@ -298,7 +298,7 @@ def usage_source(agent_id, kind=None, trigger=None, exchange=None,
     """Which entry point paid for an agent_runs row. The rules, in order:
 
     No work item (work_item_id NULL):
-      claire_chat           → chat       (Claire chat: Bob, Telegram, /ask)
+      ronathan_chat           → chat       (Ronathan chat: Bob, Telegram, /ask)
       screener              → screener   (the daily-screen picker itself)
       recorder              → journal    (trade-journal prose after a fill)
       any other agent       → agent_qa   (dashboard "ask this agent")
@@ -314,7 +314,7 @@ def usage_source(agent_id, kind=None, trigger=None, exchange=None,
     `linked`: None = work_item_id is NULL, True = the work item exists,
     False = work_item_id names a row that no longer exists → other."""
     if linked is None:                       # no work item at all
-        if agent_id == "claire_chat":
+        if agent_id == "ronathan_chat":
             return "chat"
         if agent_id == "screener":
             return "screener"
@@ -574,15 +574,15 @@ def usage_report(conn, *, now=None, days=7, bob_path=None):
         "bob": bob_usage(bob_path, now=now, days=days)}
 
 
-def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
+def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
                   secret="", dash_key="", narratives=None, clock=time.time,
-                  port=7787, env=None, cal=None, sse_interval=2.0,
+                  port=7797, env=None, cal=None, sse_interval=2.0,
                   bind="127.0.0.1", allowed_hosts=None,
                   sse_max_age=SSE_MAX_AGE):
     """`bind` is the dashboards' listen address. 0.0.0.0 puts the desk on the
     LAN so another machine can use it; the approval key still gates every
     action, but READ routes are open to anyone who can reach the port — see
-    CLAIRE_DASHBOARD_BIND in etc/claire.env. claire-api stays on loopback
+    RONATHAN_DASHBOARD_BIND in etc/ronathan.env. ronathan-api stays on loopback
     regardless: it holds /internal/resume, and nothing off-box may call it.
 
     `allowed_hosts`: Host-header names to answer to; None derives them from
@@ -899,7 +899,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     return self._send(200, {"ok": True})
                 if u.path == "/api/order-control":
                     # cancel / edit an APPROVED order before it fills; the
-                    # adapters live in claire-api, which does the work
+                    # adapters live in ronathan-api, which does the work
                     if not self._paired():
                         raise HTTPError(403, "dashboard not paired")
                     req = {"work_item_id": str(body.get("work_item_id") or ""),
@@ -910,11 +910,11 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                             req[k] = float(body[k])
                     try:
                         r = httpx.post(f"{api_base}/internal/order", json=req,
-                                       headers={"x-claire-secret": secret},
+                                       headers={"x-ronathan-secret": secret},
                                        timeout=60)
                     except Exception as e:          # noqa: BLE001
                         return self._send(502, {"error":
-                                                f"claire-api unreachable ({e})"})
+                                                f"ronathan-api unreachable ({e})"})
                     try:
                         data = r.json()
                     except ValueError:
@@ -932,7 +932,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                         if u.path == "/api/trade-retry":
                             if body.get("entry"):
                                 # the human edited the levels: amend the
-                                # trade in claire-api (the graph owns it)
+                                # trade in ronathan-api (the graph owns it)
                                 self._amend(wi, body)
                             out = approvals.retry_failed(
                                 conn, wi, resume_post,
@@ -951,17 +951,17 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 if u.path == "/api/saxo-login-start":
                     return self._saxo_login_start(body)
                 if u.path == "/api/maintenance-run":
-                    # starts a run in claire-api (it owns the maintainer and
+                    # starts a run in ronathan-api (it owns the maintainer and
                     # the AI agent); the page polls /api/maintenance
                     if not self._paired():
                         raise HTTPError(403, "dashboard not paired")
                     try:
                         r = httpx.post(f"{api_base}/internal/maintenance",
-                                       headers={"x-claire-secret": secret},
+                                       headers={"x-ronathan-secret": secret},
                                        timeout=10)
                     except Exception as e:          # noqa: BLE001
                         return self._send(502, {"error":
-                                                f"claire-api unreachable ({e})"})
+                                                f"ronathan-api unreachable ({e})"})
                     try:
                         data = r.json()
                     except ValueError:
@@ -1037,11 +1037,11 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     try:
                         r = httpx.post(f"{api_base}/internal/override",
                                        json={**body, "actor": "human"},
-                                       headers={"x-claire-secret": secret},
+                                       headers={"x-ronathan-secret": secret},
                                        timeout=30)
                     except Exception as e:      # noqa: BLE001
                         return self._send(502, {"error":
-                                                f"claire-api unreachable ({e})"})
+                                                f"ronathan-api unreachable ({e})"})
                     out = r.json() if r.headers.get("content-type", "") \
                         .startswith("application/json") else {}
                     if r.status_code != 200:
@@ -1210,7 +1210,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     pass
 
         def _ask_proxy(self, body, upstream="/ask"):
-            """Stream claire-api NDJSON straight through to the browser."""
+            """Stream ronathan-api NDJSON straight through to the browser."""
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
             self.send_header("Cache-Control", "no-cache")
@@ -1226,7 +1226,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     if r.status_code != 200:
                         detail = r.read().decode()[:300]
                         line({"kind": "error",
-                              "text": f"claire-api {r.status_code}: {detail}"})
+                              "text": f"ronathan-api {r.status_code}: {detail}"})
                         line({"kind": "done"})
                         return
                     for chunk in r.iter_raw():
@@ -1403,13 +1403,13 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             up = api_ok()
             flags = []
             if not up:
-                flags.append("claire-api :7788 is down")
+                flags.append("ronathan-api :7798 is down")
             kinds = {r[0] for r in conn.execute(
                 "SELECT p.kind FROM agents a JOIN providers p"
                 " ON p.id=a.provider_id WHERE a.enabled=1")}
             if "anthropic" in kinds and not env.get("ANTHROPIC_API_KEY"):
                 flags.append("ANTHROPIC_API_KEY missing — LLM runs will fail"
-                             " (add to etc/claire.env, restart claire-api)")
+                             " (add to etc/ronathan.env, restart ronathan-api)")
             if "claude_sdk" in kinds:
                 from .providers import claude_sdk
                 why = claude_sdk.not_ready()
@@ -1445,7 +1445,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                                    if seen > day_ago else "")
                                 + " — see Trading", "link": "/trading"})
             return {"work_items": states, "health": healthrows, "cash": cash,
-                    "claire_api": up,
+                    "ronathan_api": up,
                     "flags": [i["text"] for i in visible],
                     "flag_items": visible, "cleared": cleared,
                     "pending": states.get("awaiting_approval", 0)}
@@ -1479,7 +1479,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     "id": "saxo-live", "broker": "saxo_live", "ccy": "",
                     "environment": "live", "cash": 0, "fee_model": {},
                     "label": f"Saxo LIVE {lid} — real money".strip(),
-                    "disabled": "not set up yet (bin/claire live setup)"})
+                    "disabled": "not set up yet (bin/ronathan live setup)"})
             cards = []
             now = int(clock())
             for r in conn.execute(
@@ -1910,7 +1910,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                            + "sold the shares at the broker automatically")
                 elif kind == "pipeline":
                     conv = th.get("conviction")
-                    why = ("Claire's desk recommended this "
+                    why = ("Ronathan's desk recommended this "
                            f"{th.get('direction') or t['side']}"
                            + (f" ({conv:.0%} conviction)" if conv else "")
                            + " and you approved it")
@@ -1947,7 +1947,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 elif w:
                     why = w.get("trigger") or kind or ""
                 else:
-                    why = "not linked to a Claire run (booked from the broker)"
+                    why = "not linked to a Ronathan run (booked from the broker)"
                 if t["leg"]:
                     parent = item(t["work_item_id"]) or {}
                     details.append("protecting the buy from run "
@@ -2457,7 +2457,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             return out
 
         def _amend(self, wi, body):
-            """Push edited price levels to claire-api; raises AuthError with
+            """Push edited price levels to ronathan-api; raises AuthError with
             its reason (e.g. a stop on the wrong side) if refused."""
             cur = json.loads((conn.execute(
                 "SELECT thesis_json FROM work_items WHERE id=?", (wi,))
@@ -2474,9 +2474,9 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 r = httpx.post(f"{api_base}/internal/amend",
                                json={"work_item_id": wi, "actor": "human",
                                      **want},
-                               headers={"x-claire-secret": secret}, timeout=30)
+                               headers={"x-ronathan-secret": secret}, timeout=30)
             except Exception as e:                  # noqa: BLE001
-                raise approvals.AuthError(502, f"claire-api unreachable ({e})")
+                raise approvals.AuthError(502, f"ronathan-api unreachable ({e})")
             if r.status_code != 200:
                 raise approvals.AuthError(r.status_code, (r.json() or {}).get(
                     "detail", f"amend failed ({r.status_code})"))
@@ -2572,7 +2572,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             return (r["q"] or 0) / 1e6
 
         def _manual_trade(self, body):
-            """Forward a trade you started to claire-api (/internal/manual),
+            """Forward a trade you started to ronathan-api (/internal/manual),
             which validates it and puts it at the approval gate."""
             allowed = ("ticker", "exchange", "direction", "entry", "stop",
                        "target", "note", "suggested", "source")
@@ -2585,10 +2585,10 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             fwd["actor"] = "human"
             try:
                 r = httpx.post(f"{api_base}/internal/manual", json=fwd,
-                               headers={"x-claire-secret": secret}, timeout=30)
+                               headers={"x-ronathan-secret": secret}, timeout=30)
             except Exception as e:      # noqa: BLE001
                 return self._send(502, {"error":
-                                        f"claire-api unreachable ({e})"})
+                                        f"ronathan-api unreachable ({e})"})
             out = r.json() if r.headers.get("content-type", "") \
                 .startswith("application/json") else {}
             if r.status_code != 200:
@@ -2601,7 +2601,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
 
         def _saxo_login_start(self, body):
             """Begin a Saxo sign-in from the Saxo accounts page. Needs the
-            dashboard key (every POST does), so only Richard can start one;
+            dashboard key (every POST does), so only Jaydn can start one;
             Saxo then sends the browser back to SAXO_CALLBACK on THIS server.
             Saxo only redirects to the registered host — localhost — so the
             button works in a browser on this PC."""
@@ -2661,7 +2661,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 p["weight_pct"] = (round(abs(p.get("exposure_base") or 0)
                                          / gross * 100, 1) if gross else None)
             # the Sell button is offered only for what the DESK bought on
-            # this very account; the rest is Richard's own holding
+            # this very account; the rest is Jaydn's own holding
             broker = "saxo_live" if which == "live" else "saxo"
             from .portfolio import open_positions
             # saxo-paper only trades AT Saxo SIM when SIM execution is on;
@@ -2719,7 +2719,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             from . import maintenance
             try:
                 out = maintenance.latest(conn)
-            except sqlite3.OperationalError:    # claire-api not restarted yet
+            except sqlite3.OperationalError:    # ronathan-api not restarted yet
                 out = {"latest": None, "history": []}
             job = next((r for r in scheduler.rows_with_next(conn, clock=clock)
                         if r.get("job") == "maintenance"), None)
@@ -2748,12 +2748,12 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
             # why arming is not possible right now, in the order to fix it
             if not st["enabled_in_env"]:
                 why = (f"{live_trading.ENV_FLAG}=enabled is not set in "
-                       "etc/claire.env (then bin/claire restart)")
+                       "etc/ronathan.env (then bin/ronathan restart)")
             elif not st["accounts"]:
-                why = "no live account yet: run bin/claire live setup"
+                why = "no live account yet: run bin/ronathan live setup"
             elif not self._from_this_pc():
                 why = ("arming is only accepted from a browser on the desk's "
-                       "own PC (http://127.0.0.1:7787)")
+                       "own PC (http://127.0.0.1:7797)")
             else:
                 why = None
             return {**st, "metrics": live_trading.metrics(conn, clock=clock),
@@ -2806,7 +2806,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 refs = json.loads(mcp["env_refs"]) if mcp else []
                 creds = bool(refs) and all(env.get(r) for r in refs)
                 # where orders REALLY go — the same rule as
-                # wiring.build_brokers (claire-api builds the adapters). An
+                # wiring.build_brokers (ronathan-api builds the adapters). An
                 # MCP row is configuration only: no MCP server ever places.
                 adapter = venue_adapter(acct, env or {})
                 if adapter == "saxo-sim":
@@ -2820,15 +2820,15 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     bstate, bdetail = "warn", ("REAL MONEY at Saxo — only "
                                                "while live trading is armed")
                 elif mcp and refs and not creds:
-                    bstate, bdetail = "warn", ("Claire's paper sim · MCP "
+                    bstate, bdetail = "warn", ("Ronathan's paper sim · MCP "
                                                "configured, creds missing "
                                                "(unused)")
                 elif mcp:
-                    bstate, bdetail = "ok", ("Claire's paper sim · MCP "
+                    bstate, bdetail = "ok", ("Ronathan's paper sim · MCP "
                                              "configured but not used for "
                                              "orders")
                 else:
-                    bstate, bdetail = "idle", "Claire's paper sim"
+                    bstate, bdetail = "idle", "Ronathan's paper sim"
                 brokers.append({
                     "broker": acct["broker"], "account": acct["id"],
                     "environment": acct["environment"],
@@ -2872,7 +2872,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 else 0
             return {"agents": agents, "edges": PIPELINE_EDGES,
                     "loops": background_loops(env or {}),
-                    "brokers": brokers, "claire_api": api_ok(),
+                    "brokers": brokers, "ronathan_api": api_ok(),
                     "mcps": self._mcps(), "health": health,
                     "book": {"open_orders": open_orders,
                              "positions": positions, "pending": pending},
@@ -2928,7 +2928,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
 
         def _data_sources(self):
             """Market-data source chain status — configure by adding the env
-            vars to etc/claire.env and restarting both services."""
+            vars to etc/ronathan.env and restarting both services."""
             primary = market.primary_name() if hasattr(market,
                                                        "primary_name") else None
             return [
@@ -2936,14 +2936,14 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                  "role": "primary when enabled (licensed exchange data)",
                  "configured": bool((env or {}).get("IBKR_ENABLED")),
                  "active": primary == "ibkr",
-                 "how": "IBKR_ENABLED=1 + IBKR_HOST/IBKR_PORT in claire.env; "
+                 "how": "IBKR_ENABLED=1 + IBKR_HOST/IBKR_PORT in ronathan.env; "
                         "IB Gateway running (paper ok) + pip install "
                         "ib-insync + per-exchange data subscriptions"},
                 {"id": "twelvedata", "name": "Twelve Data",
                  "role": "primary when keyed (global quotes/charts/FX)",
                  "configured": bool((env or {}).get("TWELVEDATA_API_KEY")),
                  "active": primary == "twelvedata",
-                 "how": "TWELVEDATA_API_KEY in claire.env (free tier "
+                 "how": "TWELVEDATA_API_KEY in ronathan.env (free tier "
                         "~800 credits/day)"},
                 {"id": "yahoo", "name": "Yahoo Finance",
                  "role": "free default (paced + host-rotated; throttles)",
@@ -2983,7 +2983,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                                         " claude_sdk | openai_compatible |"
                                         " custom"})
             # C1: the key ref is a NAME from a fixed list, never free-form —
-            # otherwise base_url=attacker + api_key_ref=CLAIRE_DASHBOARD_KEY
+            # otherwise base_url=attacker + api_key_ref=RONATHAN_DASHBOARD_KEY
             # turns one probe into a key-exfiltration
             key_ref = body.get("api_key_ref") or None
             if key_ref is not None and key_ref not in PROVIDER_KEY_REFS:
@@ -3054,13 +3054,13 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                     not re.fullmatch(r"[A-Z][A-Z0-9_]*", r) for r in refs):
                 return self._send(400, {"error": "env_refs must be UPPER_CASE"
                                         " env var NAMES (values stay in"
-                                        " claire.env)"})
+                                        " ronathan.env)"})
             # the desk's own secrets must never be handed to a third-party
             # process, whenever MCP launching lands (same lesson as C1)
-            if any(r.startswith("CLAIRE_") or r in PROVIDER_KEY_REFS
+            if any(r.startswith("RONATHAN_") or r in PROVIDER_KEY_REFS
                    for r in refs):
                 return self._send(400, {"error": "env_refs may not name "
-                                        "CLAIRE_* or LLM provider keys"})
+                                        "RONATHAN_* or LLM provider keys"})
             broker = body.get("broker") or None
             if broker is not None and (not isinstance(broker, str) or
                                        not _ID_RE.fullmatch(broker)):
@@ -3118,7 +3118,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 raise HTTPError(400, str(e)) from None
 
         def _start_run(self, body):
-            """Validated before it leaves for claire-api: the ticker becomes
+            """Validated before it leaves for ronathan-api: the ticker becomes
             part of the work-item id, which every page renders."""
             ticker = body.get("ticker")
             exchange = body.get("exchange")
@@ -3140,11 +3140,11 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
                 r = httpx.post(f"{api_base}/api/run", json=fwd, timeout=10)
             except Exception as e:              # noqa: BLE001
                 return self._send(502, {"error":
-                                        f"claire-api unreachable ({e})"})
+                                        f"ronathan-api unreachable ({e})"})
             try:
                 out = r.json()
             except ValueError:
-                out = {"error": f"claire-api {r.status_code}"}
+                out = {"error": f"ronathan-api {r.status_code}"}
             return self._send(r.status_code, out)
 
         def _assign_agent(self, body):
@@ -3204,7 +3204,7 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7788",
 def start_watcher_thread(conn, repo, market, *, api_base, interval=600,
                          clock=time.time, cal=None):
     """The §15 loop lives in the dashboards process; sell-review launches go
-    through claire-api's HTTP seam with a SHORT timeout (§15 lesson 8)."""
+    through ronathan-api's HTTP seam with a SHORT timeout (§15 lesson 8)."""
     from .watcher import Watcher
 
     def start_sell_review(inst, trigger=None):
@@ -3239,7 +3239,7 @@ def start_watcher_thread(conn, repo, market, *, api_base, interval=600,
                 if enabled:
                     rep_ = watcher.tick()
                     # so Agents & Schedule shows when it last ran (it said
-                    # "never": only claire-api's scheduler wrote this row)
+                    # "never": only ronathan-api's scheduler wrote this row)
                     conn.execute(
                         "UPDATE schedules SET last_run_at=?, last_result=?"
                         " WHERE job='watcher'",
@@ -3258,18 +3258,18 @@ def start_watcher_thread(conn, repo, market, *, api_base, interval=600,
 
 
 def ensure_dash_key(env_path):
-    """CLAIRE_DASHBOARD_KEY: generated once, lives only in claire.env and the
+    """RONATHAN_DASHBOARD_KEY: generated once, lives only in ronathan.env and the
     user's browser (pasted on first visit)."""
     import os
     import secrets
-    key = os.environ.get("CLAIRE_DASHBOARD_KEY", "")
+    key = os.environ.get("RONATHAN_DASHBOARD_KEY", "")
     if key:
         return key
     key = secrets.token_hex(8)
     with open(env_path, "a") as f:
-        f.write(f"\nCLAIRE_DASHBOARD_KEY={key}\n")
-    os.environ["CLAIRE_DASHBOARD_KEY"] = key
-    print(f"generated CLAIRE_DASHBOARD_KEY (see {env_path})")
+        f.write(f"\nRONATHAN_DASHBOARD_KEY={key}\n")
+    os.environ["RONATHAN_DASHBOARD_KEY"] = key
+    print(f"generated RONATHAN_DASHBOARD_KEY (see {env_path})")
     return key
 
 
@@ -3289,26 +3289,26 @@ def main():
     db.init(conn)
     repo = Repo(conn)
     market = build_market()
-    secret = os.environ.get("CLAIRE_INTERNAL_SECRET", "")
-    dash_key = ensure_dash_key(API_ROOT / "etc" / "claire.env")
+    secret = os.environ.get("RONATHAN_INTERNAL_SECRET", "")
+    dash_key = ensure_dash_key(API_ROOT / "etc" / "ronathan.env")
     cal = sessions.load(conn) or None
     start_watcher_thread(conn, repo, market,
-                         api_base="http://127.0.0.1:7788", cal=cal)
+                         api_base="http://127.0.0.1:7798", cal=cal)
     # approvals + refused trades → the owner's Telegram DM (buttons relayed
     # back by Bob's bot to /api/telegram-decision)
     from . import telegram_approvals
     telegram_approvals.start_pusher_thread(conn, market, os.environ)
-    bind =os.environ.get("CLAIRE_DASHBOARD_BIND", "127.0.0.1")
+    bind =os.environ.get("RONATHAN_DASHBOARD_BIND", "127.0.0.1")
     # optional extra Host names (e.g. a DNS alias for this box); the
     # loopback + hostname + LAN-IP set is always derived from `bind`
     extra = [h.strip().lower() for h in os.environ.get(
-        "CLAIRE_DASHBOARD_HOSTS", "").split(",") if h.strip()]
+        "RONATHAN_DASHBOARD_HOSTS", "").split(",") if h.strip()]
     allowed = (default_allowed_hosts(bind) | set(extra)) if extra else None
     srv = create_server(conn, repo, market, secret=secret, dash_key=dash_key,
                         narratives=Narratives(var / "narratives"),
                         env=os.environ, cal=cal, bind=bind,
                         allowed_hosts=allowed)
-    print(f"dashboards on http://{bind}:7787")
+    print(f"dashboards on http://{bind}:7797")
     if bind not in ("127.0.0.1", "localhost"):
         import socket
         try:
@@ -3316,7 +3316,7 @@ def main():
             s.connect(("8.8.8.8", 80))          # no packet sent; reads the route
             lan = s.getsockname()[0]
             s.close()
-            print(f"  reachable on your network at http://{lan}:7787")
+            print(f"  reachable on your network at http://{lan}:7797")
         except OSError:
             pass
         print("  anyone on this network can READ the desk; every POST "

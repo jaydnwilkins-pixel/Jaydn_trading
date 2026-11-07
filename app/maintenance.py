@@ -1,4 +1,4 @@
-"""The maintainer (DESIGN.md §23): keeps Claire healthy and says how she is.
+"""The maintainer (DESIGN.md §23): keeps Ronathan healthy and says how it is.
 
 Daily (and on demand from the Maintenance page) it:
   1. CHECKS — services, the custodian and broker sync, schedules, disk,
@@ -130,7 +130,7 @@ class Maintainer:
             if not prev or prev["status"] != "bad":     # on the change only
                 try:
                     self.alert(f"{headline}\n\n{summary or ''}".strip(),
-                               title="Claire maintenance")
+                               title="Ronathan maintenance")
                 except Exception:               # noqa: BLE001
                     pass
         return {"id": cur.lastrowid, "status": status, "headline": headline,
@@ -170,13 +170,13 @@ class Maintainer:
     def _check_services(self, now):
         out = []
         if self.probe is not None:
-            up = self.probe("http://127.0.0.1:7787/")
-            out.append(_check("dashboards", "Dashboards (:7787)",
+            up = self.probe("http://127.0.0.1:7797/")
+            out.append(_check("dashboards", "Dashboards (:7797)",
                               "ok" if up else "bad",
                               "answering" if up else "NOT answering",
                               "" if up else "the pages and approvals are down"))
-        # this code runs inside claire-api, so reaching here proves it is up
-        out.append(_check("claire_api", "claire-api (:7788)", "ok", "running"))
+        # this code runs inside ronathan-api, so reaching here proves it is up
+        out.append(_check("ronathan_api", "ronathan-api (:7798)", "ok", "running"))
         return out
 
     def _health(self, service):
@@ -218,7 +218,7 @@ class Maintainer:
                 " ON s.account_id=a.id").fetchall()
         except sqlite3.OperationalError:
             return [_check("brokers", "Broker sync", "warn",
-                           "no sync table yet", "restart claire-api")]
+                           "no sync table yet", "restart ronathan-api")]
         for r in rows:
             if r["checked_at"] is None:
                 out.append(_check(f"broker:{r['id']}", f"Broker {r['id']}",
@@ -318,15 +318,15 @@ class Maintainer:
             out.append(_check(
                 "leftovers", "Leftover files", "info",
                 _mb(sum(_size(p) for p in dead + resets)),
-                "Claire no longer writes or reads these (old logs, and copies "
-                "made by bin/claire-reset); delete by hand if you don't need "
+                "Ronathan no longer writes or reads these (old logs, and copies "
+                "made by bin/ronathan-reset); delete by hand if you don't need "
                 "them: " +
                 ", ".join(p.name for p in dead + resets)[:400]))
         return out
 
     # ── housekeeping ─────────────────────────────────────────────────────
     def rotate_logs(self) -> dict:
-        """copytruncate: bin/claire opens the logs with >> (O_APPEND), so
+        """copytruncate: bin/ronathan opens the logs with >> (O_APPEND), so
         the running services keep writing to the same, now-empty file."""
         logdir, rotated, freed = self.var / "log", [], 0
         for log in sorted(logdir.glob("*.log")) if logdir.is_dir() else []:

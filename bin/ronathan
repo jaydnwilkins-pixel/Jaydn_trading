@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Claire desk control: start / stop / restart / status.
+# Ronathan desk control: start / stop / restart / status.
 #
-# Nothing here destroys data. Wiping the book lives in bin/claire-reset, on
+# Nothing here destroys data. Wiping the book lives in bin/ronathan-reset, on
 # purpose: the command you run every day should not be one typo away from the
 # command you run once.
 #
@@ -21,18 +21,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# physical path: the checkout is reachable as ~/claire_trading (a symlink) and
-# /mnt/projects/claire_trading (systemd); process matching uses this one
+# physical path: if the checkout is reached through a symlink, process
+# matching still uses the real path
 ROOT_REAL="$(cd "$ROOT" && pwd -P)"
 PY="$ROOT/venv/bin/python3"
-ENV_FILE="$ROOT/etc/claire.env"
+ENV_FILE="$ROOT/etc/ronathan.env"
 LOG_DIR="$ROOT/var/log"
 DRAIN_STATE="$ROOT/var/.drain-schedules.json"
 API_PAT='-m app\.api\.server( |$)'
 DASH_PAT='-m app\.dashboards( |$)'
-API_URL='http://127.0.0.1:7788'
-DASH_URL='http://127.0.0.1:7787'
-DRAIN_TIMEOUT="${CLAIRE_DRAIN_TIMEOUT:-300}"
+API_URL='http://127.0.0.1:7798'
+DASH_URL='http://127.0.0.1:7797'
+DRAIN_TIMEOUT="${RONATHAN_DRAIN_TIMEOUT:-300}"
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'
 c_off=$'\033[0m'
@@ -84,9 +84,9 @@ if what == "inflight":
     # it would otherwise hold every restart until the market closes.
     import os
     sim_exec = os.environ.get("SAXO_SIM_EXECUTION")
-    if sim_exec is None:                  # bin/claire need not have sourced it
+    if sim_exec is None:                  # bin/ronathan need not have sourced it
         try:
-            for line in open("etc/claire.env"):
+            for line in open("etc/ronathan.env"):
                 if line.startswith("SAXO_SIM_EXECUTION="):
                     sim_exec = line.split("=", 1)[1].strip()
         except OSError:
@@ -212,22 +212,22 @@ cmd_status() {
   local api dash
   api="$(pids_for "$API_PAT")"; dash="$(pids_for "$DASH_PAT")"
   if [ -n "$api" ]; then
-    ok "claire-api      pid ${api//$'\n'/ }  $(curl -fsS -m 3 "$API_URL/status" \
+    ok "ronathan-api      pid ${api//$'\n'/ }  $(curl -fsS -m 3 "$API_URL/status" \
         2>/dev/null | head -c 120 || echo 'not answering yet')"
-  else say "  claire-api      ${c_dim}stopped${c_off}"; fi
+  else say "  ronathan-api      ${c_dim}stopped${c_off}"; fi
   if [ -n "$dash" ]; then
     local code; code="$(curl -s -m 3 -o /dev/null -w '%{http_code}' \
       "$DASH_URL/" 2>/dev/null || echo '---')"
-    ok "claire-dashboards pid ${dash//$'\n'/ }  HTTP $code  → $DASH_URL"
+    ok "ronathan-dashboards pid ${dash//$'\n'/ }  HTTP $code  → $DASH_URL"
     # when it is on the LAN, print the address another machine can use —
     # nobody should have to go looking for their own IP
-    if grep -qs '^CLAIRE_DASHBOARD_BIND=0\.0\.0\.0' "$ENV_FILE"; then
+    if grep -qs '^RONATHAN_DASHBOARD_BIND=0\.0\.0\.0' "$ENV_FILE"; then
       local lan; lan="$(hostname -I 2>/dev/null | awk '{print $1}')"
       if [ -n "$lan" ]; then
-        dim "    from another device: http://$lan:7787"
+        dim "    from another device: http://$lan:7797"
       fi
     fi
-  else say "  claire-dashboards ${c_dim}stopped${c_off}"; fi
+  else say "  ronathan-dashboards ${c_dim}stopped${c_off}"; fi
   if [ -f "$ROOT/var/desk.db" ]; then
     dim "  in flight: $(dbq inflight text)"
     local w; w="$(dbq waiting)"
@@ -291,8 +291,8 @@ drain() {
   warn "still busy after ${DRAIN_TIMEOUT}s — NOT stopping ($(dbq inflight text))."
   say  "  An unfilled order is usually waiting on the venue: the custodian"
   say  "  polls for fills, and an order placed out of hours sits until the"
-  say  "  market opens. Give it longer with CLAIRE_DRAIN_TIMEOUT=1800, or"
-  say  "  stop anyway with 'claire stop --kill' — the order is already at the"
+  say  "  market opens. Give it longer with RONATHAN_DRAIN_TIMEOUT=1800, or"
+  say  "  stop anyway with 'ronathan stop --kill' — the order is already at the"
   say  "  broker either way, and the custodian reconciles it on next start."
   return 1
 }
@@ -355,21 +355,21 @@ case "${1:-}" in
            set -a; [ -f "$ENV_FILE" ] && . "$ENV_FILE"; set +a
            cd "$ROOT" && exec "$PY" -m app.legs_cli "$@" ;;
   *) cat <<EOF
-Claire desk control
+Ronathan desk control
 
-  claire start                 start claire-api (:7788) + dashboards (:7787)
-  claire stop [--graceful]     pause schedules, let work in flight finish,
-                               then stop  (default; CLAIRE_DRAIN_TIMEOUT=${DRAIN_TIMEOUT}s)
-  claire stop --kill           stop now, abandoning anything in flight
-  claire restart [--kill]      stop then start
-  claire status                what is running, and what is in flight
-  claire live status|setup|arm|disarm|limits
+  ronathan start                 start ronathan-api (:7798) + dashboards (:7797)
+  ronathan stop [--graceful]     pause schedules, let work in flight finish,
+                               then stop  (default; RONATHAN_DRAIN_TIMEOUT=${DRAIN_TIMEOUT}s)
+  ronathan stop --kill           stop now, abandoning anything in flight
+  ronathan restart [--kill]      stop then start
+  ronathan status                what is running, and what is in flight
+  ronathan live status|setup|arm|disarm|limits
                                the REAL-MONEY Saxo switch — off by default
-  claire legs-backfill [--dry-run] [--yes]
+  ronathan legs-backfill [--dry-run] [--yes]
                                adopt Saxo's resting stop/target legs onto
                                the book (one-time; read-only at Saxo)
 
-Resetting the book is deliberately NOT in this script — see bin/claire-reset.
+Resetting the book is deliberately NOT in this script — see bin/ronathan-reset.
 EOF
     exit 1 ;;
 esac

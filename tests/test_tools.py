@@ -114,7 +114,7 @@ def test_sandbox_computes_with_numpy():
 
 
 def test_sandbox_blocks_network_and_scrubs_env():
-    os.environ["CLAIRE_INTERNAL_SECRET"] = "supersecret"
+    os.environ["RONATHAN_INTERNAL_SECRET"] = "supersecret"
     try:
         out = run_python(
             "import socket\n"
@@ -125,10 +125,10 @@ def test_sandbox_blocks_network_and_scrubs_env():
             "    net = 'blocked'\n"
             "import os\n"
             "RESULT = {'net': net,"
-            " 'secret_visible': 'CLAIRE_INTERNAL_SECRET' in os.environ}\n",
+            " 'secret_visible': 'RONATHAN_INTERNAL_SECRET' in os.environ}\n",
             {})
     finally:
-        del os.environ["CLAIRE_INTERNAL_SECRET"]
+        del os.environ["RONATHAN_INTERNAL_SECRET"]
     assert out["result"] == {"net": "blocked", "secret_visible": False}
 
 
@@ -165,9 +165,9 @@ def _client(routes, seen):
 
 
 @pytest.mark.parametrize("url", [
-    "http://127.0.0.1:7788/internal/state", "http://localhost:7787/api/runs",
+    "http://127.0.0.1:7798/internal/state", "http://localhost:7797/api/runs",
     "http://169.254.169.254/latest/meta-data/", "http://192.168.1.10/",
-    "http://[::1]:7788/", "http://2130706433/", "http://[::ffff:127.0.0.1]/",
+    "http://[::1]:7798/", "http://2130706433/", "http://[::ffff:127.0.0.1]/",
     "http://100.64.0.1/", "http://evil-internal.example/",
     "http://dual.example/", "file:///etc/passwd", "ftp://example.com/"])
 def test_fetch_page_blocks_non_public(url):
@@ -182,7 +182,7 @@ def test_fetch_page_checks_every_redirect_hop():
     routes = {
         "http://example.com/a": (302, {"location": "http://redir.example/b"}, ""),
         "http://redir.example/b": (301, {"location":
-                                         "http://127.0.0.1:7788/internal"}, ""),
+                                         "http://127.0.0.1:7798/internal"}, ""),
     }
     with pytest.raises(BlockedURL):
         fetch_page("http://example.com/a", _client=_client(routes, seen),

@@ -26,7 +26,7 @@ class AuthError(Exception):
 def default_resume_post(api_base, secret):
     def post(body):
         r = httpx.post(f"{api_base}/internal/resume", json=body,
-                       headers={"x-claire-secret": secret}, timeout=30)
+                       headers={"x-ronathan-secret": secret}, timeout=30)
         return r.status_code, (r.json() if r.headers.get("content-type", "")
                                .startswith("application/json") else {})
     return post
@@ -100,7 +100,7 @@ def thesis_action(conn, payload: dict, resume_post, *, clock=time.time):
     # authorize: mark pending_resume (NOT burned) + audit row. Conditional on
     # the state the checks above read, so an item that was resumed, burned or
     # expired in between is refused rather than re-authorized. A re-click on
-    # a pending_resume token (claire-api was down) is allowed; the single-use
+    # a pending_resume token (ronathan-api was down) is allowed; the single-use
     # claim that actually matters is taken atomically by /internal/resume.
     cur = conn.execute(
         "UPDATE work_items SET token_state='pending_resume', updated_at=?"
@@ -131,12 +131,12 @@ def thesis_action(conn, payload: dict, resume_post, *, clock=time.time):
             "order_type": order_type}
     try:
         code, resp = resume_post(body)      # idempotent server-side; retryable
-    except Exception as e:                  # noqa: BLE001 — claire-api down
-        raise AuthError(502, f"claire-api unreachable ({e}); approval saved, "
+    except Exception as e:                  # noqa: BLE001 — ronathan-api down
+        raise AuthError(502, f"ronathan-api unreachable ({e}); approval saved, "
                              "will retry") from e
     if code == 200:
         return {"ok": True, **resp}
-    # resume refused or claire-api down: token stays pending_resume so a retry
+    # resume refused or ronathan-api down: token stays pending_resume so a retry
     # (human or custodian) can complete it; surface the reason
     raise AuthError(code if code >= 400 else 502,
                     resp.get("detail", f"resume failed ({code})"))
@@ -363,7 +363,7 @@ def retry_failed(conn, wi, resume_post, *, confirm_live=None, changes=None):
     try:
         code, resp = resume_post(body)
     except Exception as e:                  # noqa: BLE001
-        raise AuthError(502, f"claire-api unreachable ({e})") from e
+        raise AuthError(502, f"ronathan-api unreachable ({e})") from e
     if code == 200:
         return {"ok": True, **resp}
     raise AuthError(code if code >= 400 else 502,

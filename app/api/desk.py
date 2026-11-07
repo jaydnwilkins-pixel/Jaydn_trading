@@ -21,7 +21,7 @@ from ..graph.state import Instrument, PipelineState, Thesis
 
 # The ticker is baked into the work-item id, and that id is rendered into
 # pages, handler attributes and narrative paths. Every run starter (the HTTP
-# route, the schedules, Claire's run_pipeline tool, the watcher) funnels
+# route, the schedules, Ronathan's run_pipeline tool, the watcher) funnels
 # through start_run, so this is the one place a ticker carrying markup or a
 # path can be refused. Real symbols only need letters, digits, '.', '-' (BRK.B,
 # RDS-A, 0700, C07) and '&' (NSE's M&M) — none of which can open a tag, break

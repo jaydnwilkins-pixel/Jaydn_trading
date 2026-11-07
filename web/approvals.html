@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Approvals</title>
+<meta charset="utf-8"><title>Ronathan — Approvals</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script>nav('/approvals')</script>
 <main>
@@ -635,7 +635,7 @@ function card(a) {
   const qty0 = sg.qty ?? (exit ? heldOn(a, pick) : 0);
   const size0 = sg.size_base ?? 1000;
   const lock = a.locked ? `<p class="warn">🔒 locked — click 🔑 in the nav and
-    paste the dashboard key from etc/claire.env</p>` : '';
+    paste the dashboard key from etc/ronathan.env</p>` : '';
   const closed = a.session && a.session.is_open === false
     ? `<span class="pill warn">${esc(a.session.exchange)} closed — an approved
        order queues until ${new Date(a.session.next_open).toLocaleString()}</span>`

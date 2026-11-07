@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Mission Control</title>
+<meta charset="utf-8"><title>Ronathan — Mission Control</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script>nav('/')</script>
 <main>
@@ -28,8 +28,8 @@
     <span><i style="border-color:#8a6a2a;border-top-style:dashed"></i>shortcut
       paths: breach → exit review · your own trades → approval · pass → record</span>
     <span style="color:var(--purple)">⚙ MCP entries are configuration only —
-      Saxo orders go to Saxo SIM over Claire's own connection; Alpaca and
-      moomoo use Claire's paper sim</span>
+      Saxo orders go to Saxo SIM over Ronathan's own connection; Alpaca and
+      moomoo use Ronathan's paper sim</span>
     <span>hover for detail · click to inspect, question or configure</span>
   </div>
 
@@ -145,13 +145,13 @@ function renderMap() {
   head(C.execute, 'EXECUTE'); head(C.record, 'RECORD');
 
   // entry points, top to bottom: the scans feed the screener (level with
-  // it — its only input); you, the volume scan and Claire go straight to
+  // it — its only input); you, the volume scan and Ronathan go straight to
   // the analysts; the watcher starts exit reviews at News; your own trades
   // and price triggers go straight to approval
   const scans = SCHEDULES.filter(j => j.job.startsWith('analysis_'));
   const scanSub = scans.length ? scans.map(j => j.job.replace('analysis_', '')
     .toUpperCase() + (j.enabled ? ' on' : ' off')).join(' · ') : 'none';
-  const cc = g.agents.claire_chat;
+  const cc = g.agents.ronathan_chat;
   const EW = 156, ey = i => 44 + i * 46;
   const job = id => SCHEDULES.find(j => j.job === id) || {};
   const jobState = j => !j.job ? 'idle' : !j.enabled ? 'disabled' : j.last_run_at ? 'ok' : 'idle';
@@ -159,7 +159,7 @@ function renderMap() {
   parts.push(node('you', C.entry, ey(1), EW, H, '👤 You', 'Markets · Watchlist →', 'entry', null, 'go to /markets', '/markets'));
   parts.push(node('job:event_scan', C.entry, ey(2), EW, H, '⚡ Volume scan',
     `hourly · no LLM · ${jobNext('event_scan')}`, 'entry', null, 'click for what it does'));
-  if (cc) parts.push(node('claire_chat', C.entry, ey(3), EW, H, '💬 Claire Chat',
+  if (cc) parts.push(node('ronathan_chat', C.entry, ey(3), EW, H, '💬 Ronathan Chat',
     cc.state === 'error' ? cc.detail : (cc.model || '').replace('claude-', ''), cc.state, null,
     `${cc.state} — ${cc.detail} · click to inspect`));
   const hs = k => (h[k] || {}).ok || 'never ran', hc = k => (h[k] || {}).state || 'idle';
@@ -186,11 +186,11 @@ function renderMap() {
   // the analysts' feed bar: the screener comes in at its top, the
   // skip-the-screener bracket at its middle
   const fanX = C.analyze - 16;
-  const skipY = cy(2);                   // middle of You · Volume · Claire
+  const skipY = cy(2);                   // middle of You · Volume · Ronathan
   flow(`M ${C.screen + W} ${cy(0)} H ${fanX}`, false);
   edges.push(`<path class="medge" d="M ${fanX} ${cy(0)} V ${Math.max(skipY, ay[2] + H / 2)}"/>`);
   ay.forEach(y => flow(`M ${fanX} ${y + H / 2} H ${C.analyze}`));
-  // … and by you, the volume scan and Claire, which skip the screener
+  // … and by you, the volume scan and Ronathan, which skip the screener
   // a symmetrical bracket: three equal links, one bar, one arrow out of
   // its exact middle, straight across under the screener
   const busX = C.entry + 156 + 14;
@@ -272,7 +272,7 @@ function renderMap() {
   brokers.forEach((b, i) => {
     const m = (g.mcps || []).find(x => x.broker === b.broker);
     const kind = b.adapter === 'saxo-sim' ? 'Saxo SIM API' : b.adapter === 'saxo-live' ? 'Saxo LIVE'
-      : 'Claire paper sim';
+      : 'Ronathan paper sim';
     const mcp = m ? `<rect x="6" y="36" width="110" height="14" fill="transparent"
         style="cursor:pointer" onclick="event.stopPropagation();openDrawer(${jsArg('mcp:' + m.id)})"><title>MCP entry (configuration only)</title></rect>
       <text class="nm" x="10" y="46" fill="var(--dim)">⚙ mcp entry</text>` : '';
@@ -302,7 +302,7 @@ function renderMap() {
    what · when it runs · what it reads · what it produces · what it can't do */
 const ABOUT = {
   screener: {what: 'Picks which stocks are worth analysing today. It scans the market with TradingView\'s screener (price moves, volume, ratings, size), looks up quotes, always considers your Watchlist, and weighs what the book already holds so picks diversify rather than pile into one sector.',
-    when: 'Only in the scheduled scans (US 10:00 New York on weekdays; the Asia and EU scans are turned off). Runs you start, Claire\'s and the volume scan\'s skip it.',
+    when: 'Only in the scheduled scans (US 10:00 New York on weekdays; the Asia and EU scans are turned off). Runs you start, Ronathan\'s and the volume scan\'s skip it.',
     reads: 'The screener results, live quotes, your Watchlist and the open positions.',
     makes: 'A short list of tickers, each with a one-line reason — that reason travels with the run so the analysts know why the stock was picked.',
     limits: 'It cannot buy anything or approve anything; it only starts analysis runs.'},
@@ -341,11 +341,11 @@ const ABOUT = {
     reads: 'The run\'s reports, the decision and the order and fill records.',
     makes: 'A narrative about the record. The record itself (orders, fills, cash) is written by the desk\'s own code, never by an LLM.',
     limits: 'Read-only on the book.'},
-  claire_chat: {what: 'The desk\'s conversational assistant — the Claire you talk to on the Claire page, by voice ("Claire, …") and through Bob. She answers questions about your positions, orders, P/L and pending approvals, looks up prices and charts, explains a thesis, and can start an analysis run on a stock you name.',
-    when: 'Whenever you (or Bob, or the voice daemon) ask her something.',
-    reads: 'Her tools: run pipeline, pipeline status, pending approvals, portfolio summary, share P/L, broker metrics, quotes, charts, search, explain thesis. Each conversation is kept (up to 50 turns).',
+  ronathan_chat: {what: 'The desk\'s conversational assistant — the Ronathan you talk to on the Ronathan page, by voice ("Ronathan, …") and through Bob. It answers questions about your positions, orders, P/L and pending approvals, looks up prices and charts, explains a thesis, and can start an analysis run on a stock you name.',
+    when: 'Whenever you (or Bob, or the voice daemon) ask it something.',
+    reads: 'Its tools: run pipeline, pipeline status, pending approvals, portfolio summary, share P/L, broker metrics, quotes, charts, search, explain thesis. Each conversation is kept (up to 50 turns).',
     makes: 'Answers, and analysis runs when asked.',
-    limits: 'She cannot approve, place or cancel a trade. If her model refuses a message she retries on her backup model, then on a fresh conversation.'},
+    limits: 'It cannot approve, place or cancel a trade. If its model refuses a message it retries on its backup model, then on a fresh conversation.'},
   gate: {what: 'The approval gate. Every run that wants to trade stops here and waits for you. The approval card shows the evidence, the plan, the share count at the current price, and lets you set size, account, order type, stop and target.',
     when: 'Every trade, from every path: analysis runs, exit reviews, your own trades and price triggers.',
     reads: 'Your decision, carrying a single-use token from the card or the Telegram button.',
@@ -361,7 +361,7 @@ const ABOUT = {
     reads: 'Open positions and live prices.',
     makes: 'Exit reviews. An alert is removed when the position is sold.',
     limits: 'It never sells by itself — the stop at the broker is the automatic exit.'},
-  custodian: {what: 'The back office. It books fills from the broker into the book, sends orders queued for the open, cancels orders that expired, expires approvals at the close, retries an approval that could not reach claire-api, re-protects shares whose stop/target had to be cancelled, and flags anything that does not match the broker.',
+  custodian: {what: 'The back office. It books fills from the broker into the book, sends orders queued for the open, cancels orders that expired, expires approvals at the close, retries an approval that could not reach ronathan-api, re-protects shares whose stop/target had to be cancelled, and flags anything that does not match the broker.',
     when: 'Every 5 minutes.',
     reads: 'The broker\'s order and fill state, and the book.',
     makes: 'Fills, positions and P/L in the book; warnings on Mission Control.',
@@ -377,9 +377,9 @@ const ABOUT = {
   'job:reconcile': {what: 'The daily check-up: takes a snapshot of each broker account, compares it with the book to catch drift, and backs up the desk database.',
     when: 'Every day at 09:00 (your time).', reads: 'Broker balances and positions.', makes: 'Snapshots, drift warnings, and var/desk.backup.db.', limits: ''},
   'loop:saxo': {what: 'Keeps your Saxo sign-ins alive. Saxo\'s sign-in expires quickly, so this refreshes it every 10 minutes (every minute after a failed try) and warns you by Telegram and desktop notification before it lapses and if it does (re-sign in with bin/saxo login).',
-    when: 'Constantly, in claire-api.', reads: 'The Saxo sign-in files in etc/.', makes: 'A fresh sign-in, or a warning.', limits: 'Read-only: it never trades.'},
-  'loop:telegram': {what: 'Sends each approval card to your Telegram — the chart, the plan and the buttons — and closes it there when it is decided, expired or replaced. Your taps reach Claire through Bob\'s Telegram bot, and only from your own Telegram account.',
-    when: 'Every 20 seconds, in the dashboards.', reads: 'Pending and refused approvals.', makes: 'Telegram messages; one more message for each failed placement.', limits: 'The buttons carry no approval token; Claire checks it is you.'},
+    when: 'Constantly, in ronathan-api.', reads: 'The Saxo sign-in files in etc/.', makes: 'A fresh sign-in, or a warning.', limits: 'Read-only: it never trades.'},
+  'loop:telegram': {what: 'Sends each approval card to your Telegram — the chart, the plan and the buttons — and closes it there when it is decided, expired or replaced. Your taps reach Ronathan through Bob\'s Telegram bot, and only from your own Telegram account.',
+    when: 'Every 20 seconds, in the dashboards.', reads: 'Pending and refused approvals.', makes: 'Telegram messages; one more message for each failed placement.', limits: 'The buttons carry no approval token; Ronathan checks it is you.'},
 };
 ABOUT['job:own'] = {what: 'Trades you start yourself go straight to the approval gate — no analysts, no debate: the Sell buttons (Portfolio, Saxo accounts, Watchlist), Buy now on the Watchlist, Buy at current price on Markets, a price trigger firing, an edit of an order already at the broker, and overriding a pass on Approvals.',
   when: 'Whenever you do one of those.', reads: 'What you entered: levels, size, account.',
@@ -430,7 +430,7 @@ async function openDrawer(id) {
       <p class="muted">${esc(m.note || '')}</p>
       <p class="muted">Configuration only: the desk never launches this MCP
         server to place orders, credentials or not. Orders go through
-        Claire's own adapters — Saxo SIM's real API for Saxo, Claire's paper
+        Ronathan's own adapters — Saxo SIM's real API for Saxo, Ronathan's paper
         sim for the others. Edit servers on
         <a href="/providers">Providers &amp; MCP</a>.</p>`;
     return;
@@ -499,13 +499,13 @@ async function openDrawer(id) {
         : 'single structured call — no tools'} · $${fmt(act.cost_24h, 4)}
         spent in 24h</p>
       ${id === 'screener' ? `<p class="muted">Used only by the <b>scheduled
-        scans</b>, to pick which stocks to analyse. Runs you start, Claire's
+        scans</b>, to pick which stocks to analyse. Runs you start, Ronathan's
         and the volume scan's go straight to the analysts. Every run then
         passes <b>prepare</b> (no LLM): currency from the exchange (GBp→GBP),
         the venue's lot size, desk.db registration.</p>`
         : ''}
-      ${id === 'claire_chat' ? `<p><a href="/claire">open the chat with Claire →</a>
-        <span class="muted">· if her model refuses, she retries on her backup
+      ${id === 'ronathan_chat' ? `<p><a href="/ronathan">open the chat with Ronathan →</a>
+        <span class="muted">· if its model refuses, it retries on its backup
         model, then on a fresh conversation</span></p>` : ''}
       ${act.current ? `<p class="ok">● running now on
         ${esc(act.current.ticker || act.current.work_item_id || '—')}</p>`
@@ -517,7 +517,7 @@ async function openDrawer(id) {
         <button class="ghost" onclick="askAgent(${jsArg(id)})">Ask</button></div>
       <p class="muted" style="font-size:.72rem">answers come from this
         agent's own model + prompt, grounded in its run history — for
-        desk-wide questions use <a href="/claire">Claire</a></p>
+        desk-wide questions use <a href="/ronathan">Ronathan</a></p>
       <div id="d-answer"></div>
       <h2>Recent runs <span class="muted" style="font-weight:400;
         text-transform:none;letter-spacing:0">— click one to read it</span></h2>
@@ -732,8 +732,8 @@ function renderStrip() {
   const cash = o.cash.reduce((s, c) => s + c.cash, 0);
   document.getElementById('strip').innerHTML =
     pill('awaiting you', o.pending, o.pending ? 'warn' : '') +
-    pill('claire-api', o.claire_api ? 'up' : 'down',
-         o.claire_api ? 'ok' : 'bad') +
+    pill('ronathan-api', o.ronathan_api ? 'up' : 'down',
+         o.ronathan_api ? 'ok' : 'bad') +
     hp('watcher') + hp('custodian') +
     pill('data', (GRAPH && GRAPH.market_data.source) || '—') +
     pill('paper cash', fmt(cash, 0));

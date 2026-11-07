@@ -1,4 +1,4 @@
-"""`bin/claire legs-backfill [--dry-run] [--account ID]` — put on the book the
+"""`bin/ronathan legs-backfill [--dry-run] [--account ID]` — put on the book the
 protective stop/target legs that Saxo holds for brackets placed BEFORE the
 desk tracked legs (DESIGN.md §11a). One-time, idempotent, read-only at Saxo
 (it lists orders and reads the audit trail; it never places, cancels or
@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="claire legs-backfill")
+    ap = argparse.ArgumentParser(prog="ronathan legs-backfill")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would be inserted; write nothing")
     ap.add_argument("--account", help="only this desk account (e.g. "

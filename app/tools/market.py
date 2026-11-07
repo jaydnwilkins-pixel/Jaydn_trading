@@ -35,7 +35,7 @@ class MarketError(Exception):
 def build_market(env=None) -> "Market":
     """Source chain from configuration: IBKR (licensed, needs the gateway) >
     Twelve Data (keyed API) > Yahoo (free, throttled) > TradingView quotes >
-    ECB FX. Configure by adding the env vars to etc/claire.env + restart."""
+    ECB FX. Configure by adding the env vars to etc/ronathan.env + restart."""
     import os
     env = env if env is not None else os.environ
     primary = None
@@ -53,7 +53,7 @@ def build_market(env=None) -> "Market":
             env["TWELVEDATA_API_KEY"],
             all_exchanges=bool(env.get("TWELVEDATA_ALL_EXCHANGES")))
     fallback = None
-    if not env.get("CLAIRE_NO_SAXO_CHARTS"):
+    if not env.get("RONATHAN_NO_SAXO_CHARTS"):
         from . import saxo_chart
         fallback = saxo_chart.chart
     return Market(primary=primary, chart_fallback=fallback)

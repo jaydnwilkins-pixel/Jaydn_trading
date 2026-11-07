@@ -1,4 +1,4 @@
-"""`bin/claire live …` — the real-money switch (DESIGN.md §22).
+"""`bin/ronathan live …` — the real-money switch (DESIGN.md §22).
 
   status              what the switch says, limits, today's usage
   setup [ACCOUNT_KEY] create the saxo-live account from the signed-in Saxo
@@ -37,7 +37,7 @@ def status(conn):
 
 def setup(conn, argv):
     if not live_trading.env_enabled(os.environ):
-        sys.exit(f"{live_trading.ENV_FLAG}=enabled is not set in etc/claire.env")
+        sys.exit(f"{live_trading.ENV_FLAG}=enabled is not set in etc/ronathan.env")
     if conn.execute("SELECT 1 FROM broker_accounts WHERE id=?",
                     (LIVE_ID,)).fetchone():
         sys.exit(f"{LIVE_ID} already exists")
@@ -46,7 +46,7 @@ def setup(conn, argv):
     if not accounts:
         sys.exit("Saxo returned no accounts for the live sign-in")
     # which account: the one named on the command line (AccountKey or
-    # AccountId), else SAXO_LIVE_ACCOUNT_ID from claire.env, else the only one
+    # AccountId), else SAXO_LIVE_ACCOUNT_ID from ronathan.env, else the only one
     want = (argv[0] if argv else saxo_live.account_id("live")) or None
     chosen = [a for a in accounts if want in (a.get("AccountKey"),
                                               a.get("AccountId"))] \
@@ -77,8 +77,8 @@ def setup(conn, argv):
                      note="opening cash synced from Saxo at live setup")
     print(f"Created {LIVE_ID} for Saxo account {chosen.get('AccountId')} "
           f"({ccy}, opening cash {cash}). Live trading is "
-          "still DISARMED — `bin/claire live arm` when you are ready, then "
-          "restart the desk (bin/claire restart) so it loads the adapter.")
+          "still DISARMED — `bin/ronathan live arm` when you are ready, then "
+          "restart the desk (bin/ronathan restart) so it loads the adapter.")
     print("Note: positions you already hold at Saxo are NOT on the desk's "
           "book, so the desk can never sell them.")
 
@@ -98,7 +98,7 @@ def arm(conn):
                          phrase=phrase)
     except live_trading.LiveTradingBlocked as e:
         sys.exit(f"not armed: {e}")
-    print("ARMED. Disarm any time: `bin/claire live disarm`, or the button on "
+    print("ARMED. Disarm any time: `bin/ronathan live disarm`, or the button on "
           "the Approvals page.")
 
 

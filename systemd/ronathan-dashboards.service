@@ -1,0 +1,13 @@
+[Unit]
+Description=Ronathan dashboards + watcher (:7797)
+After=ronathan-api.service
+
+[Service]
+WorkingDirectory=/opt/Ronathan
+EnvironmentFile=/opt/Ronathan/etc/ronathan.env
+ExecStart=/opt/Ronathan/venv/bin/python -m app.dashboards
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

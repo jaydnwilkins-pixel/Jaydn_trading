@@ -2,7 +2,7 @@ function nav(active) {
   const items = [["/", "Mission Control"], ["/approvals", "Approvals"],
     ["/orders", "Orders"], ["/trades", "Trades"],
     ["/markets", "Markets"], ["/watchlist", "Watchlist"],
-    ["/claire", "Claire"], ["/trading", "Trading"],
+    ["/ronathan", "Ronathan"], ["/trading", "Trading"],
     ["/portfolio", "Portfolio"], ["/saxo", "Saxo accounts"], ["/agents", "Agents & Schedule"],
     ["/providers", "Providers & MCP"], ["/usage", "Usage"],
     ["/maintenance", "Maintenance"]];
@@ -10,12 +10,12 @@ function nav(active) {
     `<a href="${href}" class="${href === active ? 'active' : ''}">${label}</a>`
   ).join('') +
   '<span style="flex:1"></span><a href="#" onclick="pair();return false" ' +
-  'title="paste the dashboard key from etc/claire.env">🔑</a>' +
+  'title="paste the dashboard key from etc/ronathan.env">🔑</a>' +
   '</nav><div id="msg"></div>');
 }
 function dashKey() { return localStorage.getItem('dashKey') || ''; }
 function pair() {
-  const k = prompt('Dashboard key (CLAIRE_DASHBOARD_KEY in etc/claire.env):',
+  const k = prompt('Dashboard key (RONATHAN_DASHBOARD_KEY in etc/ronathan.env):',
     dashKey());
   if (k !== null) { localStorage.setItem('dashKey', k.trim()); toast('key saved'); }
 }
@@ -102,7 +102,7 @@ function feeFor(model, notional) {
   return Number(model.per_trade || 0);
 }
 
-/* ── live updates, ONE stream for every Claire tab ────────────────────
+/* ── live updates, ONE stream for every Ronathan tab ────────────────────
    Each tab used to open its own EventSource. Chrome allows only 6
    connections per site, so a few open tabs (each holding a stream for up to
    15 min) left a new tab stuck on "connecting…" until a slot freed.
@@ -121,7 +121,7 @@ function liveEvents(onEvent, onState) {
     return es;
   };
   if (!('locks' in navigator) || typeof BroadcastChannel === 'undefined') { own(); return; }
-  const bc = new BroadcastChannel('claire-events');
+  const bc = new BroadcastChannel('ronathan-events');
   let lastBeat = 0;
   bc.onmessage = m => {
     const d = m.data || {};
@@ -129,7 +129,7 @@ function liveEvents(onEvent, onState) {
     else if (d.t === 'ev') { lastBeat = Date.now(); try { onEvent(d.ev); } catch {} }
   };
   bc.postMessage({t: 'hello'});                  // ask the holder for a beat now
-  navigator.locks.request('claire-events-leader', () => new Promise(() => {
+  navigator.locks.request('ronathan-events-leader', () => new Promise(() => {
     /* this tab holds the stream until it closes (the lock then passes on) */
     let ok = false;
     const es = new EventSource('/api/events');
@@ -140,7 +140,7 @@ function liveEvents(onEvent, onState) {
       try { onEvent(e); } catch {}
       bc.postMessage({t: 'ev', ev: e});
     };
-    const lead = new BroadcastChannel('claire-events');
+    const lead = new BroadcastChannel('ronathan-events');
     lead.onmessage = m => { if ((m.data || {}).t === 'hello') lead.postMessage({t: 'beat', ok}); };
     setInterval(() => lead.postMessage({t: 'beat', ok}), 10000);
   }));
@@ -162,5 +162,5 @@ function connPill(state) {
     delete dot.dataset.live;
     dot.textContent = '○ auto-refresh'; dot.className = 'pill warn';
     dot.title = 'instant updates are not connected; the page still refreshes on its own';
-  } else if (state === 'error') { delete dot.dataset.live; dot.textContent = '✖ cannot reach Claire'; dot.className = 'pill bad'; }
+  } else if (state === 'error') { delete dot.dataset.live; dot.textContent = '✖ cannot reach Ronathan'; dot.className = 'pill bad'; }
 }

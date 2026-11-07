@@ -33,7 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_events_item ON events(item_id);
 CREATE TABLE IF NOT EXISTS broker_accounts (
   id TEXT PRIMARY KEY, broker TEXT NOT NULL,
   -- 'live' is representable ONLY so the switch in app/live_trading.py can
-  -- refuse it explicitly; a live account exists only via `bin/claire live setup`
+  -- refuse it explicitly; a live account exists only via `bin/ronathan live setup`
   environment TEXT NOT NULL CHECK(environment IN ('paper','sim','live')),
   base_currency TEXT NOT NULL,
   fee_model TEXT NOT NULL,                 -- JSON: {type, per_trade, pct, min}
@@ -177,9 +177,9 @@ CREATE TABLE IF NOT EXISTS mcp_servers (    -- broker/tool MCP servers,
 );
 
 CREATE TABLE IF NOT EXISTS schedules (      -- UI-editable job schedules; the
-  job TEXT PRIMARY KEY,                     -- claire-api scheduler thread and
+  job TEXT PRIMARY KEY,                     -- ronathan-api scheduler thread and
   description TEXT NOT NULL,                -- the dashboards watcher read this
-  runs_in TEXT NOT NULL,                    -- claire-api | dashboards
+  runs_in TEXT NOT NULL,                    -- ronathan-api | dashboards
   spec TEXT NOT NULL,                       -- JSON: {type:'interval',minutes}
                                             -- | {type:'daily',time,tz,days,
                                             --    region?,require_open?}
@@ -211,7 +211,7 @@ CREATE TABLE IF NOT EXISTS watchlist (      -- names YOU always want screened
   PRIMARY KEY (ticker, exchange)
 );
 
-CREATE TABLE IF NOT EXISTS chat_threads (   -- Claire's conversation memory —
+CREATE TABLE IF NOT EXISTS chat_threads (   -- Ronathan's conversation memory —
   thread TEXT PRIMARY KEY,                  -- survives service restarts (§17)
   messages TEXT NOT NULL,                   -- JSON list of {role, content}
   updated_at INTEGER NOT NULL

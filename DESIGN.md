@@ -1,15 +1,15 @@
-# Claire — a LangGraph Multi-Agent Paper-Trading Desk
+# Ronathan — a LangGraph Multi-Agent Paper-Trading Desk
 
-Build-from-scratch specification. Claire is an AI trading desk: a pipeline of
+Build-from-scratch specification. Ronathan is an AI trading desk: a pipeline of
 specialist LLM agents researches a stock, a bull and a bear debate it, an
 arbiter issues a typed verdict, and **nothing executes without explicit human
 approval verified by a single-use token**. Execution and accounting are
 deterministic Python — no LLM ever touches money.
 
-- **Source repo:** `claire_trading` (private, GitHub)
-- **Deploy target:** `/opt/Claire` on a single Linux machine, systemd-managed
+- **Source repo:** `jaydn_trading` (private, GitHub)
+- **Deploy target:** `/opt/Ronathan` on a single Linux machine, systemd-managed
   (design target; on the current machine the repo instead lives at
-  `/mnt/projects/claire_trading`, symlinked from `~/claire_trading` — same
+  `/home/jaydn/jaydn_trading` (no symlink) — same
   idea, different path. See §3 and §16 for what that changes in practice.)
 - **Stack:** Python 3.14, LangGraph + LangChain 1.x, SQLite, stdlib HTTP for
   dashboards. No Node.js anywhere.
@@ -66,7 +66,7 @@ Confirmed working on the target machine before this design was frozen:
    and small live-only limits checked at the moment of placement. All of it
    is enforced in code, never in prompts, and no LLM, agent, chat tool or
    remote dashboard action can arm it. A live account can only be created by
-   `bin/claire live setup`; every other code path still refuses
+   `bin/ronathan live setup`; every other code path still refuses
    `environment='live'`.
 2. **Human approval gate, server-authorized.** LangGraph's `interrupt()`
    provides the pause; **our server decides whether a resume is legitimate**
@@ -96,11 +96,11 @@ Confirmed working on the target machine before this design was frozen:
         you ──── chat UI / dashboards / curl ────┐
                                                  ▼
  ┌─────────────────┐  authorizes approvals  ┌────────────────────────────────┐
- │   DASHBOARDS    │───────────────────────▶│      CLAIRE  (/opt/Claire)     │
- │   :7787 stdlib  │  resume w/ token       │      LangGraph app  :7788      │
+ │   DASHBOARDS    │───────────────────────▶│      RONATHAN  (/opt/Ronathan)     │
+ │   :7797 stdlib  │  resume w/ token       │      LangGraph app  :7798      │
  │  pages + APIs   │◀───SSE, desk.db────────│                                │
  └─────────────────┘                        │  ┌──────────────────────────┐  │
-                                            │  │ Claire chat agent        │  │
+                                            │  │ Ronathan chat agent        │  │
  ┌─────────────────┐   breach → sell run    │  │ tools: run_pipeline,     │  │
  │  PRICE WATCHER  │───────────────────────▶│  │ desk queries (read-only) │  │
  │  deterministic  │                        │  └───────────┬──────────────┘  │
@@ -124,13 +124,13 @@ Confirmed working on the target machine before this design was frozen:
 
 | Process | Port | Runtime | Purpose |
 |---|---|---|---|
-| `claire-api` | 7788 | FastAPI/uvicorn | chat, pipeline control, graph resume |
-| `dashboards` | 7787 | stdlib Python | pages, market data, **approval authorization**, watcher |
+| `ronathan-api` | 7798 | FastAPI/uvicorn | chat, pipeline control, graph resume |
+| `dashboards` | 7797 | stdlib Python | pages, market data, **approval authorization**, watcher |
 | `custodian` | — | Python, timer | fill polling, TTL expiry, reconciliation, orphan detection |
 
 The chat contract (`POST /ask` streaming NDJSON, `GET /status`, `GET /feed`)
 is a deliberate integration seam: any future assistant, voice front-end, or
-messaging bridge talks to Claire through it without knowing her internals.
+messaging bridge talks to Ronathan through it without knowing its internals.
 
 **Two databases on purpose.** `checkpoints.db` holds LangGraph's serialized
 run state — framework-owned schema, version-churning, disposable (losing it
@@ -142,19 +142,19 @@ column, `work_items.thread_id`.
 
 ## 3. Repository and deploy layout
 
-Repo `claire_trading` mirrors the deploy tree (as designed — see the
+Repo `jaydn_trading` mirrors the deploy tree (as designed — see the
 current-machine note at the top of this document for the actual path in
 use here):
 
 ```
-claire_trading/                    →  /opt/Claire/
+jaydn_trading/                    →  /opt/Ronathan/
 ├── app/
 │   ├── graph/
 │   │   ├── pipeline.py            the trading StateGraph (§5)
 │   │   ├── state.py               Pydantic state + schemas (§6)
 │   │   ├── nodes_analysis.py      analyst / bull / bear / arbiter LLM nodes
 │   │   ├── nodes_execution.py     deterministic gate / execute / record
-│   │   └── claire_agent.py        conversational Claire (create_agent)
+│   │   └── ronathan_agent.py        conversational Ronathan (create_agent)
 │   ├── providers/
 │   │   ├── registry.py            DB-backed provider/model resolution (§8)
 │   │   └── health.py              probes, capability checks
@@ -167,13 +167,13 @@ claire_trading/                    →  /opt/Claire/
 │   │   ├── schema.sql             desk.db DDL (§7)
 │   │   ├── repo.py                typed repository — the ONLY desk.db writer
 │   │   └── lots.py                FIFO lot matching, realized P&L
-│   ├── api/main.py                :7788 endpoints (§10)
+│   ├── api/main.py                :7798 endpoints (§10)
 │   ├── watcher.py                 price-alert loop (§15)
 │   └── custodian.py               reaper + reconciler (§12)
 ├── web/                           dashboard pages (§13)
 ├── mcp/saxo_mcp.py                custom Saxo OpenAPI MCP server
-├── etc/claire.env.example         template — real claire.env is 0600, never committed
-├── systemd/                       claire-api, dashboards, timers
+├── etc/ronathan.env.example         template — real ronathan.env is 0600, never committed
+├── systemd/                       ronathan-api, dashboards, timers
 ├── tests/                         §16
 └── var/                           runtime only, gitignored:
     ├── desk.db  ·  checkpoints.db
@@ -184,15 +184,15 @@ claire_trading/                    →  /opt/Claire/
 Bootstrap (the only root step is the first line):
 
 ```sh
-sudo mkdir /opt/Claire && sudo chown $USER:$USER /opt/Claire
-git clone git@github.com:<user>/claire_trading /opt/Claire
-python3.14 -m venv /opt/Claire/venv
-/opt/Claire/venv/bin/pip install -r requirements.txt   # PINNED versions
-cp etc/claire.env.example etc/claire.env && chmod 600 etc/claire.env
+sudo mkdir /opt/Ronathan && sudo chown $USER:$USER /opt/Ronathan
+git clone git@github.com:<user>/jaydn_trading /opt/Ronathan
+python3.14 -m venv /opt/Ronathan/venv
+/opt/Ronathan/venv/bin/pip install -r requirements.txt   # PINNED versions
+cp etc/ronathan.env.example etc/ronathan.env && chmod 600 etc/ronathan.env
 ```
 
-(On the current machine, this landed at `/mnt/projects/claire_trading`
-instead, with `~/claire_trading` symlinked to it — no `/opt` involved, no
+(On the current machine, this landed at `/home/jaydn/jaydn_trading`
+instead — no `/opt` involved, no
 root step needed. See the README's "Deploy" section for the actual
 systemd unit in use, which differs from §16 below.)
 
@@ -201,7 +201,7 @@ moves fast — a checkpoint-library context-manager API changed between releases
 *during the pre-design verification for this document*. Upgrades are scheduled
 work with the test suite as the gate, never a side effect.
 
-Gitignored: `etc/claire.env` (secrets), all of `var/` (state is data, not
+Gitignored: `etc/ronathan.env` (secrets), all of `var/` (state is data, not
 source). Committed: `.env.example` templates only.
 
 ---
@@ -217,7 +217,7 @@ source). Committed: `.env.example` templates only.
 | bull | one structured call → `DebateCase` | yes | claude-sonnet | strongest case FOR |
 | bear | one structured call → `DebateCase` | yes | claude-sonnet | case AGAINST + point-by-point rebuttal of bull |
 | arbiter | one structured call → `Thesis` | yes | claude-opus | weighs the debate; **sole producer of theses** |
-| claire_chat | `create_agent` + read-only tools | yes | claude-opus | conversation, status, launching runs |
+| ronathan_chat | `create_agent` + read-only tools | yes | claude-opus | conversation, status, launching runs |
 | **executor** | **plain Python node** | **no** | — | places bracket orders |
 | **recorder / reconciler** | **plain Python** | mostly no | haiku (prose summary only) | lots, cash, ledger |
 | watcher / custodian | plain Python | no | — | price alerts, TTLs, reconciliation |
@@ -435,7 +435,7 @@ CREATE TABLE events (                      -- append-only audit trail
 CREATE TABLE broker_accounts (
   id TEXT PRIMARY KEY, broker TEXT NOT NULL,
   environment TEXT NOT NULL CHECK(environment IN ('paper','sim','live')),
-                                 -- 'live' only via bin/claire live setup (§22)
+                                 -- 'live' only via bin/ronathan live setup (§22)
   base_currency TEXT NOT NULL,
   fee_model TEXT NOT NULL,                 -- JSON: {type, per_trade, pct, min}
   risk_limits TEXT NOT NULL DEFAULT '{}',  -- JSON: max_order_base, max_position_pct,
@@ -567,7 +567,7 @@ CREATE TABLE provider_models (
 );
 CREATE TABLE agents (
   id TEXT PRIMARY KEY,                     -- screener | fundamental | technical | news
-                                           -- | bull | bear | arbiter | claire_chat
+                                           -- | bull | bear | arbiter | ronathan_chat
   display_name TEXT,
   system_prompt TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
   tools TEXT NOT NULL,                     -- JSON list of tool names
@@ -639,11 +639,11 @@ def model_for(agent_id: str):
   `structured_output` to bull/bear/arbiter, or without `tool_calling` to an
   analyst, is rejected by the API with the reason — not discovered mid-run.
 - **Secrets never enter the DB.** `api_key_ref` is an env-var *name*; values
-  live only in `etc/claire.env` (0600). `desk.db` stays safe to back up,
+  live only in `etc/ronathan.env` (0600). `desk.db` stays safe to back up,
   inspect, and share.
 - **Adding a provider — including a future local LLM — is one row:**
   `id=local, kind=openai_compatible, base_url=http://127.0.0.1:11434/v1`,
-  plus a key in `claire.env` if needed. A health probe must pass before it
+  plus a key in `ronathan.env` if needed. A health probe must pass before it
   becomes selectable. No code, no deploy.
 - **Prompts don't port for free.** A prompt tuned on one model family behaves
   differently on another. Reassign low-stakes agents first (news, bull/bear)
@@ -659,7 +659,7 @@ def model_for(agent_id: str):
 | web search | `search.py`: **Tavily** if `TAVILY_API_KEY` set, else DuckDuckGo (free, no key, noticeably weaker). Ship DDG default; recommend Tavily for news/fundamental quality. |
 | page fetch | `httpx` + readability extraction, size-capped |
 | file I/O | `files.py` — **jailed to `var/narratives/<work_item>/`**. Agents cannot roam the filesystem, by construction. |
-| technical math | `run_python`: numpy/pandas over OHLCV the tool itself fetches, in a subprocess with a **scrubbed environment (no claire.env secrets), no network access, and a CPU/time cap** — an injected prompt cannot reach the internal endpoints or any credential. No shell access for any agent. |
+| technical math | `run_python`: numpy/pandas over OHLCV the tool itself fetches, in a subprocess with a **scrubbed environment (no ronathan.env secrets), no network access, and a CPU/time cap** — an injected prompt cannot reach the internal endpoints or any credential. No shell access for any agent. |
 | brokers | `langchain-mcp-adapters` wrapping the three MCP servers |
 | market data | `market.py` (§14) exposed as tools: quote, chart, screener, fx |
 
@@ -669,21 +669,21 @@ def model_for(agent_id: str):
 
 ```
 1. graph reaches gate → interrupt() → checkpoint persists
-   claire-api: work_item → awaiting_approval
+   ronathan-api: work_item → awaiting_approval
                token = secrets.token_hex(16)
                expires_at = END OF THE INSTRUMENT'S NEXT TRADING SESSION (§14a)
                — wall-clock 24 h would kill a Friday-evening SGX approval
                before Monday's open
                SSE event → dashboard approval card; THE CARD CARRIES THE TOKEN
 2. human reviews the TYPED thesis on the dashboard, sets size + broker
-   POST :7787/api/thesis-action
+   POST :7797/api/thesis-action
         {work_item_id, action:"approve", size_base, broker, token}  ← token REQUIRED
 3. dashboards server AUTHORIZES — all of:
      presented token matches ∧ unexpired ∧ unused ∧ state == awaiting_approval
    → marks the token pending_resume (NOT yet burned), appends events row
-   → POST :7788/internal/resume {status:"approved", size_base, broker, token, actor}
-     — idempotent per work_item, retried with backoff if claire-api is down
-4. claire-api: pipeline.invoke(Command(resume=payload), {"thread_id": wi})
+   → POST :7798/internal/resume {status:"approved", size_base, broker, token, actor}
+     — idempotent per work_item, retried with backoff if ronathan-api is down
+4. ronathan-api: pipeline.invoke(Command(resume=payload), {"thread_id": wi})
    → on ACK the token is burned and the item marked approved: a crash between
      authorize and resume can only DELAY an approval, never lose or replay one
    → gate returns → execute node runs → record
@@ -692,13 +692,13 @@ def model_for(agent_id: str):
 **The security property, stated plainly:** `Command(resume=…)` will resume for
 *any* caller — LangGraph performs no authorization. Therefore
 `/internal/resume` binds to localhost, requires a shared secret from
-`claire.env`, and is **not** a tool any agent can call. The dashboards server
+`ronathan.env`, and is **not** a tool any agent can call. The dashboards server
 is the only component that converts a human click into a resume, and only
 after token verification. No LLM — any provider, any prompt injection — has a
 path to approving a trade. A chat message saying "approved" is just a chat
 message. And because the token travels only inside the dashboard's approval
 card, **localhost access alone is not sufficient either**: a co-resident agent
-with `curl` (today's assistants or tomorrow's) can reach :7787 but cannot
+with `curl` (today's assistants or tomorrow's) can reach :7797 but cannot
 present a token only a human has seen.
 
 Rejection is the same flow with `status:"rejected"`. Expiry is the custodian
@@ -845,7 +845,7 @@ longer lists, and an order at Saxo on the exit side of a desk position that
 the book does not track (it could sell the desk's shares), are flagged —
 never corrected.
 
-**Backfill.** `bin/claire legs-backfill [--dry-run] [--yes]` adopts the
+**Backfill.** `bin/ronathan legs-backfill [--dry-run] [--yes]` adopts the
 legs of brackets placed before this existed: an entry's legs are taken from
 Saxo's audit trail (`RelatedOrders`) and adopted only if each is working,
 same instrument, exit side, amount = what the entry filled, and priced
@@ -866,9 +866,9 @@ identical manual trade while one is in flight is refused (409).
 `suggested` (`{qty, size_base, broker, trail_pct}`, stored in
 `work_items.suggested_json`) prefills the approval card — shares and account
 for a sell; for a buy, size = qty × entry in the account currency.
-Entry points: `POST :7788/internal/manual` (secret-guarded, like
+Entry points: `POST :7798/internal/manual` (secret-guarded, like
 `/internal/override`) and the keyed dashboard route `POST
-:7787/api/manual-trade`; `/api/trade-check` also checks a trade not yet
+:7797/api/manual-trade`; `/api/trade-check` also checks a trade not yet
 started (ticker, exchange, direction, entry, qty) and explains Saxo's
 objection to resting legs instead of calling it a refusal.
 
@@ -907,7 +907,7 @@ The custodian **cannot** approve or execute: `/internal/resume` accepts only
 
 ---
 
-## 13. Dashboards (:7787, stdlib Python, no build step)
+## 13. Dashboards (:7797, stdlib Python, no build step)
 
 | Page | Purpose |
 |---|---|
@@ -1037,7 +1037,7 @@ Lifecycle: `active` → `fired` (→ `work_item_id`, `outcome` = `card` |
 /api/price-triggers?id=`) | `expired` | `failed` (`status_reason`). A trigger
 fires once.
 
-**The engine** is the `price_triggers` schedule (claire-api, every 2 min,
+**The engine** is the `price_triggers` schedule (ronathan-api, every 2 min,
 `require_open`; disabled/enabled from the schedule UI like every job). Each
 pass: expire what is past `expires_at` (open market or not); skip every rule
 whose exchange is closed (`sessions.is_open`) — an overnight quote is
@@ -1083,27 +1083,27 @@ engine never sends. A live trigger can only ever create an approval card.
 
 | Unit | Schedule | Purpose |
 |---|---|---|
-| `claire-api.service` | always | graph runtime + chat (7788) |
-| `claire-dashboards.service` | always | pages + APIs + watcher (7787) |
-| `claire-custodian.timer` | every 5 min | fill polling + reaper + reconciler |
-| `claire-analysis-asia.timer` | Mon–Fri 08:15 Asia/Singapore | pre-open autonomous run over SGX/HKEX/TSE/ASX names + open Asian positions → verdicts land `awaiting_approval` |
-| `claire-analysis-eu.timer` | Mon–Fri 07:30 Europe/London | pre-open run over LSE/XETRA/Paris names + open European positions |
-| `claire-analysis-us.timer` | Mon–Fri 08:30 America/New_York | pre-open run over NASDAQ/NYSE names + open US positions |
-| `claire-reconcile.timer` | daily 09:00 | broker snapshots → drift check |
+| `ronathan-api.service` | always | graph runtime + chat (7798) |
+| `ronathan-dashboards.service` | always | pages + APIs + watcher (7797) |
+| `ronathan-custodian.timer` | every 5 min | fill polling + reaper + reconciler |
+| `ronathan-analysis-asia.timer` | Mon–Fri 08:15 Asia/Singapore | pre-open autonomous run over SGX/HKEX/TSE/ASX names + open Asian positions → verdicts land `awaiting_approval` |
+| `ronathan-analysis-eu.timer` | Mon–Fri 07:30 Europe/London | pre-open run over LSE/XETRA/Paris names + open European positions |
+| `ronathan-analysis-us.timer` | Mon–Fri 08:30 America/New_York | pre-open run over NASDAQ/NYSE names + open US positions |
+| `ronathan-reconcile.timer` | daily 09:00 | broker snapshots → drift check |
 
-All: `EnvironmentFile=/opt/Claire/etc/claire.env`, `Restart=always`. Analysis
+All: `EnvironmentFile=/opt/Ronathan/etc/ronathan.env`, `Restart=always`. Analysis
 timers state their times in each region's own IANA zone — systemd `OnCalendar`
 supports this natively, so DST shifts are systemd's problem, not ours.
-Autonomous runs are started by a CLI (`claire-run --autonomous`), not by
+Autonomous runs are started by a CLI (`ronathan-run --autonomous`), not by
 prompting a chat model — starting work needs no LLM.
 
 **What's actually installed on the current machine: only the first two
 rows**, and not even as separate `Restart=always` units — a single
-`claire.service` wrapper (see README "Deploy") starts/stops both via
-`bin/claire`, because installing `claire-api.service`/
-`claire-dashboards.service` directly would fight the script's graceful-stop
-logic. None of the timers (`claire-custodian`, the three regional analysis
-timers, `claire-reconcile`) are installed — no autonomous pre-open runs,
+`ronathan.service` wrapper (see README "Deploy") starts/stops both via
+`bin/ronathan`, because installing `ronathan-api.service`/
+`ronathan-dashboards.service` directly would fight the script's graceful-stop
+logic. None of the timers (`ronathan-custodian`, the three regional analysis
+timers, `ronathan-reconcile`) are installed — no autonomous pre-open runs,
 no scheduled custodian pass, no reconcile timer are currently active. This
 table is the design target, not the current operational state; installing
 the rest is a real decision (what schedule, what regions matter) rather
@@ -1111,9 +1111,9 @@ than a docs fix.
 
 ---
 
-## 17. Claire's conversational layer
+## 17. Ronathan's conversational layer
 
-`claire_agent.py` — `create_agent`, thread-per-conversation checkpointing (so
+`ronathan_agent.py` — `create_agent`, thread-per-conversation checkpointing (so
 conversation memory survives service restarts), model from the `agents` table,
 and **read-only tools**:
 
@@ -1121,8 +1121,8 @@ and **read-only tools**:
 `portfolio_summary()` · `share_pl(ticker)` · `broker_metrics()` ·
 `market_quote/chart/search` · `explain_thesis(id)`
 
-Deliberately absent: approve, resume, execute, and cash tools. Claire can tell
-you a thesis is waiting and argue its merits; she cannot act on it.
+Deliberately absent: approve, resume, execute, and cash tools. Ronathan can tell
+you a thesis is waiting and argue its merits; it cannot act on it.
 
 Context hygiene for the persistent chat: auto-reset the thread after ~50 turns
 (durable state lives in desk.db, so nothing of record is lost) and cap turns
@@ -1217,7 +1217,7 @@ runnable offline in under a second.
 ## 20. Build order
 
 1. Repo scaffold, venv, pinned requirements, both DBs created from
-   `schema.sql`, `etc/claire.env.example`.
+   `schema.sql`, `etc/ronathan.env.example`.
 2. **Accounting core + its tests** — repo layer, lot matcher, order
    lifecycle, cash invariants; integer micro-units and the `Decimal` boundary
    from the first line. It must be bulletproof before anything can trade, and
@@ -1232,7 +1232,7 @@ runnable offline in under a second.
    interrupt; approve it from the dashboard against a mocked broker.
 8. Deterministic executor + async order lifecycle (fill polling, partial
    fills, TTLs) against mocked brokers, then the three MCP adapters.
-9. Claire chat agent + `/ask` streaming contract.
+9. Ronathan chat agent + `/ask` streaming contract.
 10. Dashboards, Model & Provider panel, `/providers` page.
 11. Watcher, custodian, timers.
 12. Additional providers (OpenAI/DeepSeek/xAI rows), assigned to low-stakes
@@ -1253,7 +1253,7 @@ runnable offline in under a second.
   path exist; the automatic split-watcher ships later).
 - Saxo SIM tokens from the developer portal expire every 24 h. The LIVE
   account uses OAuth + PKCE with automatic refresh (§22), but Saxo's refresh
-  window is ~40 min: if claire-api is down longer than that, `bin/saxo login`
+  window is ~40 min: if ronathan-api is down longer than that, `bin/saxo login`
   must be run again before live orders (or the live view) work. The
   keepalive alerts Richard on Telegram (Bob's bot) and the desktop when the
   refresh starts failing with <15 min left, when the sign-in lapses
@@ -1271,7 +1271,7 @@ runnable offline in under a second.
 
 ## 22. Live trading on Saxo (off by default)
 
-Claire can place REAL orders on Richard's Saxo account. It ships disabled,
+Ronathan can place REAL orders on Richard's Saxo account. It ships disabled,
 and the design goal is that turning it on is a deliberate, local, reversible
 act — and that turning it off is instant and possible from anywhere.
 
@@ -1284,19 +1284,19 @@ custodian places it, not only when it was approved:
 
 | # | Lock | Where | Who can change it |
 |---|------|-------|-------------------|
-| 1 | **Enabled**: `CLAIRE_LIVE_TRADING=enabled` | `etc/claire.env` (0600), read at process start | someone with a shell on this machine; restart required |
-| 2 | **Armed** | `live_trading` row in desk.db | ARM: typed phrase `ARM LIVE TRADING`, either `bin/claire live arm` (interactive terminal) or `POST /api/live-arm` from a paired browser **on loopback only** (the Orders page's Live trading side panel). DISARM: anyone, any time (`bin/claire live disarm`, the Orders side panel, Approvals, the custodian automatically) |
+| 1 | **Enabled**: `RONATHAN_LIVE_TRADING=enabled` | `etc/ronathan.env` (0600), read at process start | someone with a shell on this machine; restart required |
+| 2 | **Armed** | `live_trading` row in desk.db | ARM: typed phrase `ARM LIVE TRADING`, either `bin/ronathan live arm` (interactive terminal) or `POST /api/live-arm` from a paired browser **on loopback only** (the Orders page's Live trading side panel). DISARM: anyone, any time (`bin/ronathan live disarm`, the Orders side panel, Approvals, the custodian automatically) |
 | 3 | **Human-approved** | the §10 token gate | the approval names broker `saxo_live` AND carries `confirm_live: "LIVE"`, typed on the card; refused unless armed |
-| 4 | **Within live limits** | `live_trading.limits`, account base ccy | `bin/claire live limits k=v`, or the Orders page (`POST /api/live-limits`, any paired device, applied at once) — every change logged to `live_trading_events` with before/after |
+| 4 | **Within live limits** | `live_trading.limits`, account base ccy | `bin/ronathan live limits k=v`, or the Orders page (`POST /api/live-limits`, any paired device, applied at once) — every change logged to `live_trading_events` with before/after |
 
 Lock 1 caps the blast radius of everything else: a desk.db that says "armed"
 means nothing without the file flag. Arming is not offered to the LAN,
-Claire's chat, or any agent tool. **Amendment (2026-11-06, Richard's
+Ronathan's chat, or any agent tool. **Amendment (2026-11-06, Richard's
 decision):** the dashboards may arm, but only for a request from loopback
 (a browser on the desk's own PC) carrying the dashboard key and the typed
 phrase; a LAN device gets 403. Accepted trade-off: a local process with
 shell access (Bob) could reach that endpoint, as it could already run
-`bin/claire live arm` — locks 1 and 3 (file flag, per-trade typed LIVE)
+`bin/ronathan live arm` — locks 1 and 3 (file flag, per-trade typed LIVE)
 are unaffected.
 
 ### 22.2 Live limits (defaults; deliberately small)
@@ -1379,7 +1379,7 @@ and stay GET-only; the adapters borrow only their OAuth tokens.
 | `sim` | 11111111 (paper) | `saxo-paper` (broker `saxo`) | `SAXO_SIM_APP_KEY` | `etc/saxo_sim_token.json` |
 | `live` | 99999999 (real money) | `saxo-live` (broker `saxo_live`) | `SAXO_LIVE_APP_KEY` | `etc/saxo_live_token.json` |
 
-Each has its own PKCE app (redirect `http://localhost/claire-saxo` on both),
+Each has its own PKCE app (redirect `http://localhost/ronathan-saxo` on both),
 its own `bin/saxo login sim|live`, its own keepalive and Telegram alerts.
 Token sources are BOUND to one environment (`saxo_live.token_source`): the
 SIM adapter can only ever get a SIM token and the live adapter a live one.
@@ -1405,14 +1405,14 @@ dashboard key even for GET.
    fallback). Run several approvals end to end. SIM and live sign-ins are
    independent (§22.4a), so SIM testing continues after live is set up.
 2. Register the LIVE app on developer.saxo (grant type PKCE, redirect
-   `http://localhost/claire-saxo`), set `SAXO_LIVE_APP_KEY` and
+   `http://localhost/ronathan-saxo`), set `SAXO_LIVE_APP_KEY` and
    `SAXO_LIVE_ACCOUNT_ID`, restart, run `bin/saxo login live`.
-3. Set `CLAIRE_LIVE_TRADING=enabled`, then `bin/claire live setup` (creates
+3. Set `RONATHAN_LIVE_TRADING=enabled`, then `bin/ronathan live setup` (creates
    `saxo-live` from the Saxo account, syncing opening cash) and
-   `bin/claire restart`.
-4. `bin/claire live arm` when ready. Approvals now offer `saxo_live`
+   `bin/ronathan restart`.
+4. `bin/ronathan live arm` when ready. Approvals now offer `saxo_live`
    (marked ⚠ LIVE MONEY) and require typing LIVE.
-5. To stop: `bin/claire live disarm` or the button on Approvals. To remove
+5. To stop: `bin/ronathan live disarm` or the button on Approvals. To remove
    entirely: delete the env flag and restart.
 
 
@@ -1448,5 +1448,5 @@ work items, agent_runs (cost metering), live-trading logs.
 
 **Reporting:** each run is a `maintenance_runs` row (status ok/warn/bad,
 headline, checks, actions, note). A run that turns **bad** sends one
-Telegram alert (on the change, not every day). claire-api also stops
+Telegram alert (on the change, not every day). ronathan-api also stops
 logging the dashboards' `GET /status` polls, which were 99% of api.log.

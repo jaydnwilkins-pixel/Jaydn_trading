@@ -117,7 +117,7 @@ function liveMetricsHtml(st) {
     </div>
     <div style="height:6px;background:var(--line);border-radius:3px;margin:-.4rem 0 .8rem">
       <div style="height:6px;width:${pctN}%;background:${pctN >= 90 ? 'var(--bad)' : 'var(--warn)'};border-radius:3px"></div></div>`;
-  }).join('') : '<p class="muted small">No live account yet, so nothing to track. Usage appears here after <code>bin/claire live setup</code>.</p>';
+  }).join('') : '<p class="muted small">No live account yet, so nothing to track. Usage appears here after <code>bin/ronathan live setup</code>.</p>';
 
   const capsTable = `<table class="ot"><tr><th>Cap</th><th>Now</th><th>New value</th></tr>
     ${Object.entries(caps).map(([k, c]) => `<tr>

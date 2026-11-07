@@ -1,4 +1,4 @@
-"""READ-ONLY views of Richard's two Saxo accounts, and the OAuth sign-ins
+"""READ-ONLY views of Jaydn's two Saxo accounts, and the OAuth sign-ins
 that every Saxo integration borrows its login from.
 
     sim   paper account SAXO_SIM_ACCOUNT_ID  (Saxo's simulation environment)
@@ -17,8 +17,8 @@ What this module can do is read, and that is enforced in code:
 Saxo access tokens live ~20 min and refresh windows 40-60 min, and every
 refresh ROTATES the refresh token. So the token file is guarded by an
 exclusive lock (two processes refreshing at once would invalidate each
-other), and claire-api runs a keepalive that refreshes well inside the
-window and alerts Richard (Telegram) if a sign-in is about to lapse.
+other), and ronathan-api runs a keepalive that refreshes well inside the
+window and alerts Jaydn (Telegram) if a sign-in is about to lapse.
 Token files live in etc/ (0600), out of reach of the sandbox and agents.
 """
 import base64
@@ -37,7 +37,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[2]
 ENVS = ("sim", "live")
-DEFAULT_REDIRECT = "http://localhost/claire-saxo"
+DEFAULT_REDIRECT = "http://localhost/ronathan-saxo"
 # The environment used when a caller does not name one. Kept for the older
 # single-sign-in config (SAXO_APP_ENV + SAXO_APP_KEY); new config names each.
 DEFAULT_ENV = (os.environ.get("SAXO_APP_ENV") or "live").strip().lower()
@@ -103,7 +103,7 @@ def account_id(which, env=os.environ):
 
 # ── PKCE / sign-in ───────────────────────────────────────────────────────
 def app_config(env=os.environ, which=None):
-    """The OAuth app for one environment, from etc/claire.env:
+    """The OAuth app for one environment, from etc/ronathan.env:
     SAXO_SIM_APP_KEY / SAXO_LIVE_APP_KEY (+ _URL, _SECRET). The older
     single-app names (SAXO_APP_* for the env named by SAXO_APP_ENV) are
     still read."""
@@ -118,7 +118,7 @@ def app_config(env=os.environ, which=None):
     key = pick("KEY")
     if not key:
         raise NotSignedIn(f"SAXO_{w.upper()}_APP_KEY is not set in "
-                          "etc/claire.env — register the app on "
+                          "etc/ronathan.env — register the app on "
                           "developer.saxo first")
     return {"which": w, "app_key": key,
             "redirect_uri": pick("URL") or DEFAULT_REDIRECT,
@@ -425,7 +425,7 @@ def balance(which=None, **kw):
 
 
 def summary(which=None, *, with_orders=False, **kw):
-    """One call for Claire / the CLI / the dashboard: cash + positions (and
+    """One call for Ronathan / the CLI / the dashboard: cash + positions (and
     optionally working orders) for one environment, or an honest reason."""
     w = _which(which)
     env = kw.get("env", os.environ)
@@ -441,7 +441,7 @@ def summary(which=None, *, with_orders=False, **kw):
         return {**head, "error": str(e)}
 
 
-# ── keepalive + sign-in alerts (claire-api) ──────────────────────────────
+# ── keepalive + sign-in alerts (ronathan-api) ──────────────────────────────
 WARN_BELOW = 15 * 60            # refresh failing with < 15 min of window left
 RETRY_EVERY = 60                # after a failed refresh, try again soon
 REMIND_EVERY = 12 * 3600        # while signed out, remind twice a day
@@ -488,7 +488,7 @@ class SignInWatch:
         self.state_path.write_text(json.dumps(st))
 
     def _say(self, st, new_state, text):
-        self.notify(text, title=f"Claire · {LABELS[self.which]}")
+        self.notify(text, title=f"Ronathan · {LABELS[self.which]}")
         st.update(state=new_state, alerted_at=int(self.clock()))
 
     def observe(self, *, refreshed, error=None):
@@ -513,7 +513,7 @@ class SignInWatch:
                         "and the SIM view is blank")
                 self._say(st, "lapsed", f"your Saxo {w} sign-in has EXPIRED. "
                           f"{what} until you run on the PC:  "
-                          f"~/claire_trading/bin/saxo login {w}"
+                          f"~/jaydn_trading/bin/saxo login {w}"
                           + (_armed_note() if w == "live" else ""))
         elif s["refresh_valid_s"] < WARN_BELOW and st["state"] == "ok":
             self._say(st, "warning", f"Saxo {w} sign-in refresh is failing "

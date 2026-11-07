@@ -23,7 +23,7 @@ def login(which):
     registered = urlparse(cfg["redirect_uri"])
     if registered.hostname not in ("localhost", "127.0.0.1"):
         sys.exit("the app's redirect URL must be a localhost URL (e.g. "
-                 "http://localhost/claire-saxo) so this machine can catch "
+                 "http://localhost/ronathan-saxo) so this machine can catch "
                  "the sign-in redirect")
     box = {}
 
@@ -67,7 +67,7 @@ def login(which):
         saxo_live.complete_login(state, box["code"])
     except saxo_live.SaxoError as e:
         sys.exit(f"Sign-in refused: {e}")
-    print("Signed in. claire-api keeps the session alive while it runs.")
+    print("Signed in. ronathan-api keeps the session alive while it runs.")
     print(json.dumps(saxo_live.status(which), indent=2))
 
 
@@ -90,7 +90,7 @@ def main(argv):
         from .. import alerts
         print("delivered via:", alerts.send(
             "test alert — this is how you'll hear when the Saxo sign-in is "
-            "about to lapse or has lapsed.", title="Claire · Saxo") or "none")
+            "about to lapse or has lapsed.", title="Ronathan · Saxo") or "none")
     else:
         sys.exit(__doc__)
 

@@ -1,0 +1,8 @@
+[Unit]
+Description=Ronathan custodian pass (DB-side duties)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/Ronathan
+EnvironmentFile=/opt/Ronathan/etc/ronathan.env
+ExecStart=/opt/Ronathan/venv/bin/python -m app.custodian

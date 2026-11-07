@@ -15,7 +15,7 @@ from app.dashboards import create_server
 
 T0 = 1_786_456_800
 DKEY = "dash-key-123"
-ON = {"CLAIRE_LIVE_TRADING": "enabled"}
+ON = {"RONATHAN_LIVE_TRADING": "enabled"}
 PHRASE = live_trading.ARM_PHRASE
 
 
@@ -52,8 +52,8 @@ def armed(conn):
 
 
 def test_status_says_why_it_cannot_be_turned_on():
-    for env, acct, why in [({}, True, "CLAIRE_LIVE_TRADING"),
-                           (ON, False, "bin/claire live setup")]:
+    for env, acct, why in [({}, True, "RONATHAN_LIVE_TRADING"),
+                           (ON, False, "bin/ronathan live setup")]:
         srv, _, client = start(env, live_account=acct)
         try:
             st = client.get("/api/live-status").json()

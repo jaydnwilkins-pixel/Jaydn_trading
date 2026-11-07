@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Bob's read-only report on Claire's desk.db.
+"""Bob's read-only report on Ronathan's desk.db.
 
 Generates a single static HTML file summarising money, decisions, risk/health,
 and LLM cost — the things worth checking on regularly. Reads desk.db directly,
-so it works whether Claire's services are up or down. Not scheduled; re-run by
+so it works whether Ronathan's services are up or down. Not scheduled; re-run by
 hand (or ask Bob to) whenever you want a fresh snapshot:
 
-    ~/claire_trading/bin/bob-dashboard
+    ~/jaydn_trading/bin/bob-dashboard
 
-Writes to ~/claire_trading/var/bob-dashboard.html
+Writes to ~/jaydn_trading/var/bob-dashboard.html
 """
 import html
 import socket
@@ -82,8 +82,8 @@ def build():
     conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
 
-    api_up = port_open(7788)
-    dash_up = port_open(7787)
+    api_up = port_open(7798)
+    dash_up = port_open(7797)
 
     # ---- money -------------------------------------------------------
     accounts = fetch(conn, "SELECT id, broker, environment, base_currency FROM broker_accounts ORDER BY id")
@@ -159,9 +159,9 @@ def build():
         stat_tile("Awaiting your approval", str(len(pending)),
                    status="warning" if pending else "good"),
         stat_tile("LLM spend to date", money(total_cost)),
-        stat_tile("claire-api :7788", "up" if api_up else "down",
+        stat_tile("ronathan-api :7798", "up" if api_up else "down",
                    status="good" if api_up else "critical"),
-        stat_tile("dashboards :7787", "up" if dash_up else "down",
+        stat_tile("dashboards :7797", "up" if dash_up else "down",
                    status="good" if dash_up else "critical"),
     ])
 
@@ -183,7 +183,7 @@ def build():
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claire — Bob's report</title>
+<title>Ronathan — Bob's report</title>
 <style>
   .viz-root {{
     color-scheme: light;
@@ -265,7 +265,7 @@ def build():
 </head>
 <body>
 <div class="viz-root">
-  <h1>Claire — Bob's report</h1>
+  <h1>Ronathan — Bob's report</h1>
   <div class="meta">Generated {esc(now)} by Bob, read directly from desk.db. Re-run <code>bin/bob-dashboard</code> for a fresh snapshot.</div>
 
   <div class="tiles">{tiles}</div>
@@ -277,12 +277,12 @@ def build():
   <div class="section">{table(["Work item","Ticker","Kind","Expires"], pending_rows, "Nothing waiting on you right now.")}</div>
 
   <h2>Open positions</h2>
-  <div class="section">{table(["Account","Ticker","Qty","Cost basis","Commissions"], pos_rows, "No open positions yet — Claire hasn't placed a trade on this machine.")}</div>
+  <div class="section">{table(["Account","Ticker","Qty","Cost basis","Commissions"], pos_rows, "No open positions yet — Ronathan hasn't placed a trade on this machine.")}</div>
 
   <h2>P&amp;L by ticker</h2>
   <div class="section">{table(["Account","Ticker","Qty open","Open cost","Realized P&L"], pl_rows, "No P&L history yet.")}</div>
 
-  <h2>Thesis outcomes — is she actually making money?</h2>
+  <h2>Thesis outcomes — is it actually making money?</h2>
   <div class="section">{table(["Ticker","Kind","State","Arbiter model","Realized P&L","LLM cost"], outcome_rows, "No completed theses yet — once trades close, this table shows which model's calls made money.")}</div>
 
   <h2>Price alerts / stop-losses</h2>

@@ -1,11 +1,11 @@
 venv/
 var/
-etc/claire.env
+etc/ronathan.env
 __pycache__/
 *.pyc
 .pytest_cache/
 
-# Claire's voice component (real onnx binaries, shared with Bob's daemon via
+# Ronathan's voice component (real onnx binaries, shared with Bob's daemon via
 # ~/voice symlinks) — never committed
 voice/
 # real-account Saxo sign-in tokens (bin/saxo login) — never committed

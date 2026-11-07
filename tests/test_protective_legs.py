@@ -527,9 +527,9 @@ def test_failed_re_protection_is_flagged_and_alerted_once():
 
 
 def test_live_account_is_never_re_protected_automatically(monkeypatch):
-    monkeypatch.setattr("os.environ", {"CLAIRE_LIVE_TRADING": "enabled"})
+    monkeypatch.setattr("os.environ", {"RONATHAN_LIVE_TRADING": "enabled"})
     w = World(live=True)
-    live_trading.arm(w.conn, {"CLAIRE_LIVE_TRADING": "enabled"}, actor="t",
+    live_trading.arm(w.conn, {"RONATHAN_LIVE_TRADING": "enabled"}, actor="t",
                      phrase=live_trading.ARM_PHRASE, clock=lambda: T0)
     w.buy_with_legs(size=600.0)               # 5 shares, inside live limits
     assert w.held() == 5 and len(w.legs("placed")) == 2
@@ -542,7 +542,7 @@ def test_live_account_is_never_re_protected_automatically(monkeypatch):
     assert "LIVE account" in w.repo.order(sell["id"])["protect_note"]
     assert len(w.alerts) == 1
     # a doubt about a live position disarms live trading (§22.3)
-    assert not live_trading.status(w.conn, {"CLAIRE_LIVE_TRADING":
+    assert not live_trading.status(w.conn, {"RONATHAN_LIVE_TRADING":
                                             "enabled"})["armed"]
     assert any("DISARMED" in f for f in rep["flags"])
 
@@ -733,7 +733,7 @@ def test_manual_exit_end_to_end_through_the_real_gate():
     desk = _desk(w.conn, w.repo, execute=w.execute,
                  prepare=make_prepare(w.repo))
     client = TestClient(create_app(desk, w.conn, "sec", clock=lambda: T0))
-    hdr = {"x-claire-secret": "sec"}
+    hdr = {"x-ronathan-secret": "sec"}
     body = {"ticker": "CSCO", "exchange": "NASDAQ", "direction": "sell",
             "entry": 103.0, "suggested": {"qty": 6, "broker": "saxo"},
             "source": "portfolio", "actor": "human"}
@@ -967,7 +967,7 @@ def test_manual_trade_route_needs_the_key_and_forwards_only_known_fields(
                    headers={"X-Dash-Key": key})
     assert r.status_code == 200 and r.json()["work_item_id"] == "wi_m"
     url, fwd, hdr = sent[0]
-    assert url.endswith("/internal/manual") and hdr["x-claire-secret"] == "s"
+    assert url.endswith("/internal/manual") and hdr["x-ronathan-secret"] == "s"
     assert fwd["actor"] == "human" and "token" not in fwd
     assert fwd["suggested"] == {"qty": 9, "broker": "saxo"}
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Bob's LIVE dashboard on Claire's desk.db.
+"""Bob's LIVE dashboard on Ronathan's desk.db.
 
-A tiny stdlib-only HTTP server (no deps, matches Claire's own dashboards
+A tiny stdlib-only HTTP server (no deps, matches Ronathan's own dashboards
 style) that serves one page which polls a JSON endpoint every few seconds and
 re-renders. Every poll opens a fresh READ-ONLY connection to desk.db, so it
-always shows current data and never competes with Claire's own writers (WAL
+always shows current data and never competes with Ronathan's own writers (WAL
 mode handles concurrent readers fine).
 
 Run it:
-    ~/claire_trading/bin/bob-dashboard-server            # foreground, :7790
-    ~/claire_trading/bin/bob-dashboard-server 7790 &     # background
+    ~/jaydn_trading/bin/bob-dashboard-server            # foreground, :7790
+    ~/jaydn_trading/bin/bob-dashboard-server 7790 &     # background
 
 Not installed as a service — start/stop it by hand whenever you want it up.
 """
@@ -105,7 +105,7 @@ def build_report():
 
     return {
         "generated_at": time.time(),
-        "services": {"claire_api_7788": port_open(7788), "claire_dashboards_7787": port_open(7787)},
+        "services": {"ronathan_api_7798": port_open(7798), "ronathan_dashboards_7797": port_open(7797)},
         "stats": {
             "total_cash": total_cash,
             "total_realized_pl": total_realized,
@@ -133,7 +133,7 @@ INDEX_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Claire — Bob's live report</title>
+<title>Ronathan — Bob's live report</title>
 <style>
   .viz-root {
     color-scheme: light;
@@ -188,11 +188,11 @@ INDEX_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="viz-root">
-  <h1>Claire — Bob's live report</h1>
+  <h1>Ronathan — Bob's live report</h1>
   <div class="meta">
     <span id="asof">loading…</span>
-    <span><span class="dot" id="dot-api"></span>claire-api :7788</span>
-    <span><span class="dot" id="dot-dash"></span>dashboards :7787</span>
+    <span><span class="dot" id="dot-api"></span>ronathan-api :7798</span>
+    <span><span class="dot" id="dot-dash"></span>dashboards :7797</span>
   </div>
 
   <div class="tiles" id="tiles"></div>
@@ -209,7 +209,7 @@ INDEX_HTML = """<!DOCTYPE html>
   <h2>P&amp;L by ticker</h2>
   <div class="section" id="t-pl"></div>
 
-  <h2>Thesis outcomes — is she actually making money?</h2>
+  <h2>Thesis outcomes — is it actually making money?</h2>
   <div class="section" id="t-outcomes"></div>
 
   <h2>Price alerts / stop-losses</h2>
@@ -266,8 +266,8 @@ async function refresh() {
   }
 
   document.getElementById("asof").textContent = "Live — updated " + new Date(d.generated_at * 1000).toLocaleTimeString();
-  document.getElementById("dot-api").className = "dot " + (d.services.claire_api_7788 ? "up" : "down");
-  document.getElementById("dot-dash").className = "dot " + (d.services.claire_dashboards_7787 ? "up" : "down");
+  document.getElementById("dot-api").className = "dot " + (d.services.ronathan_api_7798 ? "up" : "down");
+  document.getElementById("dot-dash").className = "dot " + (d.services.ronathan_dashboards_7797 ? "up" : "down");
 
   const s = d.stats;
   document.getElementById("tiles").innerHTML = [
@@ -276,8 +276,8 @@ async function refresh() {
     tile("Open positions", s.open_positions),
     tile("Awaiting your approval", s.pending_approvals, s.pending_approvals ? "warning" : "good"),
     tile("LLM spend to date", money(s.total_llm_cost)),
-    tile("claire-api :7788", d.services.claire_api_7788 ? "up" : "down", d.services.claire_api_7788 ? "good" : "critical"),
-    tile("dashboards :7787", d.services.claire_dashboards_7787 ? "up" : "down", d.services.claire_dashboards_7787 ? "good" : "critical"),
+    tile("ronathan-api :7798", d.services.ronathan_api_7798 ? "up" : "down", d.services.ronathan_api_7798 ? "good" : "critical"),
+    tile("dashboards :7797", d.services.ronathan_dashboards_7797 ? "up" : "down", d.services.ronathan_dashboards_7797 ? "good" : "critical"),
   ].join("");
 
   document.getElementById("t-accounts").innerHTML = table(
@@ -293,7 +293,7 @@ async function refresh() {
   document.getElementById("t-positions").innerHTML = table(
     ["Account","Ticker","Qty","Cost basis","Commissions"],
     d.positions.map(p => [p.account_id, p.ticker, p.qty, money(p.cost_base), money(p.commissions)]),
-    "No open positions yet — Claire hasn't placed a trade on this machine.");
+    "No open positions yet — Ronathan hasn't placed a trade on this machine.");
 
   document.getElementById("t-pl").innerHTML = table(
     ["Account","Ticker","Qty open","Open cost","Realized P&L"],
@@ -380,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print(f"Bob's live Claire dashboard: http://127.0.0.1:{PORT}  (reads {DB})")
+    print(f"Bob's live Ronathan dashboard: http://127.0.0.1:{PORT}  (reads {DB})")
     print("Ctrl-C to stop.")
     try:
         server.serve_forever()

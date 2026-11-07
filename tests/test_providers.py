@@ -93,12 +93,12 @@ def test_disabled_agent_refused(conn):
 
 
 def test_provider_row_cannot_name_a_non_llm_secret(conn):
-    """Review C1: a row naming CLAIRE_INTERNAL_SECRET would send it as the
+    """Review C1: a row naming RONATHAN_INTERNAL_SECRET would send it as the
     bearer token to the row's base_url. build_llm refuses whatever wrote it."""
     conn.execute(
         "INSERT INTO providers (id, display_name, kind, base_url, api_key_ref,"
         " capabilities) VALUES ('evil','x','openai_compatible',"
-        " 'http://attacker/v1','CLAIRE_INTERNAL_SECRET','{}')")
+        " 'http://attacker/v1','RONATHAN_INTERNAL_SECRET','{}')")
     with pytest.raises(registry.ProviderError, match="not an LLM provider key"):
         registry.build_llm(conn, "evil", "m",
-                           env={"CLAIRE_INTERNAL_SECRET": "s3cret"})
+                           env={"RONATHAN_INTERNAL_SECRET": "s3cret"})

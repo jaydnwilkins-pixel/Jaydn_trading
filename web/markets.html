@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Markets</title>
+<meta charset="utf-8"><title>Ronathan — Markets</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
 <script src="/charts.js"></script>
 <script>nav('/markets')</script>
@@ -32,7 +32,7 @@
       <div class="card" style="margin:0">
         <p class="muted">Select a stock on the left — its chart and analysis
         tools appear here. Toggle SMA / volume / RSI for your own read, or
-        send it to Claire's pipeline for the full desk treatment.</p>
+        send it to Ronathan's pipeline for the full desk treatment.</p>
       </div>
     </div>
   </div>
@@ -255,7 +255,7 @@ function pick(i) {
         ${onWatchlist(sel.ticker || sel.symbol, ex) ? '★ watching'
           : '☆ watchlist'}</button>
       <button class="ghost" onclick="sendToPipeline(${jsArg(ex)})"
-        title="Claire's analysts research it and, if they recommend a trade, it comes to Approvals">Send to pipeline</button>
+        title="Ronathan's analysts research it and, if they recommend a trade, it comes to Approvals">Send to pipeline</button>
       <button class="ghost" onclick="setTrigger(${jsArg(ex)})"
         title="opens it on the Watchlist with the trigger form ready">Set a trigger</button>
       <button onclick="buyNow(${jsArg(ex)})"

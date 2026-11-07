@@ -1,5 +1,5 @@
 [Unit]
-Description=Run the Claire custodian every 5 minutes
+Description=Run the Ronathan custodian every 5 minutes
 
 [Timer]
 OnBootSec=2min

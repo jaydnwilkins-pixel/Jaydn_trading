@@ -1,6 +1,6 @@
 """Autonomous pre-open runs (DESIGN.md §16): `python -m app.autonomous
 --region asia|eu|us`. Starting work needs no LLM — this CLI just asks
-claire-api to run the pipeline; verdicts land awaiting_approval like any
+ronathan-api to run the pipeline; verdicts land awaiting_approval like any
 other run.
 """
 import argparse
@@ -41,7 +41,7 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--region", choices=list(REGIONS), required=True)
-    ap.add_argument("--api", default="http://127.0.0.1:7788")
+    ap.add_argument("--api", default="http://127.0.0.1:7798")
     ap.add_argument("--ignore-hours", action="store_true",
                     help="scan even when the market is closed")
     args = ap.parse_args(argv)

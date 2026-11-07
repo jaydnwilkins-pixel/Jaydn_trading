@@ -1,15 +1,15 @@
-<meta charset="utf-8"><title>Claire — Chat</title>
+<meta charset="utf-8"><title>Ronathan — Chat</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script>
-<script>nav('/claire')</script>
+<script>nav('/ronathan')</script>
 <main>
-  <h1>Claire</h1>
+  <h1>Ronathan</h1>
   <p class="muted">Ask about the portfolio, pending theses, markets — or say
-  "run the pipeline on NVDA". Claire can research and explain; she can never
+  "run the pipeline on NVDA". Ronathan can research and explain; it can never
   approve — that stays on <a href="/">Mission Control</a>.</p>
   <div class="chat">
     <div class="chatlog" id="log"></div>
     <div class="row">
-      <input id="text" style="flex:1" placeholder="Talk to Claire…"
+      <input id="text" style="flex:1" placeholder="Talk to Ronathan…"
         onkeydown="if(event.key==='Enter')send()">
       <button id="sendbtn" onclick="send()">Send</button>
     </div>
@@ -60,7 +60,7 @@ async function send() {
         if (ev.kind === 'tool')
           bubble('toolcall', `⚙ ${ev.name}(${JSON.stringify(ev.args || {})})`);
         else if (ev.kind === 'text') {
-          if (!current) current = bubble('claire', '');
+          if (!current) current = bubble('ronathan', '');
           current.textContent = ev.text;
           log.scrollTop = log.scrollHeight;
         } else if (ev.kind === 'error')
@@ -71,6 +71,6 @@ async function send() {
   btn.disabled = false;
   input.focus();
 }
-bubble('claire', "Hi, I'm Claire. Ask me about the desk, or name a ticker " +
+bubble('ronathan', "Hi, I'm Ronathan. Ask me about the desk, or name a ticker " +
   'and I\'ll put it through the pipeline.');
 </script>

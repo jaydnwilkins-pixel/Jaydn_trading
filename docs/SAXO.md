@@ -1,27 +1,27 @@
-# Claire × Saxo — operating guide
+# Ronathan × Saxo — operating guide
 
-How Claire connects to your two Saxo accounts, how to sign in, how paper and
+How Ronathan connects to your two Saxo accounts, how to sign in, how paper and
 real-money trading work, and what to do when something goes wrong. The design
 behind it is in [DESIGN.md §22](../DESIGN.md).
 
-| | Saxo account | Money | On Claire's approval card | Saxo app (developer portal) |
+| | Saxo account | Money | On Ronathan's approval card | Saxo app (developer portal) |
 |---|---|---|---|---|
-| **SIM** | 11111111 | simulated (€1,000,000) | `Saxo SIM 11111111 — paper` | "Claire Trading" (SIM, PKCE) |
+| **SIM** | 11111111 | simulated (€1,000,000) | `Saxo SIM 11111111 — paper` | "Ronathan Trading" (SIM, PKCE) |
 | **LIVE** | 99999999 | **real** | `⚠ Saxo LIVE 99999999 — real money` | your live app (PKCE) |
 
 Both apps use grant type **PKCE** and the redirect URL
-**`http://localhost/claire-saxo`** (no port, no trailing slash).
+**`http://localhost/ronathan-saxo`** (no port, no trailing slash).
 
 ---
 
 ## 1. Signing in
 
-Each account has its own sign-in. You sign in once; Claire keeps it alive
+Each account has its own sign-in. You sign in once; Ronathan keeps it alive
 from then on (§2).
 
 ### From the dashboard (easiest)
 
-1. On the Claire PC, open **http://localhost:7787/saxo** — it must be
+1. On the Ronathan PC, open **http://localhost:7797/saxo** — it must be
    `localhost`, not the LAN address, because Saxo sends your browser back to
    `localhost` after you log in.
 2. Pick the **Saxo LIVE** or **Saxo SIM** tab.
@@ -33,12 +33,12 @@ The dashboard key (🔑 in the menu bar) must be set in that browser.
 ### From a terminal (same result)
 
 ```
-~/claire_trading/bin/saxo login live     # or: login sim
+~/jaydn_trading/bin/saxo login live     # or: login sim
 ```
 
 ### The account check
 
-After you log in, Claire asks Saxo which account the login holds. If it is
+After you log in, Ronathan asks Saxo which account the login holds. If it is
 not the expected one (11111111 for SIM, 99999999 for live) the sign-in is
 **refused** and your previous sign-in is kept — logging in with the wrong
 Saxo login can never point the desk at a different account.
@@ -48,10 +48,10 @@ Saxo login can never point the desk at a different account.
 ## 2. Staying signed in
 
 - Saxo's access tokens last ~20 minutes; the refresh window is 40–60
-  minutes. claire-api renews each signed-in account **every 10 minutes**, so
+  minutes. ronathan-api renews each signed-in account **every 10 minutes**, so
   a sign-in lasts as long as the desk keeps running. (This is a tiny web
   request to Saxo — it uses **no Claude/Max tokens**.)
-- You need to sign in again only if the PC (or claire-api) is off or asleep
+- You need to sign in again only if the PC (or ronathan-api) is off or asleep
   for longer than the refresh window, if you change your Saxo password, or if
   Saxo ends the session.
 - **Telegram alerts** (via Bob's bot) and desktop notifications tell you:
@@ -74,7 +74,7 @@ Saxo login can never point the desk at a different account.
 |---|---|
 | **Saxo accounts** page (`/saxo`) | Tabs for LIVE and SIM, straight from Saxo: total value, cash, unrealised P/L, available to trade; positions with P/L, P/L % and allocation; working orders (incl. stop-loss / take-profit legs held at Saxo). **Click a position to chart it** (daily prices, SMA 20/50, volume, your average cost as a dashed line; ranges 1 month – 5 years). Refreshes every 30 s. |
 | **Portfolio** page (`/portfolio`) | A "Saxo LIVE — your real account" section with the same totals and positions; click a position to open its chart on the Saxo accounts page. The desk's own paper book is shown separately below it. |
-| Claire / Bob / Telegram | Ask "what's in my Saxo account?" — Claire reads live or SIM on request and says which. |
+| Ronathan / Bob / Telegram | Ask "what's in my Saxo account?" — Ronathan reads live or SIM on request and says which. |
 | Terminal | `bin/saxo positions [live|sim]` |
 
 None of these pages trades by itself. The only action on them is **Sell**
@@ -90,7 +90,7 @@ symbol (`D05:xses` → `D05.SI`). Markets the desk does not map show "No chart".
 ## 4. Paper trading on Saxo SIM
 
 Already switched on (`SAXO_SIM_EXECUTION=enabled`). When you approve a trade
-and choose **`Saxo SIM 11111111 — paper`**, Claire places a real order on
+and choose **`Saxo SIM 11111111 — paper`**, Ronathan places a real order on
 Saxo's simulator: limit entry plus stop-loss and take-profit legs, all held
 at Saxo. Fills are picked up by the custodian within a few minutes.
 
@@ -117,7 +117,7 @@ Notes:
   `var/backup-20261106-*-pre-sgd/`). Past trades are restated at that one
   rate.
 - To go back to the built-in simulator: remove `SAXO_SIM_EXECUTION=enabled`
-  from `etc/claire.env` and `bin/claire restart`.
+  from `etc/ronathan.env` and `bin/ronathan restart`.
 
 ---
 
@@ -163,9 +163,9 @@ itself** — it alerts you and disarms live trading, and you decide.
 The desk can only sell shares **it** bought (its own book). A position you
 hold yourself at Saxo shows "not the desk's" on the Saxo accounts page.
 
-**Legs placed before 2026-11-04** were not tracked; `bin/claire
+**Legs placed before 2026-11-04** were not tracked; `bin/ronathan
 legs-backfill --dry-run` shows what it would adopt from Saxo, and
-`bin/claire legs-backfill --yes` adopts it (back up `var/desk.db` first). It
+`bin/ronathan legs-backfill --yes` adopts it (back up `var/desk.db` first). It
 only reads from Saxo.
 
 ---
@@ -233,12 +233,12 @@ The fields:
 A live order reaches Saxo only when **all four locks** hold, re-checked at the
 moment the order is sent:
 
-1. **Enabled** — `CLAIRE_LIVE_TRADING=enabled` in `etc/claire.env`.
+1. **Enabled** — `RONATHAN_LIVE_TRADING=enabled` in `etc/ronathan.env`.
 2. **Armed** — **Live trading** button on the Orders page → side panel →
-   **Turn ON live trading**, from a browser **on the desk's own PC** (http://127.0.0.1:7787),
-   typing `ARM LIVE TRADING`; or `bin/claire live arm` in a terminal. A
+   **Turn ON live trading**, from a browser **on the desk's own PC** (http://127.0.0.1:7797),
+   typing `ARM LIVE TRADING`; or `bin/ronathan live arm` in a terminal. A
    browser on another device (phone, laptop) can turn it OFF but never ON.
-   Claire's chat has no way to arm. Note: Bob runs on this PC with a shell,
+   Ronathan's chat has no way to arm. Note: Bob runs on this PC with a shell,
    so he could technically reach the switch (as he could the terminal
    command); his instructions say trading approvals are yours, but nothing
    technical stops him arming.
@@ -259,23 +259,23 @@ hold at Saxo.
 ### Turning it on (first time)
 
 1. Sign in to LIVE (§1) and check the LIVE tab shows your real account.
-2. Edit `etc/claire.env`: set `CLAIRE_LIVE_TRADING=enabled`.
-3. `bin/claire live setup` — creates the desk's `saxo-live` account for
+2. Edit `etc/ronathan.env`: set `RONATHAN_LIVE_TRADING=enabled`.
+3. `bin/ronathan live setup` — creates the desk's `saxo-live` account for
    99999999 and copies its opening cash from Saxo.
-4. `bin/claire restart`
+4. `bin/ronathan restart`
 5. When you are ready to trade: Orders page → **Live trading** → **Turn ON
-   live trading** (browser on this PC), or `bin/claire live arm`
+   live trading** (browser on this PC), or `bin/ronathan live arm`
 6. Approvals now offer the live account. Start small.
 
 ### Everyday controls
 
 | Do this | Command / place |
 |---|---|
-| See the switch, spending caps, today's usage, live orders and history | **Orders** page → **Live trading** button (opens a side panel), or `bin/claire live status` |
-| **Stop live trading now** | Orders → **Live trading** → **Turn OFF** (any paired device), **Disarm** on Approvals, or `bin/claire live disarm` |
-| Change spending caps | Orders → **Live trading** → *Spending caps* → Save caps (applies at once, logged), or `bin/claire live limits max_order_base=1500 max_orders_per_day=3` |
-| Re-arm | Orders → **Live trading** → **Turn ON** (browser on this PC, typed phrase), or `bin/claire live arm` |
-| Remove live trading entirely | delete `CLAIRE_LIVE_TRADING=enabled`, `bin/claire restart` |
+| See the switch, spending caps, today's usage, live orders and history | **Orders** page → **Live trading** button (opens a side panel), or `bin/ronathan live status` |
+| **Stop live trading now** | Orders → **Live trading** → **Turn OFF** (any paired device), **Disarm** on Approvals, or `bin/ronathan live disarm` |
+| Change spending caps | Orders → **Live trading** → *Spending caps* → Save caps (applies at once, logged), or `bin/ronathan live limits max_order_base=1500 max_orders_per_day=3` |
+| Re-arm | Orders → **Live trading** → **Turn ON** (browser on this PC, typed phrase), or `bin/ronathan live arm` |
+| Remove live trading entirely | delete `RONATHAN_LIVE_TRADING=enabled`, `bin/ronathan restart` |
 
 Disarming stops **new** live orders; orders already at Saxo keep their
 stop-loss / take-profit legs. The desk also **disarms itself** if anything
@@ -289,7 +289,7 @@ know, an unknown placement result) — you then check, and re-arm.
 | Symptom | Cause / fix |
 |---|---|
 | "not signed in to Saxo live/sim" | Sign in (§1). |
-| Sign-in button says to open localhost | You are on the LAN address or another device; use **http://localhost:7787/saxo** on the PC. |
+| Sign-in button says to open localhost | You are on the LAN address or another device; use **http://localhost:7797/saxo** on the PC. |
 | "Sign-in refused: that Saxo login holds account(s) …" | You logged in with the other Saxo login; sign in with the right one. |
 | "this sign-in link has expired" | Took > 10 minutes, or the dashboard restarted mid-sign-in; click Sign in again. |
 | Live account greyed out on the approval card | Not set up or not armed — the card says which (§5). |
@@ -298,25 +298,25 @@ know, an unknown placement result) — you then check, and re-arm.
 | "LIVE TRADING DISARMED by the custodian" | Something about a live order needs checking at Saxo; reconcile, then re-arm. |
 | Sell refused "could not cancel the protective stop/target" | Saxo would not confirm the legs were cancelled, so nothing was sold. Check the working orders on the Saxo accounts page, then retry or cancel the trade on Approvals. |
 | "UNPROTECTED position … no resting stop" / "RE-PROTECTION FAILED" | Some shares have no stop at Saxo (e.g. a partial sell could not be re-protected). Place a stop at Saxo or sell the rest. |
-| "UNTRACKED venue order" | Saxo holds an order on the exit side of a desk position that the desk does not know (placed by hand, or before legs were tracked — try `bin/claire legs-backfill --dry-run`). |
+| "UNTRACKED venue order" | Saxo holds an order on the exit side of a desk position that the desk does not know (placed by hand, or before legs were tracked — try `bin/ronathan legs-backfill --dry-run`). |
 | Page says the dashboard key is needed | Click 🔑 in the menu bar and enter it. |
 
 ---
 
-## 7. Configuration reference (`etc/claire.env`, mode 600)
+## 7. Configuration reference (`etc/ronathan.env`, mode 600)
 
 ```
 SAXO_SIM_ACCOUNT_ID=11111111
-SAXO_SIM_APP_KEY=…            # SIM app "Claire Trading"
-SAXO_SIM_APP_URL=http://localhost/claire-saxo
+SAXO_SIM_APP_KEY=…            # SIM app "Ronathan Trading"
+SAXO_SIM_APP_URL=http://localhost/ronathan-saxo
 SAXO_SIM_ACCOUNT_KEY=…        # Saxo's AccountKey for 11111111
 SAXO_SIM_EXECUTION=enabled    # approvals on Saxo SIM go to Saxo's simulator
 
 SAXO_LIVE_ACCOUNT_ID=99999999
 SAXO_LIVE_APP_KEY=…           # your live app
-SAXO_LIVE_APP_URL=http://localhost/claire-saxo
+SAXO_LIVE_APP_URL=http://localhost/ronathan-saxo
 
-CLAIRE_LIVE_TRADING=          # empty = real-money trading impossible
+RONATHAN_LIVE_TRADING=          # empty = real-money trading impossible
 ```
 
 Sign-ins are stored in `etc/saxo_sim_token.json` and `etc/saxo_live_token.json`

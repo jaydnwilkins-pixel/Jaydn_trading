@@ -260,7 +260,7 @@ tr.sel td { background:#0f2233; }
 .bubble { max-width:80%; padding:.5rem .9rem; border-radius:12px;
   margin:.4rem 0; white-space:pre-wrap; }
 .bubble.user { background:#123044; margin-left:auto; }
-.bubble.claire { background:var(--panel2); border:1px solid var(--line); }
+.bubble.ronathan { background:var(--panel2); border:1px solid var(--line); }
 .bubble.toolcall { background:transparent; border:1px dashed var(--line);
   color:var(--dim); font-size:.8rem; font-family:var(--mono); }
 .spark { vertical-align:middle; }

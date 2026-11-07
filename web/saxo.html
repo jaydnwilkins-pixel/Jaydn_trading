@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Saxo accounts</title>
+<meta charset="utf-8"><title>Ronathan — Saxo accounts</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/charts.js"></script>
 <script src="/sell.js"></script>
 <script>nav('/saxo')</script>
@@ -139,7 +139,7 @@ function render(d) {
       <td class="num">${p.cost_basis != null ? money(p.cost_basis, p.currency) : '—'}</td>
       <td class="num">${p.price_missing ? '<span class="warn" title="Saxo sent no price for this market">—</span>'
         : money(p.current_price)}${p.price_src ? `<br><span class="muted" style="font-size:.7rem"
-        title="Saxo sends no live price for this exchange on this account, so this is Claire's own quote">via ${esc(p.price_src)}</span>` : ''}</td>
+        title="Saxo sends no live price for this exchange on this account, so this is Ronathan's own quote">via ${esc(p.price_src)}</span>` : ''}</td>
       <td class="num">${money(p.market_value, p.currency)}</td>
       <td class="num">${signed(p.pnl, p.currency)}</td>
       <td class="num">${pctSigned(p.pnl_pct)}</td>
@@ -182,9 +182,9 @@ async function signIn(env) {
   // app), so the sign-in has to start from a browser on this PC
   const msg = document.getElementById('signin-msg');
   if (!['localhost'].includes(location.hostname)) {
-    msg.innerHTML = `Sign-in works in a browser on the Claire PC: open
-      <a href="http://localhost:${location.port || 7787}/saxo?env=${esc(env)}">
-      localhost:${location.port || 7787}/saxo</a> there.`;
+    msg.innerHTML = `Sign-in works in a browser on the Ronathan PC: open
+      <a href="http://localhost:${location.port || 7797}/saxo?env=${esc(env)}">
+      localhost:${location.port || 7797}/saxo</a> there.`;
     return;
   }
   try {

@@ -20,7 +20,7 @@ re-protected at the original levels with a standalone OCO — and if that
 fails, loudly (custodian flag + Telegram), never silently.
 
 Real money: re-protection is never automatic on a live account. Placing
-sell orders on Richard's real account is a human decision; the custodian
+sell orders on Jaydn's real account is a human decision; the custodian
 flags and alerts instead, and its flag disarms live trading (§22.3).
 """
 import json

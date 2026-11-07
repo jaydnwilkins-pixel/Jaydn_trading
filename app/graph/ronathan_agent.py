@@ -1,5 +1,5 @@
-"""Claire's conversational layer (DESIGN.md §17): create_agent + READ-ONLY
-tools. She can tell you a thesis is waiting and argue its merits; she cannot
+"""Ronathan's conversational layer (DESIGN.md §17): create_agent + READ-ONLY
+tools. It can tell you a thesis is waiting and argue its merits; it cannot
 act on it — approve/resume/execute/cash tools are deliberately absent, and
 pending-approval listings NEVER include tokens.
 """
@@ -14,20 +14,20 @@ MAX_TURNS_PER_THREAD = 50      # context hygiene (§17): auto-reset, desk.db is
                                # the durable record so nothing of note is lost
 
 
-# Who is talking to Claire right now, so a run she launches records it
+# Who is talking to Ronathan right now, so a run it launches records it
 # (the Trading page's "started by"). Set at the start of each chat turn from
 # the chat thread and Bob's "[from Bob]" prefix. A plain holder rather than
-# a contextvar: the Claude SDK runs her tools on its own threads/loop, where
+# a contextvar: the Claude SDK runs its tools on its own threads/loop, where
 # a contextvar set here would not be visible.
-CURRENT_ASKER = {"who": "Claire's chat"}
+CURRENT_ASKER = {"who": "Ronathan's chat"}
 
 
 def asker_for(text: str, thread: str) -> str:
     if (text or "").lstrip().startswith("[from Bob]"):
-        return "Bob, via Claire's chat"
+        return "Bob, via Ronathan's chat"
     if thread == "dashboard":
-        return "you, via Claire's chat on the dashboard"
-    return "Claire's chat (/ask: voice or another assistant)"
+        return "you, via Ronathan's chat on the dashboard"
+    return "Ronathan's chat (/ask: voice or another assistant)"
 
 
 def build_tools(conn, repo, desk, market):
@@ -147,7 +147,7 @@ def build_tools(conn, repo, desk, market):
 
     @tool
     def saxo_account(account: str = "live") -> str:
-        """Richard's Saxo accounts, read-only: cash, total value, open
+        """Jaydn's Saxo accounts, read-only: cash, total value, open
         positions with P/L, and working orders. account="live" is his REAL
         money account (SAXO_LIVE_ACCOUNT_ID); account="sim" is his Saxo paper account
         (SAXO_SIM_ACCOUNT_ID). Both are separate from the desk's own paper book — say
@@ -164,7 +164,7 @@ def build_tools(conn, repo, desk, market):
             market_chart, market_search, explain_thesis, saxo_account]
 
 
-class Claire:
+class Ronathan:
     def __init__(self, conn, repo, desk, market, *, env=None):
         self.conn, self.repo, self.desk, self.market = conn, repo, desk, market
         self.env = env
@@ -193,8 +193,8 @@ class Claire:
             from langchain.agents import create_agent
 
             from ..providers import claude_sdk
-            row = registry.agent_row(self.conn, "claire_chat")
-            model = registry.model_for(self.conn, "claire_chat", env=self.env)
+            row = registry.agent_row(self.conn, "ronathan_chat")
+            model = registry.model_for(self.conn, "ronathan_chat", env=self.env)
             tools = build_tools(self.conn, self.repo, self.desk, self.market)
             if claude_sdk.is_sdk(model):
                 # Max subscription: the SDK owns the tool loop

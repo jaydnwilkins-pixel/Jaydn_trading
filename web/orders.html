@@ -1,4 +1,4 @@
-<meta charset="utf-8"><title>Claire — Orders</title>
+<meta charset="utf-8"><title>Ronathan — Orders</title>
 <link rel="stylesheet" href="/style.css"><script src="/nav.js"></script><script src="/orderinfo.js"></script><script src="/live.js"></script>
 <script>nav('/orders')</script>
 <style>
@@ -34,8 +34,8 @@
 
   <details class="small" style="margin-top:1.5rem" open>
     <summary class="muted">About protective stops &amp; targets, and what the columns mean</summary>
-    <p style="margin:.3rem 0">When a buy fills, Claire leaves two orders at the
-      broker to guard the shares — they work even when Claire, this PC or the
+    <p style="margin:.3rem 0">When a buy fills, Ronathan leaves two orders at the
+      broker to guard the shares — they work even when Ronathan, this PC or the
       internet is down:</p>
     <ul style="margin:.2rem 0 .4rem 1.2rem;padding:0">
       <li><b>🛑 Stop-loss</b> — sells the shares if the price <b>falls</b> to
@@ -124,7 +124,7 @@ async function cancelOrder(id) {
   const o = orderBy(id);
   if (!o) return;
   const where = o.status === 'pending_session'
-    ? 'Claire is still holding it — nothing has been sent.'
+    ? 'Ronathan is still holding it — nothing has been sent.'
     : 'It is cancelled at ' + o.account + ', together with its stop and target.';
   if (!confirm(`Cancel ${o.side.toUpperCase()} ${fmt(o.qty, 0)} ${o.ticker} at a limit price of ${o.limit_price} per share?\n\n${where}`)) return;
   try {
@@ -141,7 +141,7 @@ function editOrder(id) {
     <h3 style="font-size:1rem;margin:0">Edit order — ${esc(o.side.toUpperCase())} ${esc(o.ticker)} on ${esc(o.account)}</h3>
     <p class="muted small">${atVenue
       ? 'This order is at the broker. Saving <b>cancels it there</b> and puts a new order with these levels on Approvals for you to approve.'
-      : 'Claire is still holding this order (sent when the market opens), so it is changed in place — no new approval needed.'}
+      : 'Ronathan is still holding this order (sent when the market opens), so it is changed in place — no new approval needed.'}
       Saxo refuses a stop or target more than 25% from the limit price.</p>
     <div class="row" style="gap:.5rem;flex-wrap:wrap">
       <label>shares <input id="e-qty" type="number" min="1" step="1" style="width:80px" value="${esc(o.qty)}"></label>
@@ -176,7 +176,7 @@ async function saveOrder(id) {
     const out = await api('/api/order-control', {work_item_id: o.work_item_id, action: 'edit', ...v});
     msg.innerHTML = out.new_work_item_id
       ? '<b class="ok">✔ old order cancelled</b> — approve the new one on <a href="/approvals">Approvals →</a>'
-      : '<b class="ok">✔ saved</b> — Claire sends these levels when the market opens.';
+      : '<b class="ok">✔ saved</b> — Ronathan sends these levels when the market opens.';
     toast(o.ticker + ' order updated ✓');
     load();
   } catch (e) { msg.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
@@ -337,7 +337,7 @@ function renderSync() {
     const real = (a.venue || '').startsWith('Saxo');
     return `<span title="${esc(tip)}" style="margin-left:.8rem;white-space:nowrap">${mark} ${esc(a.label)}
       <span class="muted">${a.checked_at ? (real ? esc(a.venue) + ' · ' + ago(a.contact_at)
-        : 'Claire\'s own sim — nothing external to sync') : 'not checked yet'}</span></span>`;
+        : 'Ronathan\'s own sim — nothing external to sync') : 'not checked yet'}</span></span>`;
   }).join('');
   el.innerHTML = head + '<br>' + accts;
 }

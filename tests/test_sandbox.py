@@ -13,9 +13,9 @@ from app.tools import sandbox
 from app.tools.sandbox import UNAVAILABLE, run_python
 
 REPO = Path(__file__).resolve().parent.parent
-SECRET_PATHS = [REPO / "etc" / "claire.env", REPO / "var" / "desk.db",
-                Path("/home/richard/claire_trading/etc/claire.env"),
-                Path("/home/richard/claire_trading/var/desk.db"),
+SECRET_PATHS = [REPO / "etc" / "ronathan.env", REPO / "var" / "desk.db",
+                Path("/home/jaydn/jaydn_trading/etc/ronathan.env"),
+                Path("/home/jaydn/jaydn_trading/var/desk.db"),
                 Path.home() / ".claude", Path.home()]
 
 
@@ -39,7 +39,7 @@ def test_pandas_calc_still_works():
 
 @pytest.fixture
 def host_listener():
-    """A TCP server on the HOST loopback (like claire-api on :7788)."""
+    """A TCP server on the HOST loopback (like ronathan-api on :7798)."""
     srv = socket.socket()
     srv.bind(("127.0.0.1", 0))
     srv.listen(8)
@@ -108,19 +108,19 @@ def test_cannot_read_secrets_or_home():
         "        open(p, 'rb').read(1); out[p] = 'READ'\n"
         "    except Exception as e:\n"
         "        out[p] = 'denied' if not os.path.exists(p) else 'EXISTS'\n"
-        "out['/proc/1/environ has secret'] = 'CLAIRE' in open('/proc/self/environ').read()\n"
+        "out['/proc/1/environ has secret'] = 'RONATHAN' in open('/proc/self/environ').read()\n"
         "out['env'] = sorted(os.environ)\n"
         "RESULT = out\n",
         {"paths": paths}))
     for p in paths:
         assert r[p] == "denied", (p, r[p])
     assert r["/proc/1/environ has secret"] is False
-    assert not any("CLAIRE" in k or "KEY" in k or "SECRET" in k
+    assert not any("RONATHAN" in k or "KEY" in k or "SECRET" in k
                    for k in r["env"])
 
 
 def test_env_scrubbed(monkeypatch):
-    monkeypatch.setenv("CLAIRE_INTERNAL_SECRET", "supersecret")
+    monkeypatch.setenv("RONATHAN_INTERNAL_SECRET", "supersecret")
     r = ok(run_python(
         "import os\nRESULT = 'supersecret' in repr(dict(os.environ))", {}))
     assert r is False

@@ -44,7 +44,7 @@ def _no_real_telegram_file(monkeypatch, tmp_path):
 @pytest.fixture(autouse=True)
 def _no_real_desktop_notifications(monkeypatch):
     """alerts.send also runs notify-send. A test that called it popped a real
-    "Claire: hello" (then "x") onto Richard's desktop on EVERY test run
+    "Ronathan: hello" (then "x") onto the desktop on EVERY test run
     (2026-11-06). Record instead."""
     from app import alerts
 

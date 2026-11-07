@@ -54,10 +54,10 @@ def test_build_needs_no_api_key(conn):
 def test_options_isolate_and_strip_the_api_key():
     o = claude_sdk.base_options(model="claude-sonnet-5",
                                 fallback_model="claude-haiku-4-5")
-    # the CLI would bill the API if it inherited the key from claire.env
+    # the CLI would bill the API if it inherited the key from ronathan.env
     assert o.env["ANTHROPIC_API_KEY"] == ""
     assert o.tools == []                     # no Bash / file tools
-    assert o.setting_sources == []           # none of Richard's settings
+    assert o.setting_sources == []           # none of the user's settings
     assert o.strict_mcp_config and o.mcp_servers == {}
     assert o.fallback_model == "claude-haiku-4-5"
 
@@ -165,12 +165,12 @@ def test_history_is_rendered_into_one_prompt():
         ("system", "S"), ("user", "hi"), ("assistant", "hello"),
         ("user", "what is held?")])
     assert system == "S"
-    assert "Richard: hi" in prompt and "You: hello" in prompt
+    assert "Jaydn: hi" in prompt and "You: hello" in prompt
     assert prompt.endswith("what is held?")
 
 
-def test_claire_chat_streams_tools_and_text(conn):
-    from app.graph.claire_agent import Claire
+def test_ronathan_chat_streams_tools_and_text(conn):
+    from app.graph.ronathan_agent import Ronathan
 
     seen = []
 
@@ -182,12 +182,12 @@ def test_claire_chat_streams_tools_and_text(conn):
                                    model="m")
         yield result(result="All cash.")
 
-    claire = Claire(conn, repo=None, desk=None, market=None)
-    claire._ensure_agent()
-    chat, system, tools = claire._sdk_chat
-    claire._sdk_chat = (claude_sdk.SdkChat(chat.model, _query=q,
+    ronathan = Ronathan(conn, repo=None, desk=None, market=None)
+    ronathan._ensure_agent()
+    chat, system, tools = ronathan._sdk_chat
+    ronathan._sdk_chat = (claude_sdk.SdkChat(chat.model, _query=q,
                                            meter=chat.meter), system, tools)
-    out = [json.loads(x) for x in claire.ask_stream("what do I hold?", "t1")]
+    out = [json.loads(x) for x in ronathan.ask_stream("what do I hold?", "t1")]
     assert out[0] == {"kind": "tool", "name": "portfolio_summary", "args": {}}
     assert {"kind": "text", "text": "All cash."} in out
     assert out[-1]["kind"] == "done"
@@ -218,11 +218,11 @@ def test_old_databases_accept_the_sdk_kind(tmp_path):
     assert kinds["claude_max"] == "claude_sdk"
 
 
-def _refusing_claire(conn, monkeypatch, refuse):
-    """Claire whose stream_chat refuses for the models in `refuse` (by
+def _refusing_ronathan(conn, monkeypatch, refuse):
+    """Ronathan whose stream_chat refuses for the models in `refuse` (by
     name), and for any call carrying the old history when 'history' is in
-    `refuse`. Returns (claire, calls)."""
-    from app.graph.claire_agent import Claire
+    `refuse`. Returns (ronathan, calls)."""
+    from app.graph.ronathan_agent import Ronathan
     calls = []
 
     def fake_stream(chat, system, prompt, tools):
@@ -233,38 +233,38 @@ def _refusing_claire(conn, monkeypatch, refuse):
         yield ("text", "Desk is fine.")
         yield ("done", "Desk is fine.")
     monkeypatch.setattr(claude_sdk, "stream_chat", fake_stream)
-    claire = Claire(conn, repo=None, desk=None, market=None)
-    claire._ensure_agent()
-    _, system, tools = claire._sdk_chat
-    claire._sdk_chat = (claude_sdk.SdkChat("claude-opus-5",
+    ronathan = Ronathan(conn, repo=None, desk=None, market=None)
+    ronathan._ensure_agent()
+    _, system, tools = ronathan._sdk_chat
+    ronathan._sdk_chat = (claude_sdk.SdkChat("claude-opus-5",
                                            fallback_model="claude-sonnet-5"),
                         system, tools)
-    claire._histories["t"] = [{"role": "user", "content": "old question"},
+    ronathan._histories["t"] = [{"role": "user", "content": "old question"},
                               {"role": "assistant", "content": "old answer"}]
-    return claire, calls
+    return ronathan, calls
 
 
 def test_a_refused_chat_retries_on_the_backup_model(conn, monkeypatch):
-    claire, calls = _refusing_claire(conn, monkeypatch, {"claude-opus-5"})
-    out = [json.loads(x) for x in claire.ask_stream("status?", "t")]
+    ronathan, calls = _refusing_ronathan(conn, monkeypatch, {"claude-opus-5"})
+    out = [json.loads(x) for x in ronathan.ask_stream("status?", "t")]
     assert [c[0] for c in calls] == ["claude-opus-5", "claude-sonnet-5"]
     assert {"kind": "text", "text": "Desk is fine."} in out
     assert not any(o["kind"] == "error" for o in out)
-    assert len(claire._histories["t"]) == 4         # history kept
+    assert len(ronathan._histories["t"]) == 4         # history kept
 
 
 def test_a_thread_that_keeps_being_refused_starts_fresh(conn, monkeypatch):
-    claire, calls = _refusing_claire(conn, monkeypatch, {"history"})
-    out = [json.loads(x) for x in claire.ask_stream("status?", "t")]
+    ronathan, calls = _refusing_ronathan(conn, monkeypatch, {"history"})
+    out = [json.loads(x) for x in ronathan.ask_stream("status?", "t")]
     assert len(calls) == 3 and "old" not in calls[-1][1]
     assert any("fresh conversation" in (o.get("text") or "") for o in out)
-    assert claire._histories["t"] == [
+    assert ronathan._histories["t"] == [
         {"role": "user", "content": "status?"},
         {"role": "assistant", "content": "Desk is fine."}]
 
 
 def test_other_errors_are_not_retried(conn, monkeypatch):
-    from app.graph.claire_agent import Claire
+    from app.graph.ronathan_agent import Ronathan
     calls = []
 
     def boom(chat, system, prompt, tools):
@@ -272,10 +272,10 @@ def test_other_errors_are_not_retried(conn, monkeypatch):
         raise RuntimeError("network down")
         yield  # noqa — generator
     monkeypatch.setattr(claude_sdk, "stream_chat", boom)
-    claire = Claire(conn, repo=None, desk=None, market=None)
-    claire._ensure_agent()
-    _, system, tools = claire._sdk_chat
-    claire._sdk_chat = (claude_sdk.SdkChat("a", fallback_model="b"),
+    ronathan = Ronathan(conn, repo=None, desk=None, market=None)
+    ronathan._ensure_agent()
+    _, system, tools = ronathan._sdk_chat
+    ronathan._sdk_chat = (claude_sdk.SdkChat("a", fallback_model="b"),
                         system, tools)
-    out = [json.loads(x) for x in claire.ask_stream("hi", "t2")]
+    out = [json.loads(x) for x in ronathan.ask_stream("hi", "t2")]
     assert calls == ["a"] and out[0]["kind"] == "error"

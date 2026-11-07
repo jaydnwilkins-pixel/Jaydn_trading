@@ -28,7 +28,7 @@ LIVE reply here. Rules:
   decided" and the message is edited to show the outcome.
 * Every accepted decision is written to the work item's events (actor
   "human", payload channel "telegram") from inside the resume hook — i.e.
-  only once the approval gate has accepted it, and BEFORE claire-api appends
+  only once the approval gate has accepted it, and BEFORE ronathan-api appends
   its own outcome rows. Never after: approvals.last_event() must keep
   seeing 'resume_failed' last on a parked refusal, or the custodian would
   auto-resend a trade the venue turned down.
@@ -274,12 +274,12 @@ def suggested_size(row):
 
 
 def dashboard_url(env):
-    """A link that works from a phone: CLAIRE_DASHBOARD_URL if set, else the
+    """A link that works from a phone: RONATHAN_DASHBOARD_URL if set, else the
     LAN address the dashboards are bound to (localhost is useless there)."""
-    explicit = (env.get("CLAIRE_DASHBOARD_URL") or "").strip().rstrip("/")
+    explicit = (env.get("RONATHAN_DASHBOARD_URL") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    bind = (env.get("CLAIRE_DASHBOARD_BIND") or "127.0.0.1").strip()
+    bind = (env.get("RONATHAN_DASHBOARD_BIND") or "127.0.0.1").strip()
     host = bind
     if bind in ("0.0.0.0", "::", ""):
         try:
@@ -289,7 +289,7 @@ def dashboard_url(env):
             s.close()
         except OSError:
             host = socket.gethostname()
-    return f"http://{host}:7787"
+    return f"http://{host}:7797"
 
 
 # ── facts ─────────────────────────────────────────────────────────────────
@@ -1209,7 +1209,7 @@ def _execute(conn, tg, n, wi, f, opts, p, resume_post, *, from_id,
 
     def post(body):
         # the gate has accepted the decision: audit it now, before
-        # claire-api appends its own outcome rows (see module docstring)
+        # ronathan-api appends its own outcome rows (see module docstring)
         if not logged:
             _log_event(conn, wi, op, from_id, p, clock)
             logged.append(True)
@@ -1237,13 +1237,13 @@ def _execute(conn, tg, n, wi, f, opts, p, resume_post, *, from_id,
         msg = e.message
         if e.code == 502 and logged:
             # the gate accepted it and it is recorded (token pending_resume),
-            # but claire-api did not answer: the custodian re-sends it
+            # but ronathan-api did not answer: the custodian re-sends it
             # (approvals.retry_pending). The decision itself stands.
             _close(conn, tg, n, f"⏳ <b>{h(op.upper())} recorded via Telegram"
-                   f"</b> ({h(sgt(clock()))}) — claire-api did not answer;"
+                   f"</b> ({h(sgt(clock()))}) — ronathan-api did not answer;"
                    " the custodian will hand it over. Check Approvals.",
                    clock)
-            return _reply(200, "Recorded — claire-api unreachable, the "
+            return _reply(200, "Recorded — ronathan-api unreachable, the "
                                "custodian will retry.", ok=True, alert=True)
         if e.code == 400 and not logged:
             # a fixable input problem (cash, size, live not confirmed):

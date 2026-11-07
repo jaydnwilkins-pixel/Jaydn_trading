@@ -16,7 +16,7 @@ A partly filled order is refused: some shares are bought and protected by
 their legs; cancelling the rest at the venue is a decision with more moving
 parts than one button (sell what filled, or keep it).
 
-Runs inside claire-api, which owns the broker adapters.
+Runs inside ronathan-api, which owns the broker adapters.
 """
 import json
 

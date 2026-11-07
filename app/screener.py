@@ -120,7 +120,7 @@ def track_record(conn, *, limit=12) -> str:
     winners = [r for r in approved if (r["realized_pl"] or 0) > 0]
     closed = [r for r in approved if (r["realized_pl"] or 0) != 0]
     return (f"Your track record (last {len(rows)} theses): "
-            f"{len(approved)} approved by Richard, "
+            f"{len(approved)} approved by Jaydn, "
             f"{len(winners)}/{len(closed) or 0} profitable once closed. "
             + ("Recent: " + ", ".join(
                 f"{r['ticker']} {r['realized_pl']:+.0f}" for r in closed[:5])
@@ -224,7 +224,7 @@ def screener_pick(conn, market, exchanges, held, *, limit=2, env=None,
             f"\n\nCandidates — the ONLY names you may pick from. Each shows "
             f"which scan surfaced it (momentum = strength, unusual_volume = "
             f"something is happening today, oversold = mean reversion, "
-            f"watchlist = Richard asked for it, tv_rated = analyst "
+            f"watchlist = Jaydn asked for it, tv_rated = analyst "
             f"consensus). A name found by SEVERAL scans is a stronger "
             f"signal:\n{_render(cands, notes)}\n\n"
             f"Shortlist up to {limit} for full pipeline analysis. Weigh the "

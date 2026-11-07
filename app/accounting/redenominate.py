@@ -16,7 +16,7 @@ History is restated at today's rate (paper money; noted in the audit).
 
     python -m app.accounting.redenominate saxo-paper SGD [--rate 1.2950]
 
-Run with the desk STOPPED (bin/claire stop) — nothing else may write.
+Run with the desk STOPPED (bin/ronathan stop) — nothing else may write.
 """
 import argparse
 import json

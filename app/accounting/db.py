@@ -195,7 +195,7 @@ def _widen_provider_kinds(conn) -> None:
 def _widen_account_environments(conn) -> None:
     """broker_accounts.environment used to reject 'live' outright. It must be
     representable so the live-trading switch (DESIGN.md §22) can refuse it
-    by name; creating such an account still needs `bin/claire live setup`."""
+    by name; creating such an account still needs `bin/ronathan live setup`."""
     _widen_check(conn, "broker_accounts", "IN ('paper','sim'))",
                  "IN ('paper','sim','live'))",
                  # the marker must be the CHECK itself: the old table's

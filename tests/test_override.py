@@ -313,3 +313,41 @@ def test_chart_falls_back_to_saxo_when_yahoo_refuses():
     import pytest
     with pytest.raises(RuntimeError):           # no fallback: error as before
         Market(_get=yahoo).chart("C6L.SI")
+
+
+def test_override_carries_the_trailing_floor_to_the_card(tmp_path):
+    """The Override form sets the trailing floor too (2026-11-07: it had
+    only entry/stop/target, so the floor could not be chosen there)."""
+    conn, _, desk = _desk(tmp_path)
+    wi = desk.override("wi_pass", direction="buy", entry=106.0, stop=98.0,
+                       trail_pct=12, background=False)
+    row = conn.execute("SELECT suggested_json FROM work_items WHERE id=?",
+                       (wi,)).fetchone()
+    assert json.loads(row["suggested_json"]) == {"trail_pct": 12.0}
+    ev = conn.execute("SELECT payload FROM events WHERE item_id=? AND"
+                      " to_state='override'", (wi,)).fetchone()
+    assert json.loads(ev["payload"])["trail_pct"] == 12.0
+
+
+def test_override_without_a_floor_leaves_the_default(tmp_path):
+    conn, _, desk = _desk(tmp_path)
+    wi = desk.override("wi_pass", direction="buy", entry=106.0, stop=98.0,
+                       background=False)
+    assert conn.execute("SELECT suggested_json FROM work_items WHERE id=?",
+                        (wi,)).fetchone()[0] is None
+
+
+def test_override_api_rejects_a_silly_floor():
+    from fastapi.testclient import TestClient
+
+    from app.api.main import create_app
+
+    class D:
+        def override(self, *a, **k):
+            raise AssertionError("must not be reached")
+    client = TestClient(create_app(D(), None, "sec"))
+    r = client.post("/internal/override", headers={"x-claire-secret": "sec"},
+                    json={"work_item_id": "w", "direction": "buy",
+                          "entry": 10, "stop": 9, "trail_pct": 95,
+                          "actor": "human"})
+    assert r.status_code == 422

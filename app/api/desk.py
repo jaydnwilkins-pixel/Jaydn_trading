@@ -178,7 +178,7 @@ class Desk:
 
     # ── human override of a PASS verdict (DESIGN.md §10) ─────────────────
     def override(self, origin_wi, *, direction, entry, stop, target=None,
-                 note=None, background=True):
+                 note=None, trail_pct=None, background=True):
         """Send a concluded PASS to the approval gate anyway.
 
         The arbiter declining is a decision, not a bug, so overriding it is
@@ -228,20 +228,28 @@ class Desk:
                         conditions=(old.get("conditions") or [])
                         + [f"HUMAN OVERRIDE of a PASS verdict"
                            f"{': ' + note if note else ''}"])
+        # the trailing floor you chose here prefills the approval card; an
+        # exit closes the position, so there is no floor to carry
+        exit_ = direction == "sell" and not stop
+        suggested = clean_suggested({"trail_pct": trail_pct}) \
+            if trail_pct and not exit_ else None
         inst = self._instrument(origin["ticker"], thesis.currency)
         ts = int(self.clock())
         day = time.strftime("%Y-%m-%d", time.gmtime(ts))
         wi = f"wi_{day}_{origin['ticker']}_ovr_{secrets.token_hex(2)}"
         self.repo.create_work_item(wi, "override", origin["ticker"], ts=ts)
         self.conn.execute(
-            "UPDATE work_items SET override_of=?, trigger=?, thesis_json=?"
-            " WHERE id=?",
+            "UPDATE work_items SET override_of=?, trigger=?, thesis_json=?,"
+            " suggested_json=? WHERE id=?",
             (origin_wi, f"human override of {origin_wi}",
-             thesis.model_dump_json(), wi))
+             thesis.model_dump_json(),
+             json.dumps(suggested) if suggested else None, wi))
         self.repo._event(wi, ts, "human", "created", "override",
                          payload={"origin": origin_wi, "direction": direction,
                                   "entry": entry, "stop": stop,
-                                  "target": target, "note": note})
+                                  "target": target, "trail_pct":
+                                  (suggested or {}).get("trail_pct"),
+                                  "note": note})
         state = PipelineState(work_item_id=wi, kind="override",
                               trigger=f"human override of {origin_wi}",
                               ticker=origin["ticker"], instrument=inst,

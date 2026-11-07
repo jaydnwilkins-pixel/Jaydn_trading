@@ -394,6 +394,9 @@ function overrideForm(r) {
           min="0.01" style="width:100px" placeholder="optional"
           oninput="updOverride(${jsArg(r.id)})"></label>
         <button type="button" onclick="useSuggested(${jsArg(r.id)})">use suggestion</button>
+        <label title="after the buy fills, the watcher alerts you if the price falls this far below the best price since entry — the floor rises with the price, never falls">trailing floor
+          <input id="ovtrail-${id}" type="number" step="0.5" min="0.5" max="90"
+          value="8" style="width:70px">%</label>
       </span>
     </div>
     <p id="ovhint-${id}" style="font-size:.8rem;margin:.4rem 0"></p>
@@ -525,7 +528,12 @@ async function override(id) {
   const entry = Number(v('entry'));
   const stop = m === 'exit' ? null : (Number(v('stop')) || null);
   const target = m === 'exit' ? null : (Number(v('target')) || null);
+  const trail = m === 'exit' ? null : (Number(v('trail')) || null);
   const msg = document.getElementById('ovmsg-' + id);
+  if (trail != null && (trail <= 0 || trail > 90)) {
+    msg.innerHTML = '<b class="bad">the trailing floor must be between 0.5% and 90%</b>';
+    return;
+  }
   if (!entry) { msg.innerHTML = '<b class="bad">an entry price is required</b>'; return; }
   if (m !== 'exit' && !stop) {
     msg.innerHTML = `<b class="bad">${m === 'buy' ? 'a buy' : 'a short'} needs a stop</b>`;
@@ -542,13 +550,15 @@ async function override(id) {
   const what = m === 'exit' ? `an EXIT (sell what the desk holds) at ${entry}`
     : `a ${m === 'short' ? 'SHORT' : 'BUY'} at ${entry}, stop ${stop}` +
       ` (${(Math.abs(entry - stop) / entry * 100).toFixed(1)}% away)` +
-      (target ? `, target ${target}` : '');
+      (target ? `, target ${target}` : '') +
+      (trail ? `, trailing floor ${trail}%` : '');
   if (!confirm(`Overrule the desk on ${r.ticker}?\n\nThe arbiter returned ` +
     `PASS at conviction ${fmt(r.conviction)}. You are sending it to the ` +
     `approval gate as ${what}.\n\nNothing trades until you approve it there.`)) return;
   try {
     await api('/api/override', {work_item_id: id, direction: dir, entry,
-                                stop, target, note: v('note') || null});
+                                stop, target, trail_pct: trail,
+                                note: v('note') || null});
     Object.keys(FORM).forEach(k => { if (k.endsWith('-' + id)) delete FORM[k]; });
     toast('sent to approval ✓');
   } catch (e) { msg.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }

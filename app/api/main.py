@@ -53,6 +53,8 @@ class OverrideBody(BaseModel):
     # desk holds needs none (desk.override decides which it is)
     stop: float | None = Field(default=None, gt=0)
     target: float | None = Field(default=None, gt=0)
+    # the trailing floor % the approval card starts with (ignored on an exit)
+    trail_pct: float | None = Field(default=None, gt=0, le=90)
     note: str | None = None
     actor: str
 
@@ -252,7 +254,8 @@ def create_app(desk, conn, secret: str, *, clock=time.time,
         try:
             wi = desk.override(body.work_item_id, direction=body.direction,
                                entry=body.entry, stop=body.stop,
-                               target=body.target, note=body.note)
+                               target=body.target, note=body.note,
+                               trail_pct=body.trail_pct)
         except ValidationError as e:
             # incoherent levels (a stop that is not a floor) — the guard doing
             # its job. Checked BEFORE ValueError: pydantic's error subclasses

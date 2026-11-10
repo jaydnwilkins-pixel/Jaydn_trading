@@ -49,10 +49,11 @@ Chat seam (voice/assistants integrate here):
 ## Tests
 
 ```sh
-tests/run.sh          # 74 offline tests, <7s: accounting (exact micro-unit
-                      # money), graph structure + interrupt/resume,
+tests/run.sh          # ~780 offline tests, ~2 min: accounting (exact
+                      # micro-unit money), graph structure + interrupt/resume,
                       # authorization (403/409/410), providers, sessions,
-                      # executor/custodian/watcher, dashboards HTTP
+                      # executor/custodian/watcher, protective legs, the
+                      # built-in sim's stops, Telegram, dashboards HTTP
 ```
 
 Live smoke tests activate automatically when the services are running.
@@ -71,6 +72,25 @@ bin/ronathan stop [--graceful]     # pause schedules, drain work in flight,
 bin/ronathan restart [--kill]
 bin/ronathan status                # what's running, what's in flight
 ```
+
+**Telegram.** Ronathan has its own bot. `etc/ronathan.env` sets
+`RONATHAN_TELEGRAM_ENV=etc/telegram.env` (gitignored, mode 600):
+`TELEGRAM_BOT_TOKEN` from @BotFather, `TELEGRAM_CHAT_ID` = your user id
+(message the bot `/id`), `TELEGRAM_POLL=1` so the dashboards process reads
+button taps itself (`app/telegram_bot.py`) instead of relying on Bob's relay.
+Both files are re-read every pass — no restart needed after editing them.
+`bin/saxo test-alert` checks delivery.
+From the bot (owner only, private chat) you can also **start** trades:
+`/analyze TICKER [EXCHANGE]`, `/buy TICKER [EXCHANGE] [SIZE]`,
+`/sell TICKER [all|half|QTY]`, `/positions`, `/orders`, `/floor [TICKER] [PCT]`
+(`app/telegram_commands.py`). `/buy … trail=10` sets the trailing alert; the
+Telegram card has alert buttons (5/8/12/15% + the suggestion), retries too.
+The card offers share counts (sized at the price the order really fills at)
+and approves exactly those shares, as the dashboard card does.
+Every one ends at the approval gate — the card still needs ✔ (and LIVE for
+real money); `/sell` never shorts; an `/orders` cancel takes two taps.
+`/floor` changes a held position's trailing alert — an alert that starts a
+sell review, never a sale (Portfolio → Trailing alert → Edit does the same).
 
 Resetting the book (`bin/ronathan-reset`) is a separate, deliberately harder
 to reach command — not part of the daily-use script.
@@ -136,8 +156,12 @@ tests/            six layers per DESIGN.md §18
 
 ## Current limitations
 
-- Broker adapters run against the in-process paper sim; the MCP configs for
-  alpaca/saxo/moomoo are in `app/tools/brokers.py` and activate when
-  credentials exist.
+- Saxo SIM is a real venue (`SAXO_SIM_EXECUTION=enabled`); the alpaca and
+  moomoo accounts, and SGX on saxo-paper, run on Ronathan's built-in paper
+  sim. The sim holds each buy's stop-loss / take-profit as resting orders
+  (kept in desk.db `sim_orders`) and the custodian fills them against the
+  live price every 5 minutes while the market is open — a fast fall can
+  sell below the stop. The MCP configs for alpaca/saxo/moomoo are in
+  `app/tools/brokers.py`.
 - Yahoo endpoints are unofficial: occasional 429s are retried once, then
   surfaced honestly.

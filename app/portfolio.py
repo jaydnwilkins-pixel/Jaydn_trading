@@ -131,6 +131,8 @@ def levels_for(conn, position, fills, fx=None) -> dict:
             out["alert_rule"] = (f"trailing {'+' if short else '−'}"
                                  f"{alert['threshold']:.0f}% of {ref:.2f}")
             out["alert_peak"] = alert["peak_base"]
+            out["alert_pct"] = float(alert["threshold"])
+            out["alert_ref"] = ref        # best price since bought (native)
     return out
 
 

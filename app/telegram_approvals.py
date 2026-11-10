@@ -52,6 +52,9 @@ SGT = ZoneInfo("Asia/Singapore")
 CB_PREFIX = "cl"
 DEFAULT_SIZES = (500, 1000, 2000)
 DEFAULT_TRAIL_PCT = 8
+# trailing-floor buttons on a buy card (and a refused buy's retry); the
+# trade's own suggestion, e.g. from /buy … trail=10, is added to these
+FLOOR_CHOICES = (5, 8, 12, 15)
 LIVE_WINDOW_S = 120
 # A price trigger in "auto" mode creates its card and approves it itself a
 # moment later (a 'pre_approved' event, then thesis_action). Cards from a
@@ -215,7 +218,7 @@ def is_trigger_card(conn, row):
 
 
 def trigger_rule(conn, wi):
-    """'Buy 50 STVN when price ≤ 5.00 (limit 5.00) — fired at 4.98' for a
+    """'Buy 50 STVN when price ≤ 5.00 (purchase price 5.00) — fired at 4.98' for a
     card a price trigger created, else None."""
     t = trigger_row(conn, wi)
     if t is None:
@@ -311,8 +314,8 @@ def accounts(conn, env, live_armed):
             label = f"Saxo SIM {env.get('SAXO_SIM_ACCOUNT_ID') or ''}".strip()
             short, kind = "Saxo SIM", "paper"
         else:
-            label = f"{a['broker']} built-in sim"
-            short, kind = f"{a['broker']} sim", "paper"
+            label = f"Ronathan sim · {a['broker']} (simulated, not a broker)"
+            short, kind = f"Ronathan sim ({a['broker']})", "simulated"
         out.append({"id": a["id"], "broker": a["broker"], "label": label,
                     "short": short, "kind": kind, "live": live,
                     "ccy": a["base_currency"],
@@ -418,9 +421,65 @@ def gather(conn, market, wi_row, env, *, clock=time.time, phase="approval",
     return f
 
 
-def ref_price(f):
+def limit_price(f):
+    """The purchase (buy) or sale (sell) price the trade carries."""
     th = f["thesis"]
-    return th.get("entry_high") or th.get("entry_low") or f.get("price")
+    return th.get("entry_high") or th.get("entry_low")
+
+
+def fill_price(f):
+    """Where the order really fills: a buy whose purchase price is above
+    the market (a sell whose sale price is below it) fills at once, at about
+    the market — so shares, cost and the stop-loss are measured from there,
+    as on the dashboard card."""
+    lim, live = limit_price(f), f.get("price")
+    if lim is None:
+        return live
+    if live is None:
+        return lim
+    return min(lim, live) if f.get("side") == "buy" else max(lim, live)
+
+
+def ref_price(f):
+    return fill_price(f)
+
+
+def worst_price(f):
+    """What the cash check counts a buy's share at: the worse of the
+    purchase price and the live price (execution reserves the same)."""
+    vals = [v for v in (limit_price(f), f.get("price")) if v]
+    return max(vals) if vals else None
+
+
+def fills_now(f):
+    lim, live = limit_price(f), f.get("price")
+    if lim is None or live is None:
+        return False
+    return live < lim if f.get("side") == "buy" else live > lim
+
+
+def level_problems(f):
+    """A stop-loss / take-profit on the wrong side of where the order fills
+    would trigger straight away; the desk refuses it before sending. Shown
+    on the card so it is fixed on the dashboard rather than tapped."""
+    th, side = f["thesis"], f.get("side")
+    fp = fill_price(f)
+    exit_ = side == "sell" and sum((f.get("held") or {}).values()) > 0
+    if not fp or side not in ("buy", "sell") or exit_:
+        return []
+    buy = side == "buy"
+    stop, tgt = th.get("stop_loss"), th.get("take_profit")
+    at = (f"the current price, where it fills ({num(fp)})" if fills_now(f)
+          else f"the {'purchase' if buy else 'sale'} price ({num(fp)})")
+    out = []
+    if stop and (stop >= fp if buy else stop <= fp):
+        out.append(f"The stop-loss {num(stop)} is not {'below' if buy else 'above'}"
+                   f" {at} — it would {'sell' if buy else 'buy back'} straight"
+                   " away. The desk will refuse it; change it on Approvals.")
+    if tgt and (tgt <= fp if buy else tgt >= fp):
+        out.append(f"The take-profit {num(tgt)} is not {'above' if buy else 'below'}"
+                   f" {at}. The desk will refuse it; change it on Approvals.")
+    return out
 
 
 # ── message ───────────────────────────────────────────────────────────────
@@ -471,7 +530,7 @@ def build_message(f, opts, base_url):
                      "</code>")
         what = approved_what(f, ap)
         lines.append(f"<i>You approved:</i> {h(what)} on {h(ap.get('broker'))},"
-                     f" trailing floor {h(ap.get('trail_pct') or '—')}% ·"
+                     f" trailing alert {h(ap.get('trail_pct') or '—')}% ·"
                      f" attempts {h(fl['attempts'])}")
         lines.append("")
 
@@ -487,25 +546,33 @@ def build_message(f, opts, base_url):
                  + (f" ({h(spct(f['change_pct']))} today)"
                     if f.get("change_pct") is not None else ""))
     ref = ref_price(f)
-    el, eh = th.get("entry_low"), th.get("entry_high")
-    if el or eh:
-        rng = num(el) if el == eh or not eh else f"{num(el)}–{num(eh)}"
-        lines.append(f"<b>Entry:</b> {h(rng)} · limit {h(num(eh or el))}"
-                     + (f" ({h(spct(pct(eh or el, price)))} vs last)"
-                        if price else ""))
+    lim = limit_price(f)
+    if lim:
+        word = "Purchase price" if side == "buy" else "Sale price"
+        if fills_now(f):
+            how = (f" — {'above' if side == 'buy' else 'below'} the current"
+                   f" price, so it fills straight away at about {num(price)}")
+        elif price:
+            how = (f" ({spct(pct(lim, price))} vs now — waits for that price"
+                   " or better)")
+        else:
+            how = ""
+        lines.append(f"<b>{word}:</b> {h(num(lim))}{h(how)}")
     stop, tgt = th.get("stop_loss"), th.get("take_profit")
     if stop or tgt:
         parts = []
         if stop:
-            parts.append(f"<b>Stop:</b> {h(num(stop))} ({h(spct(pct(stop, ref)))})")
+            parts.append(f"<b>Stop-loss:</b> {h(num(stop))} ({h(spct(pct(stop, ref)))})")
         if tgt:
-            parts.append(f"<b>Target:</b> {h(num(tgt))} ({h(spct(pct(tgt, ref)))})")
+            parts.append(f"<b>Take-profit:</b> {h(num(tgt))} ({h(spct(pct(tgt, ref)))})")
         lines.append(" · ".join(parts))
     if stop and tgt and ref:
         risk = (ref - stop) if side == "buy" else (stop - ref)
         reward = (tgt - ref) if side == "buy" else (ref - tgt)
         if risk > 0:
-            lines.append(f"<b>Reward:risk</b> {h(num(reward / risk, 1))} : 1")
+            lines.append(f"<b>Reward : risk</b> {h(num(reward / risk, 1))} : 1")
+    for msg in level_problems(f):
+        lines.append(f"⚠ <b>{h(msg)}</b>")
 
     conds = [c for c in (th.get("conditions") or []) if isinstance(c, str)]
     if conds:
@@ -542,21 +609,38 @@ def build_message(f, opts, base_url):
                      f" · free cash {h(num(acct['cash'], 0))} {h(acct['ccy'])}")
     if f["phase"] == "approval" and acct:
         if side == "buy":
-            sug = f.get("suggested")
-            size = sug or 1000
-            sh, cost = estimate(f, acct, size)
-            lines.append(f"<b>{'Suggested size' if sug else 'Typical size'}:"
-                         f"</b> {h(num(size, 0))} {h(acct['ccy'])} → "
-                         f"{h(qty_str(sh))} sh ≈ {h(num(cost))} {h(acct['ccy'])}"
-                         + (" (whole shares)" if acct["whole"] else ""))
-            if not opts.get("sizes"):
+            ch = buy_choices(f, acct, opts)
+            if ch:
+                # the suggestion, else the middle of the offered sizes
+                c = next((x for x in ch if x["label"] == "Suggested"),
+                         ch[len(ch) // 2])
+                lines.append(f"<b>{h(c['label'])}:</b> {h(qty_str(c['sh']))}"
+                             f" shares ≈ {h(num(c['cost']))} {h(acct['ccy'])}"
+                             + (" (whole shares)" if acct["whole"] else ""))
+                fp = fill_price(f)
+                if fp and (stop or tgt):
+                    risk = [f"most you can lose <b>−{h(num((fp - stop) * c['sh']))}"
+                            f" {h(f['ccy'])}</b>" if stop and stop < fp else None,
+                            f"you could make <b>+{h(num((tgt - fp) * c['sh']))}"
+                            f" {h(f['ccy'])}</b>" if tgt and tgt > fp else None]
+                    risk = [r for r in risk if r]
+                    if risk:
+                        lines.append("<i>For those shares:</i> " + " · ".join(risk))
+            else:
                 lines.append("⚠ No offered size fits this account's free cash"
                              " — top up or use the Approvals page.")
         elif side == "sell" and not held_total:
             lines.append("⚠ The desk holds none — this sell would open a SHORT."
                          " Decide that on the Approvals page.")
-        lines.append(f"<i>Trailing floor {h(num(f['trail_pct'], 1))}% · pick below —"
-                     " you confirm before anything is sent.</i>")
+        if floor_applies(f):
+            lines.append(f"<i>Trailing alert {h(pct_s(chosen_floor(f, opts)))}"
+                         " — the watcher alerts you if the price falls this far"
+                         " below its best since you bought; it never sells."
+                         " Pick the shares and the alert below; you confirm"
+                         " before anything is sent.</i>")
+        else:
+            lines.append("<i>Pick below — you confirm before anything is "
+                         "sent.</i>")
     lines.append(f"<i>As of {h(sgt(f['now']))} · {h(f['wi'])}</i>")
     return _fit("\n".join(lines))
 
@@ -573,12 +657,15 @@ def _fit(text):
 
 
 def approved_what(f, ap):
-    """'1,000 USD' / '12 sh' — what the human approved on a refused trade."""
+    """'12 shares' / '1,000 USD' — what the human approved on a refused
+    trade (the shares when the approval named them)."""
+    if ap.get("qty"):
+        return f"{qty_str(float(ap['qty']))} shares"
     if ap.get("size_base"):
         ccy = next((a["ccy"] for a in f.get("accounts") or []
                     if a["broker"] == ap.get("broker")), "")
         return f"{num(ap['size_base'], 0)} {ccy}".strip()
-    return f"{qty_str(float(ap.get('qty') or 0))} sh"
+    return "—"
 
 
 def plain_refusal(err):
@@ -607,7 +694,8 @@ def selected_account(f, opts):
 
 
 def estimate(f, acct, size_base):
-    """(shares, est. cost in account ccy) for a buy of `size_base`."""
+    """(shares, est. cost in account ccy) for a buy of `size_base`, counted
+    at the price it fills at (as on the dashboard card)."""
     ref = ref_price(f)
     rate = (f.get("fx") or {}).get(acct["ccy"])
     if not ref or not rate:
@@ -615,6 +703,47 @@ def estimate(f, acct, size_base):
     px = float(ref) * rate
     sh = shares_for(float(size_base), px, acct["whole"], f.get("lot", 1))
     return sh, sh * px
+
+
+def reserve_for(f, acct, sh):
+    """The cash the approval asks to hold for `sh` shares: at the worse of
+    the purchase price and the live price (account currency)."""
+    wp = worst_price(f)
+    rate = (f.get("fx") or {}).get(acct["ccy"])
+    return round(sh * wp * rate, 2) if wp and rate else None
+
+
+def buy_choices(f, acct, opts):
+    """The share counts a buy card offers: [{label, sh, cost, reserve}].
+    A suggestion that named SHARES offers them (and half); otherwise the
+    amounts in opts['sizes'] become share counts at the fill price. A
+    choice whose cash reserve does not fit the account is dropped."""
+    lot = f.get("lot", 1)
+    rate = (f.get("fx") or {}).get(acct["ccy"])
+    fp = fill_price(f)
+    out, seen = [], set()
+
+    def add(label, sh):
+        if sh <= 0 or sh in seen or not fp or not rate:
+            return
+        res = reserve_for(f, acct, sh)
+        if res is None or res > acct["cash"] + 1e-9:
+            return
+        seen.add(sh)
+        out.append({"label": label, "sh": sh, "cost": sh * fp * rate,
+                    "reserve": res})
+    q = (f.get("suggestion") or {}).get("qty")
+    if q:
+        q = float(q)
+        add("Suggested", q)
+        half = (math.floor(q / 2 / lot) * lot if lot > 1 else
+                math.floor(q / 2) if acct["whole"] else math.floor(q * 5) / 10)
+        add("Half", float(half))
+    for s in ([] if q else (opts or {}).get("sizes") or []):
+        sh, _ = estimate(f, acct, s)
+        add("Suggested" if s == f.get("suggested") else
+            f"About {num(s, 0)} {acct['ccy']}", sh)
+    return out
 
 
 def _num_or(v):
@@ -673,6 +802,35 @@ def size_choices(f, acct):
     return [s for s in sizes if s and s <= acct["cash"] + 1e-9] or []
 
 
+def floor_applies(f):
+    """A trailing floor guards a LONG position, so it is chosen on a buy —
+    a new one or a refused one being retried. (A sell is an exit, or a
+    short decided on the Approvals page.)"""
+    return f.get("side") == "buy"
+
+
+def initial_floor(f):
+    if f.get("phase") == "failed":
+        ap = (f.get("failed") or {}).get("approval") or {}
+        v = _num_or(ap.get("trail_pct"))
+        if v:
+            return v
+    return float(f.get("trail_pct") or DEFAULT_TRAIL_PCT)
+
+
+def floor_choices(f):
+    return sorted({float(x) for x in FLOOR_CHOICES} | {initial_floor(f)})
+
+
+def chosen_floor(f, opts):
+    v = _num_or((opts or {}).get("trail"))
+    return v if v else initial_floor(f)
+
+
+def pct_s(v):
+    return f"{float(v):g}%"
+
+
 # ── keyboard ──────────────────────────────────────────────────────────────
 def cb(nid, op, arg=""):
     data = f"{CB_PREFIX}:{nid}:{op}" + (f":{arg}" if arg != "" else "")
@@ -689,23 +847,33 @@ def parse_callback(data):
 
 def build_keyboard(nid, f, opts, base_url):
     rows = []
+    floor_row = []
+    if floor_applies(f):
+        cur = chosen_floor(f, opts)
+        floor_row = [{"text": ("✓ " if v == cur else "") + "alert " + pct_s(v),
+                      "callback_data": cb(nid, "tf", f"{v:g}")}
+                     for v in floor_choices(f)]
     if f["phase"] == "failed":
-        rows.append([{"text": "🔁 Retry same order", "callback_data": cb(nid, "rt")},
+        rows.append([{"text": "🔁 Retry same order",
+                      "callback_data": cb(nid, "rt")},
                      {"text": "✖ Cancel trade", "callback_data": cb(nid, "cx")}])
+        if floor_row:
+            rows.append(floor_row)
     else:
         acct = selected_account(f, opts)
         if acct:
             if f["side"] == "buy":
-                row = []
-                for i, s in enumerate(opts.get("sizes") or []):
-                    sh, cost = estimate(f, acct, s)
-                    row.append({"text": f"{num(s, 0)} {acct['ccy']} ≈{qty_str(sh)} sh",
-                                "callback_data": cb(nid, "s", i)})
+                row = [{"text": f"{qty_str(c['sh'])} sh ≈ {num(c['cost'], 0)}"
+                                f" {acct['ccy']}",
+                        "callback_data": cb(nid, "s", i)}
+                       for i, c in enumerate(buy_choices(f, acct, opts))]
                 if row:
                     rows.append(row)
+                if floor_row:
+                    rows.append(floor_row)
             elif f["side"] == "sell":
-                px = (_num_or(f["thesis"].get("entry_high")) or f.get("price")
-                      or 0) * ((f.get("fx") or {}).get(acct["ccy"]) or 0)
+                px = (fill_price(f) or 0) * ((f.get("fx") or {}).get(
+                    acct["ccy"]) or 0)
                 row = [{"text": f"{lab} ({qty_str(q)} sh" + (
                             f" ≈ {num(q * px, 0)} {acct['ccy']})" if px
                             else ")"),
@@ -816,6 +984,8 @@ def send_notice(conn, market, tg, wi_row, key, chat_id, env, *, clock,
                phase="failed" if failed else "approval", failed=failed)
     opts = {"accounts": f["accounts"], "acct": 0, "pending": None}
     opts["acct"] = initial_account(f)
+    if floor_applies(f):
+        opts["trail"] = initial_floor(f)
     if f["accounts"]:
         opts["sizes"] = size_choices(f, f["accounts"][opts["acct"]])
     nid = conn.execute("SELECT id FROM telegram_notices WHERE work_item_id=?"
@@ -940,6 +1110,15 @@ def push_once(conn, market, tg, chat_id, env, *, clock=time.time,
     return sent
 
 
+_WAKE = threading.Event()
+
+
+def nudge():
+    """Push now instead of at the next 20 s tick (a Telegram /buy just put a
+    trade on the gate). Safe to call from any thread."""
+    _WAKE.set()
+
+
 def run_pusher(conn, market, env, *, interval=20, clock=time.time):
     """Thread body for the dashboards process. Quiet when Telegram is not
     configured; re-reads ~/bob/telegram.env each pass."""
@@ -957,7 +1136,20 @@ def run_pusher(conn, market, env, *, interval=20, clock=time.time):
                 warned = True
         except Exception:                      # noqa: BLE001 — keep looping
             traceback.print_exc()
-        time.sleep(interval)
+        # a manual trade is 'running' for a moment (prepare) before it
+        # reaches the gate: after a nudge, look again a few times quickly
+        if _WAKE.wait(interval):
+            _WAKE.clear()
+            for _ in range(6):
+                time.sleep(2)
+                try:
+                    st = alerts.telegram_settings()
+                    if st["token"] and st["approver_id"]:
+                        if push_once(conn, market, Telegram(st["token"]),
+                                     st["approver_id"], env, clock=clock):
+                            break
+                except Exception:              # noqa: BLE001
+                    traceback.print_exc()
 
 
 def start_pusher_thread(conn, market, env, *, interval=20):
@@ -1021,6 +1213,8 @@ def handle_decision(conn, market, body, resume_post, *, env, clock=time.time,
                 return _reply(400, "A refused trade retries on the account "
                                    "you approved — change it on Approvals.")
             return _op_account(conn, tg, n, f, opts, arg, env, clock)
+        if op == "tf":
+            return _op_floor(conn, tg, n, f, opts, arg, env, clock)
         if op == "bk":
             opts["pending"] = None
             _save_opts(conn, nid, opts, clock)
@@ -1082,6 +1276,26 @@ def _op_account(conn, tg, n, f, opts, arg, env, clock):
     return _reply(200, f"Account: {a['label']}", ok=True)
 
 
+def _op_floor(conn, tg, n, f, opts, arg, env, clock):
+    """Pick the trailing floor; like an account switch, nothing is sent —
+    a pending confirmation is dropped so ✔ always shows the floor it uses."""
+    f = {**f, "phase": _phase(n)}
+    if not floor_applies(f):
+        return _reply(400, "A trailing alert applies to buys only.")
+    try:
+        v = float(arg)
+    except (TypeError, ValueError):
+        return _reply(400, "Unknown trailing alert.")
+    if v not in floor_choices(f):
+        return _reply(400, "Unknown trailing alert.")
+    opts["trail"], opts["pending"] = v, None
+    _save_opts(conn, n["id"], opts, clock)
+    _restore(tg, n, f, opts, env,
+             note=f"<b>Trailing alert:</b> {h(pct_s(v))} — alerts you when the"
+                  f" price falls {h(pct_s(v))} below its best since you bought")
+    return _reply(200, f"Trailing alert: {pct_s(v)}", ok=True)
+
+
 def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
     """Build the confirmation screen; nothing is submitted here."""
     phase = _phase(n)
@@ -1089,44 +1303,59 @@ def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
     th = f.get("thesis") or {}
     side, tk = f.get("side", "?"), f.get("ticker")
     lim = th.get("entry_high") or th.get("entry_low")
-    at = f" at limit {num(lim)} {f.get('ccy', '')}" if lim else ""
+    word = "purchase" if side == "buy" else "sale"
+    at = ""
+    if lim:
+        at = f", {word} price {num(lim)} {f.get('ccy', '')}".rstrip()
+        if fills_now(f):
+            at += f" (fills now at about {num(f.get('price'))})"
     p = {"op": None, "nonce": secrets.token_hex(4), "live": False}
     if phase == "approval" and op == "s":
         if acct is None:
             return _reply(400, "No account available.")
         p.update(op="approve", broker=acct["broker"],
-                 trail_pct=f.get("trail_pct") or DEFAULT_TRAIL_PCT,
+                 trail_pct=(chosen_floor({**f, "phase": phase}, opts)
+                            if side == "buy" else None),
                  live=bool(acct.get("live")))
         try:
             i = int(arg)
         except ValueError:
             return _reply(400, "Unknown size.")
         if side == "buy":
-            sizes = opts.get("sizes") or []
-            if not 0 <= i < len(sizes):
+            probs = level_problems(f)
+            if probs:
+                return _reply(400, probs[0], alert=True)
+            ch = buy_choices(f, acct, opts)
+            if not 0 <= i < len(ch):
                 return _reply(400, "Unknown size.")
-            sh, cost = estimate(f, acct, sizes[i])
-            if sh <= 0:
-                return _reply(400, "That size buys 0 shares at this price — "
-                                   "pick a larger one.", alert=True)
-            p["size_base"] = sizes[i]
-            what = (f"BUY {qty_str(sh)} {tk} ≈ {num(cost)} {acct['ccy']}{at}"
-                    f" (size {num(sizes[i], 0)} {acct['ccy']})")
+            c = ch[i]
+            # the shares are what gets bought (as on the dashboard card);
+            # size_base is the cash the gate checks, at the worse price
+            p["qty"], p["size_base"] = c["sh"], c["reserve"]
+            stop, tgt = th.get("stop_loss"), th.get("take_profit")
+            what = (f"BUY {qty_str(c['sh'])} {tk} ≈ {num(c['cost'])}"
+                    f" {acct['ccy']}{at}"
+                    + (f", stop-loss {num(stop)}" if stop else "")
+                    + (f", take-profit {num(tgt)}" if tgt else ""))
         elif side == "sell":
+            probs = level_problems(f)
+            if probs:
+                return _reply(400, probs[0], alert=True)
             ch = sell_choices(f, acct)
             if not 0 <= i < len(ch):
                 return _reply(400, "Unknown quantity.")
             lab, q = ch[i]
             p["qty"] = q
-            px = (lim or f.get("price") or 0) * ((f.get("fx") or {}).get(
+            px = (fill_price(f) or 0) * ((f.get("fx") or {}).get(
                 acct["ccy"]) or 0)
             what = (f"SELL {qty_str(q)} {tk} ({lab.lower()})"
                     f" ≈ {num(q * px)} {acct['ccy']}{at}")
         else:
             return _reply(400, "Nothing to size on this trade.")
         p["text"] = (f"<b>Confirm:</b> {h(what)} on {h(acct['label'])} — "
-                     f"<b>{h(acct['kind'])}</b>? Trailing floor "
-                     f"{h(num(p['trail_pct'], 1))}%.")
+                     f"<b>{h(acct['kind'])}</b>?"
+                     + (f" Trailing alert <b>{h(pct_s(p['trail_pct']))}</b>."
+                        if p["trail_pct"] else ""))
         ok_label = "✔ Place it"
     elif phase == "approval" and op == "rj":
         p.update(op="reject")
@@ -1137,9 +1366,14 @@ def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
         ap = ((f.get("failed") or {}).get("approval") or {})
         live = ap.get("broker") == "saxo_live"
         p.update(op="retry", live=live)
+        fl_on = floor_applies({**f, "phase": phase})
+        if fl_on:
+            p["trail_pct"] = chosen_floor({**f, "phase": phase}, opts)
         what = approved_what(f, ap)
         p["text"] = (f"<b>Retry</b> {h(side.upper())} {h(tk)} — the same order"
                      f" ({h(what)} on {h(ap.get('broker'))})"
+                     + (f", trailing alert <b>{h(pct_s(p['trail_pct']))}</b>"
+                        if fl_on else "")
                      + (" — <b>REAL MONEY</b>" if live else " — paper")
                      + "? Every check runs again.")
         ok_label = "✔ Retry it"
@@ -1220,14 +1454,15 @@ def _execute(conn, tg, n, wi, f, opts, p, resume_post, *, from_id,
             payload = {"work_item_id": wi["id"], "action": op,
                        "token": wi["approval_token"] or ""}
             if op == "approve":
-                payload.update(broker=p["broker"], trail_pct=p.get("trail_pct")
-                               or DEFAULT_TRAIL_PCT,
+                payload.update(broker=p["broker"], trail_pct=p.get("trail_pct"),
                                size_base=p.get("size_base"), qty=p.get("qty"),
                                confirm_live=confirm_live)
             approvals.thesis_action(conn, payload, post, clock=clock)
         elif op == "retry":
-            approvals.retry_failed(conn, wi["id"], post,
-                                   confirm_live=confirm_live)
+            approvals.retry_failed(
+                conn, wi["id"], post, confirm_live=confirm_live,
+                changes=({"trail_pct": p["trail_pct"]}
+                         if p.get("trail_pct") else None))
         elif op == "cancel":
             approvals.cancel_failed(conn, wi["id"], clock=clock)
             _log_event(conn, wi, op, from_id, p, clock)   # item now terminal
@@ -1271,9 +1506,13 @@ def _execute(conn, tg, n, wi, f, opts, p, resume_post, *, from_id,
 # ── sample (inert) message, for checking rendering on a phone ─────────────
 def sample_keyboard(base_url):
     s = "cl:sample"
-    return [[{"text": "500 USD ≈4 sh", "callback_data": s},
-             {"text": "1,000 USD ≈9 sh", "callback_data": s},
-             {"text": "2,000 USD ≈19 sh", "callback_data": s}],
+    return [[{"text": "4 sh ≈ 412 USD", "callback_data": s},
+             {"text": "9 sh ≈ 928 USD", "callback_data": s},
+             {"text": "19 sh ≈ 1,959 USD", "callback_data": s}],
+            [{"text": "alert 5%", "callback_data": s},
+             {"text": "✓ alert 8%", "callback_data": s},
+             {"text": "alert 12%", "callback_data": s},
+             {"text": "alert 15%", "callback_data": s}],
             [{"text": "✓ Saxo SIM", "callback_data": s},
              {"text": "alpaca sim", "callback_data": s},
              {"text": "moomoo sim", "callback_data": s}],

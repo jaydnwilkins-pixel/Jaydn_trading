@@ -496,9 +496,9 @@ class SaxoSimWithLocalMarkets:
     symbol on the way in and by order id after that (the local sim's ids
     start "sim-"; Saxo's are numeric). A locally simulated order behaves
     exactly like the Alpaca/moomoo paper books: it fills at its limit on
-    placement, keeps no resting stop/target (the watcher's trailing alert is
-    the backstop) and does not exist at Saxo — so Saxo's working orders and
-    balances never include it."""
+    placement, keeps its stop-loss / take-profit as resting orders of the
+    built-in sim (checked against the live price by the custodian) and does
+    not exist at Saxo — so Saxo's balances never include it."""
 
     def __init__(self, venue, local, *, suffixes=SIM_LOCAL_SUFFIXES):
         self.venue, self.local = venue, local
@@ -525,8 +525,10 @@ class SaxoSimWithLocalMarkets:
     def place_oco(self, *, symbol, side, qty, stop_loss=None,
                   take_profit=None, client_order_id=None) -> PlacedOrder:
         if self.is_local(symbol):
-            return PlacedOrder("", "rejected", "this market is simulated "
-                               "locally — it keeps no resting stop/target")
+            return self.local.place_oco(symbol=symbol, side=side, qty=qty,
+                                        stop_loss=stop_loss,
+                                        take_profit=take_profit,
+                                        client_order_id=client_order_id)
         return self.venue.place_oco(symbol=symbol, side=side, qty=qty,
                                     stop_loss=stop_loss,
                                     take_profit=take_profit,
@@ -538,7 +540,8 @@ class SaxoSimWithLocalMarkets:
             return {"ok": None, "simulated": True, "note":
                     "Saxo's practice account offers these shares only as "
                     "CFDs, so the desk simulates this order itself: it fills "
-                    "at your limit and never reaches Saxo"}
+                    "at your limit and never reaches Saxo; the built-in sim "
+                    "holds its stop-loss / take-profit"}
         return self.venue.precheck(symbol=symbol, side=side, qty=qty,
                                    limit=limit, stop_loss=stop_loss,
                                    take_profit=take_profit)
@@ -551,11 +554,22 @@ class SaxoSimWithLocalMarkets:
 
     def related_order_ids(self, order_id) -> list:
         if self._owner(order_id) is self.local:
-            return []
+            return self.local.related_order_ids(order_id)
         return self.venue.related_order_ids(order_id)
 
     def working_orders(self) -> list:
-        return self.venue.working_orders()
+        # the locally simulated legs are working orders of this venue too
+        local = self.local.list_working() if hasattr(
+            self.local, "list_working") else []
+        return self.venue.working_orders() + local
+
+    # the built-in sim's resting stops / take-profits (custodian)
+    def resting(self) -> list:
+        return self.local.resting() if hasattr(self.local, "resting") else []
+
+    def check_triggers(self, prices) -> list:
+        return self.local.check_triggers(prices) if hasattr(
+            self.local, "check_triggers") else []
 
     def resolve(self, symbol):
         return self.venue.resolve(symbol)

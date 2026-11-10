@@ -61,7 +61,9 @@ def build_world():
 
     market = build_market()
     narratives = Narratives(var / "narratives")
-    brokers = wiring.build_brokers(conn=conn)
+    # ronathan-api owns the built-in sims: their resting stop-loss /
+    # take-profit orders are kept in desk.db (sim_orders)
+    brokers = wiring.build_brokers(conn=conn, sim_store=True)
     deps = wiring.build_deps(conn, repo, narratives, market, brokers=brokers)
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
     serde = JsonPlusSerializer(allowed_msgpack_modules=[
@@ -89,7 +91,10 @@ def build_custodian(conn, repo, brokers, market, secret):
                      cal=sessions.load(conn) or None,
                      # an unprotected position reaches Jaydn on Telegram,
                      # not only as a flag on a dashboard tile (§11a)
-                     alert=alerts.send)
+                     alert=alerts.send,
+                     # the built-in sims' stop-loss / take-profit orders are
+                     # checked against the live price every run
+                     quote=market.quote)
 
 
 class FxUnavailable(RuntimeError):

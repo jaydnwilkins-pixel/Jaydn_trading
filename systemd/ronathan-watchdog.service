@@ -1,0 +1,11 @@
+[Unit]
+Description=Ronathan trading desk — restart a crashed service
+# ronathan.service is a one-shot wrapper, so systemd does not see a later
+# crash of ronathan-api or the dashboards. This runs `bin/ronathan watchdog`,
+# which starts whichever is missing — and does nothing at all after a
+# deliberate `bin/ronathan stop`.
+
+[Service]
+Type=oneshot
+WorkingDirectory=/mnt/projects/ronathan_trading
+ExecStart=/mnt/projects/ronathan_trading/bin/ronathan watchdog

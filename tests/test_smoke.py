@@ -1,10 +1,15 @@
-"""Live smoke (DESIGN.md §18 layer 6) — auto-skips when services are down.
-Start them with systemd (or by hand) and re-run to exercise for real."""
+"""Live smoke (DESIGN.md §18 layer 6) — OPT-IN: `RONATHAN_SMOKE=1 pytest
+tests/test_smoke.py`. These talk to the RUNNING desk (one of them sends
+Ronathan a real chat turn), so the default suite leaves them out; they used to
+run whenever the services happened to be up (REVIEW-2026-11-11 §3.7)."""
+import os
 import re
 from pathlib import Path
 
 import httpx
 import pytest
+
+OPTED_IN = bool(os.environ.get("RONATHAN_SMOKE"))
 
 
 def _dash_base():
@@ -24,6 +29,8 @@ DASH = _dash_base()
 
 
 def _up(url):
+    if not OPTED_IN:                # do not even probe the live desk
+        return False
     try:
         return httpx.get(url, timeout=3).status_code < 500
     except Exception:                              # noqa: BLE001
@@ -31,9 +38,9 @@ def _up(url):
 
 
 needs_api = pytest.mark.skipif(not _up("http://127.0.0.1:7798/status"),
-                               reason="ronathan-api not running")
+                               reason="set RONATHAN_SMOKE=1 and start ronathan-api")
 needs_dash = pytest.mark.skipif(not _up(f"{DASH}/api/overview"),
-                                reason="dashboards not running")
+                                reason="set RONATHAN_SMOKE=1 and start the dashboards")
 
 
 @needs_api

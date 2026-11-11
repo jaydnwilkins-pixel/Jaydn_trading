@@ -5,6 +5,9 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+import logging
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -171,8 +174,7 @@ def start_runs(desk, jobs):
                               lot_size=100 if ex == "SGX" else 1)
             wi = desk.start_run(inst, trigger=trigger)
         except (ValueError, KeyError) as e:
-            print(f"skipped run for {ticker!r} on {ex!r}: {e}",
-                  file=sys.stderr)
+            log.warning("skipped run for %r on %r: %s", ticker, ex, e)
             skipped.append({"ticker": str(ticker)[:40],
                             "exchange": str(ex)[:20], "error": str(e)[:200]})
             continue
@@ -305,10 +307,11 @@ def main():
     from .main import create_app
 
     load_env()
+    from .. import logsetup
+    logsetup.configure("ronathan-api")
     secret = os.environ.get("RONATHAN_INTERNAL_SECRET", "")
     if not secret:
-        print("FATAL: RONATHAN_INTERNAL_SECRET not set in etc/ronathan.env",
-              file=sys.stderr)
+        log.critical("RONATHAN_INTERNAL_SECRET not set in etc/ronathan.env")
         sys.exit(2)
     conn, repo, desk, ronathan, brokers, market = build_world()
     custodian = build_custodian(conn, repo, brokers, market, secret)
@@ -333,7 +336,10 @@ def main():
                      agent_ask_handler=agent_ask_handler, brokers=brokers,
                      maintenance_runner=maintainer.run)
     _quiet_status_polls()
-    uvicorn.run(app, host="127.0.0.1", port=7798, log_level="info")
+    # log_config=None: uvicorn keeps its own loggers but writes through the
+    # desk's handler, so its lines carry timestamps like everything else
+    uvicorn.run(app, host="127.0.0.1", port=7798, log_level="info",
+                log_config=None)
 
 
 def _brief(result):

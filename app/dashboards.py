@@ -21,7 +21,6 @@ import select
 import socket
 import threading
 import time
-import traceback
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +34,10 @@ from .providers import health as provider_health
 from .providers import registry
 from .tools import tradingview
 from .tools.brokers import seed_mcps
+import logging
+from .logsetup import swallowed
+
+log = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
@@ -176,7 +179,9 @@ def background_loops(env) -> list:
                     "detail": "refreshes the Saxo sign-in every 10 min"
                               " and warns you (Telegram + desktop) before or"
                               " when it lapses · runs in ronathan-api"})
-    except Exception:                            # noqa: BLE001 — display only
+    except Exception as e:                       # noqa: BLE001 — display only
+        swallowed(log, "background-loops panel: Saxo keepalive block failed",
+                  e, every=600)
         pass
     try:
         from . import alerts
@@ -703,7 +708,9 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
                 if agent_sig is not None and sig != agent_sig:
                     _push({"kind": "agents"})
                 agent_sig = sig
-            except Exception:                    # noqa: BLE001
+            except Exception as e:               # noqa: BLE001
+                swallowed(log, "live-update poller failed",
+                          e, trace=True, every=600)
                 pass
 
     if sse_interval:
@@ -952,7 +959,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
             except (BrokenPipeError, ConnectionResetError):
                 return                           # client went away; not news
             except Exception as e:               # noqa: BLE001
-                traceback.print_exc()
+                log.exception("HTTP 500 on %s %s", self.command,
+                              self.path.split("?", 1)[0])
                 try:
                     self._send(500, {"error": str(e)})
                 except (BrokenPipeError, ConnectionResetError):
@@ -1274,7 +1282,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
                 except (BrokenPipeError, ConnectionResetError):
                     pass
             except Exception as e:               # noqa: BLE001
-                traceback.print_exc()
+                log.exception("HTTP 500 on %s %s", self.command,
+                              self.path.split("?", 1)[0])
                 try:
                     self._send(500, {"error": str(e)})
                 except (BrokenPipeError, ConnectionResetError):
@@ -1308,7 +1317,8 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
                 except (BrokenPipeError, ConnectionResetError):
                     pass
             except Exception as e:               # noqa: BLE001
-                traceback.print_exc()
+                log.exception("HTTP 500 on %s %s", self.command,
+                              self.path.split("?", 1)[0])
                 try:
                     self._send(500, {"error": str(e)})
                 except (BrokenPipeError, ConnectionResetError):
@@ -2535,7 +2545,9 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
                     "SELECT DISTINCT base_currency FROM broker_accounts"):
                 try:
                     fx[ccy] = float(market.fx(r["currency"] or ccy, ccy))
-                except Exception:               # noqa: BLE001 — hint only
+                except Exception as e:          # noqa: BLE001 — hint only
+                    swallowed(log, "override form: FX hint unavailable",
+                              e, every=600)
                     pass
             out["fx"] = fx          # 1 unit of the stock's ccy in each account ccy
             try:
@@ -3405,7 +3417,9 @@ def start_watcher_thread(conn, repo, market, *, api_base, interval=600,
                     minutes = json.loads(row["spec"]).get("minutes",
                                                           interval / 60)
                     enabled = bool(row["enabled"])
-            except Exception:                    # noqa: BLE001
+            except Exception as e:               # noqa: BLE001
+                swallowed(log, "watcher cadence could not be read; using the default",
+                          e, every=600)
                 pass
             try:
                 if enabled:
@@ -3423,7 +3437,7 @@ def start_watcher_thread(conn, repo, market, *, api_base, interval=600,
                             "market_closed": len(rep_.get("closed") or []),
                             "unpriced": len(rep_.get("unpriced") or [])})))
             except Exception:                    # noqa: BLE001
-                traceback.print_exc()
+                log.exception("watcher tick failed")
             time.sleep(max(60, minutes * 60))
 
     t = threading.Thread(target=loop, daemon=True, name="watcher")
@@ -3443,7 +3457,7 @@ def ensure_dash_key(env_path):
     with open(env_path, "a") as f:
         f.write(f"\nRONATHAN_DASHBOARD_KEY={key}\n")
     os.environ["RONATHAN_DASHBOARD_KEY"] = key
-    print(f"generated RONATHAN_DASHBOARD_KEY (see {env_path})")
+    log.warning("generated RONATHAN_DASHBOARD_KEY (see %s)", env_path)
     return key
 
 
@@ -3458,6 +3472,8 @@ def main():
     from .tools.market import build_market
 
     load_env()
+    from . import logsetup
+    logsetup.configure("ronathan-dashboards")
     var = API_ROOT / "var"
     conn = db.connect(var / "desk.db")
     db.init(conn)
@@ -3499,7 +3515,7 @@ def main():
                         narratives=Narratives(var / "narratives"),
                         env=os.environ, cal=cal, bind=bind,
                         allowed_hosts=allowed)
-    print(f"dashboards on http://{bind}:7797")
+    log.info("dashboards on http://%s:7797", bind)
     if bind not in ("127.0.0.1", "localhost"):
         import socket
         try:
@@ -3507,11 +3523,11 @@ def main():
             s.connect(("8.8.8.8", 80))          # no packet sent; reads the route
             lan = s.getsockname()[0]
             s.close()
-            print(f"  reachable on your network at http://{lan}:7797")
+            log.info("reachable on your network at http://%s:7797", lan)
         except OSError:
             pass
-        print("  anyone on this network can READ the desk; every POST "
-              "(runs, approvals, edits, cash) needs the dashboard key")
+        log.warning("anyone on this network can READ the desk; every POST "
+                    "(runs, approvals, edits, cash) needs the dashboard key")
     srv.serve_forever()
 
 

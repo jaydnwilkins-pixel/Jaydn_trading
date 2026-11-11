@@ -207,15 +207,16 @@ class Ronathan:
 
             from ..providers import claude_sdk
             row = registry.agent_row(self.conn, "ronathan_chat")
+            system = registry.render_prompt(row["system_prompt"])
             model = registry.model_for(self.conn, "ronathan_chat", env=self.env)
             tools = build_tools(self.conn, self.repo, self.desk, self.market)
             if claude_sdk.is_sdk(model):
                 # Max subscription: the SDK owns the tool loop
-                self._sdk_chat = (model, row["system_prompt"], tools)
+                self._sdk_chat = (model, system, tools)
                 self._agent = model
             else:
                 self._agent = create_agent(model=model, tools=tools,
-                                           system_prompt=row["system_prompt"])
+                                           system_prompt=system)
         return self._agent
 
     # a refusal by the model's safety filter, not a desk error. Once a long

@@ -1502,20 +1502,3 @@ def _execute(conn, tg, n, wi, f, opts, p, resume_post, *, from_id,
                         "reject": "Rejected.",
                         "retry": "Retry sent to the desk.",
                         "cancel": "Cancelled."}[op], ok=True)
-
-
-# ── sample (inert) message, for checking rendering on a phone ─────────────
-def sample_keyboard(base_url):
-    s = "cl:sample"
-    return [[{"text": "4 sh ≈ 412 USD", "callback_data": s},
-             {"text": "9 sh ≈ 928 USD", "callback_data": s},
-             {"text": "19 sh ≈ 1,959 USD", "callback_data": s}],
-            [{"text": "alert 5%", "callback_data": s},
-             {"text": "✓ alert 8%", "callback_data": s},
-             {"text": "alert 12%", "callback_data": s},
-             {"text": "alert 15%", "callback_data": s}],
-            [{"text": "✓ Saxo SIM", "callback_data": s},
-             {"text": "alpaca sim", "callback_data": s},
-             {"text": "moomoo sim", "callback_data": s}],
-            [{"text": "✖ Reject", "callback_data": s}],
-            [{"text": "Open Approvals ↗", "url": f"{base_url}/approvals"}]]

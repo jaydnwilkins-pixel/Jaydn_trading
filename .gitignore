@@ -12,3 +12,6 @@ voice/
 etc/saxo_*_token*
 # Ronathan's dedicated Telegram bot token — never committed
 etc/telegram.env
+
+# Claude Code agent worktrees and local launch configs
+.claude/

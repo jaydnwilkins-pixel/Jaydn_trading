@@ -32,6 +32,7 @@ from html import escape
 import httpx
 
 from . import exchanges, portfolio, telegram_approvals, watcher
+from .levels import _levels, quote_units
 from .tools.market import desk_ticker, normalize_price, yahoo_symbol
 
 log = logging.getLogger(__name__)
@@ -267,23 +268,19 @@ class Commands:
         return math.floor(v * f + 0.5) / f
 
     def _atr14(self, ticker, exchange, price=None):
+        """The typical daily move the suggested stop is sized from — the
+        SAME figure the Watchlist and the Approvals card use (levels._levels:
+        Wilder's ATR14 over six months of daily bars, pence turned to pounds
+        by quote_units). This had its own: a plain mean of the last 14
+        ranges over three months, so /buy suggested a different stop-loss
+        and take-profit from the pages for the same stock."""
         try:
-            c = self.market.chart(yahoo_symbol(ticker, exchange), "3mo", "1d")
+            c = self.market.chart(yahoo_symbol(ticker, exchange), "6mo", "1d")
         except Exception:                       # noqa: BLE001 — 8% fallback
             return None
-        H, L, C = c.get("high") or [], c.get("low") or [], c.get("close") or []
-        tr = [max(H[i] - L[i], abs(H[i] - C[i - 1]), abs(L[i] - C[i - 1]))
-              for i in range(1, len(C))
-              if None not in (H[i], L[i], C[i - 1])]
-        last = tr[-14:]
-        if len(last) < 5:
-            return None
-        atr = sum(last) / len(last)
-        # London bars come in pence while the price is in pounds
-        cl = next((x for x in reversed(C) if x), None)
-        if price and cl and 30 < cl / price < 300:
-            atr /= 100
-        return atr
+        lv = quote_units(_levels(c), price, probe="sma20") if price \
+            else _levels(c)
+        return (lv or {}).get("atr14") or None
 
     # ── /analyze ─────────────────────────────────────────────────────────
     def analyze(self, args):
@@ -614,9 +611,8 @@ class Commands:
     def finished_runs(self):
         """Telegram-started runs that ended without a card: [(wi, html)],
         each reported once (telegram_run_notices)."""
-        telegram_approvals.ensure_table(self.conn)
-        self.conn.execute("CREATE TABLE IF NOT EXISTS telegram_run_notices ("
-                          " work_item_id TEXT PRIMARY KEY, sent_at INTEGER)")
+        # both tables are in schema.sql: this ran two CREATE statements
+        # against desk.db on every poll, for as long as the bot ran
         since = int(self.clock()) - 2 * 86400
         out = []
         for w in self.conn.execute(

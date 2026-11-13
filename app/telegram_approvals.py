@@ -824,6 +824,34 @@ def pct_s(v):
 
 
 # ── keyboard ──────────────────────────────────────────────────────────────
+def size_arg(sh) -> str:
+    """A size button's argument: the SHARES it shows ("q9", "q0.5"). It was
+    the button's position in the row, and the row is worked out again from
+    the live price and free cash at every tap — so when a choice dropped out
+    or the counts moved, the "9 sh" button chose something else."""
+    return "q" + f"{float(sh):.4f}".rstrip("0").rstrip(".")
+
+
+def pick_size(arg, shares):
+    """Index into `shares` (the counts on offer now) for a tapped size
+    button, or None when that size is no longer offered. A bare number is a
+    card sent before buttons carried their shares: its position."""
+    arg = str(arg)
+    try:
+        if arg.startswith("q"):
+            want = float(arg[1:])
+            return next((i for i, s in enumerate(shares)
+                         if abs(float(s) - want) < 1e-6), None)
+        i = int(arg)
+    except ValueError:
+        return None
+    return i if 0 <= i < len(shares) else None
+
+
+SIZE_GONE = ("That size is no longer on offer — the price or your free cash "
+             "has changed. Open the card again for today's sizes.")
+
+
 def cb(nid, op, arg=""):
     data = f"{CB_PREFIX}:{nid}:{op}" + (f":{arg}" if arg != "" else "")
     assert len(data.encode()) <= 64, data
@@ -857,8 +885,8 @@ def build_keyboard(nid, f, opts, base_url):
             if f["side"] == "buy":
                 row = [{"text": f"{qty_str(c['sh'])} sh ≈ {num(c['cost'], 0)}"
                                 f" {acct['ccy']}",
-                        "callback_data": cb(nid, "s", i)}
-                       for i, c in enumerate(buy_choices(f, acct, opts))]
+                        "callback_data": cb(nid, "s", size_arg(c["sh"]))}
+                       for c in buy_choices(f, acct, opts)]
                 if row:
                     rows.append(row)
                 if floor_row:
@@ -869,8 +897,8 @@ def build_keyboard(nid, f, opts, base_url):
                 row = [{"text": f"{lab} ({qty_str(q)} sh" + (
                             f" ≈ {num(q * px, 0)} {acct['ccy']})" if px
                             else ")"),
-                        "callback_data": cb(nid, "s", i)}
-                       for i, (lab, q) in enumerate(sell_choices(f, acct))]
+                        "callback_data": cb(nid, "s", size_arg(q))}
+                       for lab, q in sell_choices(f, acct)]
                 if row:
                     rows.append(row)
         accts = opts.get("accounts") or []
@@ -1308,17 +1336,14 @@ def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
                  trail_pct=(chosen_floor({**f, "phase": phase}, opts)
                             if side == "buy" else None),
                  live=bool(acct.get("live")))
-        try:
-            i = int(arg)
-        except ValueError:
-            return _reply(400, "Unknown size.")
         if side == "buy":
             probs = level_problems(f)
             if probs:
                 return _reply(400, probs[0], alert=True)
             ch = buy_choices(f, acct, opts)
-            if not 0 <= i < len(ch):
-                return _reply(400, "Unknown size.")
+            i = pick_size(arg, [c["sh"] for c in ch])
+            if i is None:
+                return _reply(400, SIZE_GONE, alert=True)
             c = ch[i]
             # the shares are what gets bought (as on the dashboard card);
             # size_base is the cash the gate checks, at the worse price
@@ -1333,8 +1358,9 @@ def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
             if probs:
                 return _reply(400, probs[0], alert=True)
             ch = sell_choices(f, acct)
-            if not 0 <= i < len(ch):
-                return _reply(400, "Unknown quantity.")
+            i = pick_size(arg, [q for _, q in ch])
+            if i is None:
+                return _reply(400, SIZE_GONE, alert=True)
             lab, q = ch[i]
             p["qty"] = q
             px = (fill_price(f) or 0) * ((f.get("fx") or {}).get(

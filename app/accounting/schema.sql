@@ -400,6 +400,11 @@ CREATE TABLE IF NOT EXISTS sim_orders (
   updated_at INTEGER NOT NULL
 );
 
+-- Telegram-started runs whose outcome has been reported (each once)
+CREATE TABLE IF NOT EXISTS telegram_run_notices (
+  work_item_id TEXT PRIMARY KEY, sent_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS telegram_notices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   work_item_id TEXT NOT NULL,

@@ -974,6 +974,11 @@ def create_server(conn, repo, market, *, api_base="http://127.0.0.1:7798",
                 self._send(404, {"error": "not found"})
             except (BrokenPipeError, ConnectionResetError):
                 return                           # client went away; not news
+            except HTTPError as e:
+                try:
+                    self._send(e.code, {"error": e.message})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             except Exception as e:               # noqa: BLE001
                 log.exception("HTTP 500 on %s %s", self.command,
                               self.path.split("?", 1)[0])

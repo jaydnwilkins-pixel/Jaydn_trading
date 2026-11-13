@@ -7,5 +7,5 @@ Description=Ronathan trading desk — restart a crashed service
 
 [Service]
 Type=oneshot
-WorkingDirectory=/mnt/projects/ronathan_trading
-ExecStart=/mnt/projects/ronathan_trading/bin/ronathan watchdog
+WorkingDirectory=/home/jaydn/jaydn_trading
+ExecStart=/home/jaydn/jaydn_trading/bin/ronathan watchdog

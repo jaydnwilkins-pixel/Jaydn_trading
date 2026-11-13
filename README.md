@@ -154,8 +154,8 @@ app/maintenance.py daily checks, log rotation, backups, retention + AI note (§2
 app/sessions.py   exchange calendars: is_open / next_open / close_of
 web/              dashboard pages (no build step)
 systemd/          ronathan.service — the wrapper unit (see "Deploy")
-docs/             SAXO.md; past reviews; PORTING-TO-JAYDN.md (how to apply
-                  the 2026-11-11 changes to a sibling desk, with patches)
+docs/             SAXO.md; past reviews; CLAIRE-PORT.md (Ronathan's changes,
+                  written up for Claire)
 voice/            Ronathan's Piper TTS voice + custom-trained openWakeWord
                   detection model (gitignored — real binaries). Shared
                   with Bob's voice daemon via ~/voice symlinks; see

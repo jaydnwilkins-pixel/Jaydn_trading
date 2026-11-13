@@ -30,13 +30,11 @@ from html import escape
 
 import httpx
 
-from . import portfolio, telegram_approvals, watcher
+from . import exchanges, portfolio, telegram_approvals, watcher
 from .tools.market import desk_ticker, normalize_price, yahoo_symbol
 
 CB_PREFIX = "rb"
-CCY = {"NASDAQ": "USD", "NYSE": "USD", "LSE": "GBP", "SGX": "SGD",
-       "HKEX": "HKD", "TSE": "JPY", "ASX": "AUD", "XETRA": "EUR",
-       "PARIS": "EUR", "NSE": "INR"}
+CCY = exchanges.CCY                      # one registry (app/exchanges.py)
 DEFAULT_EXCHANGE = "NASDAQ"
 RUNS_PER_HOUR = 10
 BUTTON_TTL_S = 3600
@@ -306,7 +304,7 @@ class Commands:
             self._runs.append(now)
         code, out = self.api.start_run({
             "ticker": ticker, "exchange": exchange, "currency": CCY[exchange],
-            "lot_size": 100 if exchange == "SGX" else 1,
+            "lot_size": exchanges.lot_size(exchange),
             "trigger": RUN_TRIGGER})
         if code != 200:
             with self._lock:
@@ -417,7 +415,7 @@ class Commands:
 
     def _qty(self, p, mode):
         held = float(p["qty"])
-        lot = 100 if p["exchange"] == "SGX" else 1
+        lot = exchanges.lot_size(p["exchange"])
         if mode == "all":
             return held
         if mode == "half":

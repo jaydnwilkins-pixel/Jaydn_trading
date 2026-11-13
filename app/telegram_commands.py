@@ -21,6 +21,7 @@ Rules (on top of the bot's: approver user id, private chat only):
   of the desk; an expired one just says "run the command again".
 """
 import json
+import logging
 import math
 import secrets
 import threading
@@ -32,6 +33,8 @@ import httpx
 
 from . import exchanges, portfolio, telegram_approvals, watcher
 from .tools.market import desk_ticker, normalize_price, yahoo_symbol
+
+log = logging.getLogger(__name__)
 
 CB_PREFIX = "rb"
 CCY = exchanges.CCY                      # one registry (app/exchanges.py)
@@ -551,8 +554,8 @@ class Commands:
                 self.conn, p["instrument_id"], p["account_id"], pct)
         except ValueError as e:
             raise CommandError(str(e))
-        print(f"telegram: floor {p['ticker']} on {p['account_id']} "
-              f"{before:g}% -> {pct:g}% (owner via Telegram)", flush=True)
+        log.info("telegram: floor %s on %s %g%% -> %g%% (owner via Telegram)",
+                 p["ticker"], p["account_id"], before, pct)
         return [(f"✔ <b>{h(p['ticker'])}</b> trailing alert on "
                  f"{h(p['account_id'])}: {before:g}% → <b>{pct:g}%</b>. It "
                  "still trails from the best price since you bought.", None)]

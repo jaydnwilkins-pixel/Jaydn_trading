@@ -383,17 +383,17 @@ def recap_prompt(turns, latest, *, max_turns=RECAP_TURNS,
     session cannot be resumed (service restart, expired transcript, CLI
     error): short notes on the last few exchanges, then the new message.
     Deliberately brief and not a transcript — replaying the whole history as
-    one "Richard: … You: …" prompt is what B8 suspects of tripping the
+    one "Jaydn: … You: …" prompt is what B8 suspects of tripping the
     safety filter, and it cost 20-30k tokens a turn."""
     recent = [(r, c) for r, c in turns if str(c or "").strip()][-max_turns:]
     if not recent:
         return latest
-    lines = ["Context: this continues an earlier chat with Richard. Notes on "
+    lines = ["Context: this continues an earlier chat with Jaydn. Notes on "
              "the last few exchanges, oldest first (clipped):"]
     for role, content in recent:
-        who = "Richard asked" if role in ("user", "human") else "You answered"
+        who = "Jaydn asked" if role in ("user", "human") else "You answered"
         lines.append(f"- {who}: {_clip(content, max_chars)}")
-    return "\n".join(lines) + f"\n\nRichard's new message:\n{latest}"
+    return "\n".join(lines) + f"\n\nJaydn's new message:\n{latest}"
 
 
 class _Msg:

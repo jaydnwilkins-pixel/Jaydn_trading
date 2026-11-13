@@ -146,7 +146,7 @@ def test_after_a_restart_a_new_session_starts_from_a_short_recap(conn):
     out = ask(ronathan, "what changed today?")
     [(model, resume, prompt)] = q.seen
     assert resume is None and not errors(out)
-    assert prompt.endswith("Richard's new message:\nwhat changed today?")
+    assert prompt.endswith("Jaydn's new message:\nwhat changed today?")
     assert "turn 39 blah" in prompt and "turn 34 blah" in prompt
     assert "turn 33" not in prompt                  # the last six only
     assert len(prompt) < 3500                       # not 40 × 10k characters
@@ -171,9 +171,9 @@ def test_a_session_that_cannot_be_resumed_falls_back_to_a_recap(conn, failure,
     (_, r2, p2), (m3, r3, p3) = q.seen[1:]
     assert (r2, p2) == ("s1", "and how much cash?")
     assert (m3, r3) == ("claude-opus-5", None)      # same model, new session
-    assert "Richard asked: what do I hold?" in p3
+    assert "Jaydn asked: what do I hold?" in p3
     assert "You answered: answer 1" in p3
-    assert p3.endswith("Richard's new message:\nand how much cash?")
+    assert p3.endswith("Jaydn's new message:\nand how much cash?")
     assert len(saved(conn)) == 4 and ronathan._sessions == {"t": "s2"}
     assert "could not be resumed" in caplog.text
     ask(ronathan, "thanks")
@@ -262,7 +262,7 @@ def test_a_turn_that_fails_half_way_gives_up_its_session(conn):
     state["break"] = False
     ask(ronathan, "and cash?")
     resume, prompt = calls[-1]
-    assert resume is None and "Richard asked: what do I hold?" in prompt
+    assert resume is None and "Jaydn asked: what do I hold?" in prompt
     assert "and cash?" in prompt and len(saved(conn)) == 4
 
 
@@ -324,8 +324,8 @@ def test_recap_prompt_is_short_and_ends_with_the_new_message():
     p = claude_sdk.recap_prompt(turns, "now what?", max_turns=3)
     assert "q1" not in p                            # only the last three
     assert "- You answered: a1 | a | table | xxx" in p      # one line each
-    assert "…\n- Richard asked: q2\n- You answered: a2\n" in p
-    assert p.endswith("\n\nRichard's new message:\nnow what?")
+    assert "…\n- Jaydn asked: q2\n- You answered: a2\n" in p
+    assert p.endswith("\n\nJaydn's new message:\nnow what?")
     assert max(len(line) for line in p.splitlines()) < 450
 
 

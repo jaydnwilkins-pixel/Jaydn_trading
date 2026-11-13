@@ -590,19 +590,19 @@ def test_chat_page():
 
 # ── Saxo opens on SIM; a live account is unmistakable on the Watchlist ─────
 def test_saxo_page_does_not_open_on_real_money():
+    # Ronathan shows Saxo SIM only (the live account was taken off the
+    # screens on 2026-11-10): the page opens on SIM and has no live tab
     sx = page("saxo.html")
     assert "|| 'live'" not in sx
-    assert "return ENVS.includes(last) ? last : 'sim';" in sx
-    start = sx[sx.index("function startEnv()"):sx.index("let ENV = startEnv();")]
-    # ?env= first, then the tab chosen last time, then SIM
-    assert start.index(".get('env')") < start.index("localStorage.getItem('saxoEnv')")
-    assert "localStorage.setItem('saxoEnv', ENV)" in sx
-    assert sx.index('data-env="sim"') < sx.index('data-env="live"')
+    assert "get('env') || 'sim'" in sx
+    assert 'data-env="sim"' in sx and 'data-env="live"' not in sx
 
 
 def test_unpriced_saxo_positions_are_never_summed_as_if_complete():
     assert "function unrealisedOf(pos, fallback)" in NAV
-    for name in ("saxo.html", "portfolio.html"):
+    # Ronathan: only the Saxo accounts page lists Saxo's own positions
+    # (Portfolio has no real-money section)
+    for name in ("saxo.html",):
         src = page(name)
         assert "unrealisedOf(pos, b.UnrealizedMarginProfitLoss)" in src, name
         assert "(p.pnl_base || 0)" not in src, name          # the silent sum

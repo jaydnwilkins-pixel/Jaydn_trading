@@ -101,7 +101,7 @@ async function send() {
   if (!text) return;
   BUSY = true;
   input.value = '';
-  input.placeholder = 'Ronathan is answering — type your next message, send it when she has finished';
+  input.placeholder = 'Ronathan is answering — type your next message, send it when it has finished';
   bubble('user', text);
   document.getElementById('sendbtn').disabled = true;
   log.setAttribute('aria-busy', 'true');

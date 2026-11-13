@@ -23,11 +23,13 @@ replays old taps nor skips new ones. Replayed taps would be harmless anyway
 """
 import json
 import threading
+import logging
 import time
-import traceback
 from pathlib import Path
 
 from . import alerts, telegram_approvals, telegram_commands
+
+log = logging.getLogger(__name__)
 
 POLL_TIMEOUT_S = 25
 
@@ -67,7 +69,7 @@ def handle_update(conn, market, upd, settings, resume_post, *, env,
             call(token, "answerCallbackQuery",
                  data={"callback_query_id": cq["id"], "text": answer[:190]})
         except alerts.TelegramError as e:
-            print(f"telegram bot: answerCallbackQuery: {e}", flush=True)
+            log.warning("telegram bot: answerCallbackQuery: %s", e)
         _send_all(call, token, str(chat.get("id") or ""), replies)
         return label
     if cq:
@@ -85,7 +87,7 @@ def handle_update(conn, market, upd, settings, resume_post, *, env,
                        "text": out.get("answer", "")[:190],
                        "show_alert": "true" if out.get("alert") else "false"})
         except alerts.TelegramError as e:      # tap already timed out etc.
-            print(f"telegram bot: answerCallbackQuery: {e}", flush=True)
+            log.warning("telegram bot: answerCallbackQuery: %s", e)
         return f"callback:{code}"
     m = upd.get("message")
     if not m:
@@ -144,7 +146,7 @@ def report_finished_runs(commands, settings, call):
             _send_all(call, settings["token"], settings["approver_id"],
                       [(html, None)])
         except alerts.TelegramError as e:
-            print(f"telegram bot: run outcome {wi}: {e}", flush=True)
+            log.warning("telegram bot: run outcome %s: %s", wi, e)
             continue
         commands.mark_reported(wi)
 
@@ -181,7 +183,7 @@ def run_poller(conn, market, env, resume_post, offset_path, *,
 
     def note(msg):
         if state["note"] != msg:
-            print(f"telegram bot: {msg}", flush=True)
+            log.info("telegram bot: %s", msg)
             state["note"] = msg
 
     while True:
@@ -218,10 +220,10 @@ def run_poller(conn, market, env, resume_post, offset_path, *,
                     handle_update(conn, market, upd, st, resume_post,
                                   env=env, call=call, commands=commands)
                 except Exception:              # noqa: BLE001 — next update
-                    traceback.print_exc()
+                    log.exception("telegram bot: update failed")
             report_finished_runs(commands, st, call)
         except Exception:                      # noqa: BLE001 — keep looping
-            traceback.print_exc()
+            log.exception("telegram bot: poll failed")
             if not once:
                 sleep(10)
         if once:

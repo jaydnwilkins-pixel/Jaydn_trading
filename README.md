@@ -106,6 +106,31 @@ it never changes a trailing stop already at Saxo.
 Resetting the book (`bin/ronathan-reset`) is a separate, deliberately harder
 to reach command — not part of the daily-use script.
 
+### Changing a stop-loss, take-profit or trailing alert after the buy
+
+Once a buy has filled, its stop-loss and take-profit are orders resting at
+the broker (or in the desk's own simulation). They can be moved from two
+places: **Home → Today** (drag a marker on a holding's bar, or press
+**Edit…**) and the **Orders** page (**Edit…** on the order). Both open the
+same small form; nothing changes until **Save**.
+
+Whether a part can be moved is decided per broker, in one table:
+`CAN_CHANGE` in `app/capabilities.py`. A part whose row says no is shown
+locked, with the reason, and the server refuses it.
+
+| Broker row | Stop-loss | Take-profit | Trailing stop at the broker |
+|---|---|---|---|
+| `builtin` (the desk's simulation: alpaca-paper, moomoo-paper, saxo-paper's SGX shares) | yes | yes | — |
+| `saxo` (Saxo SIM) | yes | yes | no |
+| `saxo_live` (real money) | no | no | no |
+
+- The desk's own **trailing alert** can always be changed; it is not an
+  order.
+- To bring on a new broker: add its row to `CAN_CHANGE`, and give its
+  adapter a `change_leg(order_id, price, symbol=...)` method. A row that
+  says yes without that method is refused.
+- `saxo_live` stays off until the change has been proven on Saxo SIM.
+
 ## Deploy
 
 This machine runs Ronathan via one systemd **wrapper** unit that calls

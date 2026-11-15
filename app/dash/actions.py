@@ -114,6 +114,16 @@ class Actions:
                   take_profit=None if exit_ else (
                       float(body["target"]) if body.get("target")
                       else None))
+        try:
+            trail = float(body.get("trail_pct") or 0)
+        except (TypeError, ValueError):
+            trail = 0
+        from ..graph.nodes_execution import _accepts
+        if stop and 0 < trail <= 90 and \
+                _accepts(adapter, "trail_distance", "precheck"):
+            # the exact order execution sends: the stop as a trailing
+            # stop, distance = the floor % of the entry
+            kw["trail_distance"] = entry * trail / 100
         out = adapter.precheck(**kw)
         if out.get("error") and "RateLimitExceeded" in out["error"]:
             out["error"] = "Saxo asks to slow down — wait a second and " \

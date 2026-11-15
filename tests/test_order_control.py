@@ -166,6 +166,9 @@ def test_edit_a_queued_buy_changes_its_trailing_alert_in_place():
             target=110.0, trail_pct=6.5, ts=CLOSED)
     pct, _ = position_floor(w.conn, o["instrument_id"], o["account_id"])
     assert pct == 6.5
+    # The queued order itself carries the % — it is what Saxo gets
+    # as the trailing stop when the order is sent at the open
+    assert w.repo.order(o["id"])["trail_pct"] == 6.5
 
 
 def test_edit_at_the_venue_carries_the_trailing_alert_to_the_new_card():

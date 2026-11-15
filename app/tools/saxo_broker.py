@@ -173,7 +173,7 @@ class SaxoBroker:
         return uic, details
 
     def _bracket_body(self, *, symbol, side, qty, limit, stop_loss,
-                      take_profit):
+                      take_profit, trail_distance=None):
         """The exact Saxo order a placement sends: (body, None), or
         (None, rejected PlacedOrder) when it cannot be built. Shared by
         place_bracket and precheck, so a precheck tests the real thing."""
@@ -203,18 +203,26 @@ class SaxoBroker:
         }
         legs = self._protective(uic, details, protect_side="sell" if buy
                                 else "buy", qty=int(amount),
-                                stop_loss=stop_loss, take_profit=take_profit)
+                                stop_loss=stop_loss, take_profit=take_profit,
+                                trail_distance=trail_distance)
         if legs:
             order["Orders"] = legs
         return order, None
 
     def _protective(self, uic, details, *, protect_side, qty, stop_loss,
-                    take_profit):
+                    take_profit, trail_distance=None):
         """The stop-loss and take-profit orders that protect a position —
         used both as a bracket's related legs and as a standalone OCO.
         `protect_side` is the side of these orders: 'sell' protects a long.
         Rounding is in the safe direction: a long's stop and a short's
-        target round DOWN, the others UP (round_price)."""
+        target round DOWN, the others UP (round_price).
+
+        `trail_distance` (price units) makes the stop a Saxo TRAILING stop
+        (TrailingStopIfTraded): it starts at `stop_loss` and follows the
+        market at that distance, never moving back — the desk's trailing
+        floor, held and executed at Saxo. The distance and its step are on
+        the instrument's tick grid at the stop price (distance rounded UP:
+        never tighter than asked)."""
         sell = protect_side == "sell"
         legs = []
         base = {"AssetType": "Stock", "Uic": uic,
@@ -223,10 +231,17 @@ class SaxoBroker:
                 "OrderDuration": {"DurationType": "GoodTillCancel"},
                 "ManualOrder": False}
         if stop_loss:
-            legs.append({**base, "OrderType": "StopIfTraded",
-                         "OrderPrice": round_price(
-                             details, stop_loss,
-                             direction="down" if sell else "up")})
+            leg = {**base, "OrderType": "StopIfTraded",
+                   "OrderPrice": round_price(
+                       details, stop_loss, direction="down" if sell else "up")}
+            if trail_distance:
+                tick = _tick_for(details, Decimal(str(stop_loss)))
+                dist = (Decimal(str(trail_distance)) / tick).to_integral_value(
+                    rounding=ROUND_CEILING) * tick
+                leg.update(OrderType="TrailingStopIfTraded",
+                           TrailingStopDistanceToMarket=float(dist),
+                           TrailingStopStep=float(tick))
+            legs.append(leg)
         if take_profit:
             legs.append({**base, "OrderType": "Limit",
                          "OrderPrice": round_price(
@@ -280,7 +295,8 @@ class SaxoBroker:
 
     # ── the broker interface ─────────────────────────────────────────────
     def place_bracket(self, *, symbol, side, qty, limit=None, stop_loss=None,
-                      take_profit=None, client_order_id=None) -> PlacedOrder:
+                      take_profit=None, client_order_id=None,
+                      trail_distance=None) -> PlacedOrder:
         if self.environment == "live" and self._guard is not None:
             try:
                 self._guard()
@@ -288,7 +304,8 @@ class SaxoBroker:
                 return PlacedOrder("", "rejected", f"live trading: {e}")
         order, refused = self._bracket_body(
             symbol=symbol, side=side, qty=qty, limit=limit,
-            stop_loss=stop_loss, take_profit=take_profit)
+            stop_loss=stop_loss, take_profit=take_profit,
+            trail_distance=trail_distance)
         if refused is not None:
             return refused
         try:
@@ -310,7 +327,8 @@ class SaxoBroker:
                            legs=self._label_legs(ids, order.get("Orders", [])))
 
     def place_oco(self, *, symbol, side, qty, stop_loss=None,
-                  take_profit=None, client_order_id=None) -> PlacedOrder:
+                  take_profit=None, client_order_id=None,
+                  trail_distance=None) -> PlacedOrder:
         """Protect an EXISTING position: a standalone stop-loss + take-profit
         pair, one-cancels-other, GTC — Saxo's "two orders in the Orders
         array with no parent". `side` is the side of the protective orders
@@ -337,7 +355,8 @@ class SaxoBroker:
                                                f"size {lot}")
         legs = self._protective(uic, details, protect_side=side,
                                 qty=int(amount), stop_loss=stop_loss,
-                                take_profit=take_profit)
+                                take_profit=take_profit,
+                                trail_distance=trail_distance)
         # one leg is a plain order; two are an OCO pair
         body = legs[0] if len(legs) == 1 else {"AccountKey": self.account_key,
                                                "Orders": legs}
@@ -424,13 +443,14 @@ class SaxoBroker:
         return info["related"] if info else []
 
     def precheck(self, *, symbol, side, qty, limit=None, stop_loss=None,
-                 take_profit=None) -> dict:
+                 take_profit=None, trail_distance=None) -> dict:
         """Ask Saxo whether this exact bracket would be accepted, WITHOUT
         placing it (/trade/v2/orders/precheck). Allowed whether or not live
         trading is armed: it cannot create an order."""
         order, refused = self._bracket_body(
             symbol=symbol, side=side, qty=qty, limit=limit,
-            stop_loss=stop_loss, take_profit=take_profit)
+            stop_loss=stop_loss, take_profit=take_profit,
+            trail_distance=trail_distance)
         if refused is not None:
             return {"ok": False, "error": refused.detail}
         try:
@@ -446,7 +466,8 @@ class SaxoBroker:
                 "estimated_cash": out.get("EstimatedCashRequired"),
                 "currency": out.get("EstimatedCashRequiredCurrency"),
                 "amount": order["Amount"], "price": order["OrderPrice"],
-                "legs": [{"type": o["OrderType"], "price": o["OrderPrice"]}
+                "legs": [{"type": o["OrderType"], "price": o["OrderPrice"],
+                          "trail": o.get("TrailingStopDistanceToMarket")}
                          for o in order.get("Orders", [])]}
 
     def order_status(self, broker_order_id) -> dict:
@@ -542,15 +563,19 @@ class SaxoSimWithLocalMarkets:
             else self.venue
 
     def place_bracket(self, *, symbol, side, qty, limit=None, stop_loss=None,
-                      take_profit=None, client_order_id=None) -> PlacedOrder:
-        to = self.local if self.is_local(symbol) else self.venue
-        return to.place_bracket(symbol=symbol, side=side, qty=qty, limit=limit,
-                                stop_loss=stop_loss, take_profit=take_profit,
-                                client_order_id=client_order_id)
+                      take_profit=None, client_order_id=None,
+                      trail_distance=None) -> PlacedOrder:
+        kw = dict(symbol=symbol, side=side, qty=qty, limit=limit,
+                  stop_loss=stop_loss, take_profit=take_profit,
+                  client_order_id=client_order_id)
+        if self.is_local(symbol):           # the local sim has no venue stop
+            return self.local.place_bracket(**kw)
+        return self.venue.place_bracket(**kw, trail_distance=trail_distance)
 
     def place_oco(self, *, symbol, side, qty, stop_loss=None,
-                  take_profit=None, client_order_id=None) -> PlacedOrder:
-        if self.is_local(symbol):
+                  take_profit=None, client_order_id=None,
+                  trail_distance=None) -> PlacedOrder:
+        if self.is_local(symbol):           # the built-in sim holds these
             return self.local.place_oco(symbol=symbol, side=side, qty=qty,
                                         stop_loss=stop_loss,
                                         take_profit=take_profit,
@@ -558,10 +583,11 @@ class SaxoSimWithLocalMarkets:
         return self.venue.place_oco(symbol=symbol, side=side, qty=qty,
                                     stop_loss=stop_loss,
                                     take_profit=take_profit,
-                                    client_order_id=client_order_id)
+                                    client_order_id=client_order_id,
+                                    trail_distance=trail_distance)
 
     def precheck(self, *, symbol, side, qty, limit=None, stop_loss=None,
-                 take_profit=None) -> dict:
+                 take_profit=None, trail_distance=None) -> dict:
         if self.is_local(symbol):
             return {"ok": None, "simulated": True, "note":
                     "Saxo's practice account offers these shares only as "
@@ -570,7 +596,8 @@ class SaxoSimWithLocalMarkets:
                     "holds its stop-loss / take-profit"}
         return self.venue.precheck(symbol=symbol, side=side, qty=qty,
                                    limit=limit, stop_loss=stop_loss,
-                                   take_profit=take_profit)
+                                   take_profit=take_profit,
+                                   trail_distance=trail_distance)
 
     def order_status(self, broker_order_id) -> dict:
         return self._owner(broker_order_id).order_status(broker_order_id)

@@ -349,12 +349,12 @@ def test_buy_carries_a_trailing_floor(conn):
     cmds = make(conn, d)
     [(html, _)] = cmds.command("/buy CSCO 1000 trail=10")
     assert d.calls[0][1]["suggested"]["trail_pct"] == 10
-    assert "trailing alert 10%" in html
+    assert "trail 10%" in html
     cmds.command("/buy AAPL 7.5%")
     assert d.calls[1][1]["suggested"]["trail_pct"] == 7.5
     [(html, _)] = cmds.command("/buy MSFT")
     assert "trail_pct" not in d.calls[2][1]["suggested"]
-    assert "trailing alert 8% (default" in html
+    assert "trail 8% (default" in html
     [(html, _)] = cmds.command("/buy CSCO trail=95")
     assert "between 0.5% and 90%" in html and len(d.calls) == 3
 
@@ -425,3 +425,25 @@ def test_buy_on_london_uses_pounds_not_pence_for_the_stop(conn):
     b = d.calls[0][1]
     # ATR ≈ 0.32 GBP → stop ≈ 9.48 − 0.64, not capped at 24% below
     assert 8.7 < b["stop"] < 9.0 and b["target"] < 10.9
+
+
+def test_floor_says_when_saxo_holds_its_own_trailing_stop(conn, held,
+                                                          monkeypatch):
+    """/floor changes the desk's alert, never the trailing
+    stop already resting at Saxo — and says so, like Portfolio's Edit."""
+    held.append(iid_pos(qty=9))
+    cmds = make(conn)
+    monkeypatch.setattr(tc.portfolio, "legs_for", lambda *a: [])
+    assert "Saxo holds a trailing stop" not in cmds.command("/floor CSCO")[0][0]
+    monkeypatch.setattr(tc.portfolio, "legs_for", lambda *a: [
+        {"leg": "stop", "price": 96.4, "trails": 8.25, "trail_pct": 8}])
+    html, kb = cmds.command("/floor CSCO 12")[0]
+    assert "Saxo holds a trailing stop" in html and "backup alert" in html
+    _, sent = press(cmds, kb)
+    assert "→ <b>12%</b>" in sent[0][0] and "keeps its distance" in sent[0][0]
+
+
+def test_buy_reply_does_not_promise_an_alert_only(conn):
+    html = make(conn).command("/buy CSCO")[0][0]
+    assert "trailing stop that sells by itself" in html
+    assert "never sells" not in html

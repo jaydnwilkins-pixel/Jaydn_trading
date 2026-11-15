@@ -748,8 +748,12 @@ def test_a_card_approved_elsewhere_after_the_push_is_stale(conn):
 
 
 # ── trailing floor on the card ────────────────────────────────────────────
-def floor_buttons(kb):
-    return [b for b in buttons(kb) if b["text"].lstrip("✓ ").startswith("alert ")]
+def floor_buttons(kb, word="trail"):
+    """The trailing-% buttons. On an account whose stops rest at
+    Saxo (the fixtures' default, Saxo SIM) they read "trail …" because the %
+    becomes a trailing STOP there; elsewhere "alert …"."""
+    return [b for b in buttons(kb)
+            if b["text"].lstrip("✓ ").startswith(word + " ")]
 
 
 def test_buy_card_offers_floors_and_the_choice_is_what_gets_approved(conn):
@@ -757,18 +761,55 @@ def test_buy_card_offers_floors_and_the_choice_is_what_gets_approved(conn):
     tg = FakeTg()
     push(conn, tg)
     html, kb = tg.messages[0][1], tg.messages[0][2]
-    assert "Trailing alert 8%" in html
+    assert "Trailing stop 8%" in html and "sells by itself" in html
+    assert "never sells" not in html
     assert [b["text"] for b in floor_buttons(kb)] == [
-        "alert 5%", "✓ alert 8%", "alert 12%", "alert 15%"]
+        "trail 5%", "✓ trail 8%", "trail 12%", "trail 15%"]
     code, out = decide(conn, tg, ta.cb(nid(conn), "tf", "12"))
-    assert code == 200 and out["answer"] == "Trailing alert: 12%"
-    assert "✓ alert 12%" in [b["text"] for b in floor_buttons(tg.edits[-1][3])]
+    assert code == 200 and out["answer"] == "Trailing stop: 12%"
+    assert "✓ trail 12%" in [b["text"] for b in floor_buttons(tg.edits[-1][3])]
     decide(conn, tg, ta.cb(nid(conn), "s", 1))
-    assert "Trailing alert <b>12%</b>" in tg.edits[-1][2]
+    assert "Trailing stop <b>12%</b> — it sells by itself" in tg.edits[-1][2]
     sent = []
     decide(conn, tg, tg.edits[-1][3][0][0]["callback_data"],
            resume=lambda b: sent.append(b) or (200, {"ok": True}))
     assert sent[0]["trail_pct"] == 12
+
+
+def test_the_trailing_words_follow_where_the_stop_rests(conn):
+    """Saxo trailing stops: the same % is an ORDER that sells
+    by itself on a Saxo account and only an alert on the built-in sim, and
+    the card must not promise "never sells" where Saxo will sell."""
+    awaiting(conn)
+    tg = FakeTg()
+    push(conn, tg)
+    assert "Trailing stop 8% on Saxo SIM" in tg.messages[0][1]
+    assert "never sells" not in tg.messages[0][1]
+    decide(conn, tg, ta.cb(nid(conn), "a", 1))          # alpaca built-in sim
+    html, kb = tg.edits[-1][2], tg.edits[-1][3]
+    note = html[html.rindex("<b>Account:</b>"):]        # under the card
+    assert "<b>Trailing alert:</b> 8%" in note and "it never sells" in note
+    assert "sells by itself" not in note
+    assert [b["text"] for b in floor_buttons(kb, "alert")] == [
+        "alert 5%", "✓ alert 8%", "alert 12%", "alert 15%"]
+    assert floor_buttons(kb) == []
+    code, out = decide(conn, tg, ta.cb(nid(conn), "tf", "12"))
+    assert out["answer"] == "Trailing alert: 12%"
+    decide(conn, tg, ta.cb(nid(conn), "s", 1))
+    assert "Trailing alert <b>12%</b>." in tg.edits[-1][2]
+
+
+def test_no_stop_loss_means_an_alert_even_at_saxo():
+    """Saxo's trailing stop starts from the stop-loss; without one nothing
+    is sent there, so the % is the watcher's alert."""
+    acct = {"venue_stops": True, "local_exchanges": ["SGX"]}
+    f = {"exchange": "NASDAQ", "thesis": {"stop_loss": 96.4}}
+    assert ta.trail_is_stop(f, acct) and ta.trail_word(f, acct) == "trailing stop"
+    assert not ta.trail_is_stop({**f, "thesis": {}}, acct)
+    assert not ta.trail_is_stop({**f, "exchange": "SGX"}, acct)   # desk-held
+    assert not ta.trail_is_stop(f, {"venue_stops": False})
+    assert not ta.trail_is_stop(f, None)
+    assert ta.trail_word(f, None) == "trailing alert"
 
 
 def test_a_floor_that_is_not_offered_is_refused(conn):
@@ -787,7 +828,7 @@ def test_suggested_floor_is_preselected_and_offered(conn):
     tg = FakeTg()
     push(conn, tg)
     texts = [b["text"] for b in floor_buttons(tg.messages[0][2])]
-    assert "✓ alert 10%" in texts and "alert 8%" in texts
+    assert "✓ trail 10%" in texts and "trail 8%" in texts
 
 
 def test_picking_a_floor_drops_a_pending_confirmation(conn):
@@ -805,10 +846,10 @@ def test_retry_can_change_the_floor(conn):
     tg = FakeTg()
     push(conn, tg)
     kb = tg.messages[0][2]
-    assert "✓ alert 8%" in [b["text"] for b in floor_buttons(kb)]
+    assert "✓ trail 8%" in [b["text"] for b in floor_buttons(kb)]
     decide(conn, tg, ta.cb(nid(conn), "tf", "15"))
     decide(conn, tg, ta.cb(nid(conn), "rt"))
-    assert "trailing alert <b>15%</b>" in tg.edits[-1][2]
+    assert "trailing stop <b>15%</b>" in tg.edits[-1][2]
     sent = []
     decide(conn, tg, tg.edits[-1][3][0][0]["callback_data"],
            resume=lambda b: sent.append(b) or (200, {"ok": True}))

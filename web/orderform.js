@@ -100,6 +100,31 @@ function ladderClamp(k, v, {entry, stop, tgt, buy = true}) {
   }
   return r2(v, v);
 }
+/* On Saxo (an account with venue_stops) the trail % is a real
+   TRAILING STOP that Saxo holds and executes — it replaces the stop-loss and
+   sells by itself. On the built-in sims, and on the SGX shares saxo-paper
+   simulates (local_exchanges), it is the watcher's ALERT — it asks you. */
+function trailIsStop(acct, exchange) {
+  return !!(acct && acct.venue_stops) &&
+    !((acct.local_exchanges || []).includes(exchange));
+}
+function trailName(acct, exchange) {
+  return trailIsStop(acct, exchange) ? 'trailing stop' : 'trailing alert';
+}
+function trailTip(acct, exchange) {
+  return trailIsStop(acct, exchange)
+    ? 'an order at Saxo: it replaces the stop-loss, follows the best price since you bought at this distance, never moves back, and sells automatically when hit'
+    : 'not an order: the watcher alerts you (and starts a sell review) if the price falls this far below its best since you bought — it never sells by itself';
+}
+/* relabel every element marked data-trail="<key>": its .trail-name text
+   and its tooltip follow the account (and exchange) now chosen */
+function syncTrail(key, acct, exchange) {
+  document.querySelectorAll(`[data-trail="${key}"]`).forEach(el => {
+    const n = el.querySelector('.trail-name'), name = trailName(acct, exchange);
+    if (n) n.textContent = name[0].toUpperCase() + name.slice(1);
+    el.title = trailTip(acct, exchange);
+  });
+}
 /* where the trailing alert STARTS for a trail % (it then rises with the
    best price since you bought), and the % for a dragged position */
 function trailStart(entry, pct) { return entry && pct ? r2(entry * (1 - pct / 100), entry) : null; }
@@ -206,9 +231,10 @@ function buySummary(o) {
        loss && gain ? (gain / loss >= 2 ? 'good — gains twice the risk or more' : gain / loss >= 1 ? 'gain is larger than the risk' : 'risk is larger than the gain') : '')}
   </div>`;
   const buyAt = mkt ? px : lim, ts = trailStart(buyAt, trail);
+  const tStop = trailIsStop(acct, o.exchange);
   const lad = ladder([
     {k: 'stop', v: stop, label: 'stop-loss'},
-    ...(ts ? [{k: 'trail', v: ts, label: `trailing alert ${fmt(trail, 1)}%`}] : []),
+    ...(ts ? [{k: 'trail', v: ts, label: `${trailName(acct, o.exchange)} ${fmt(trail, 1)}%`}] : []),
     {k: 'entry', v: mkt ? px : lim, label: mkt ? 'you buy' : 'purchase price'},
     ...(!mkt && live ? [{k: 'now', v: live, label: 'now'}] : []),
     {k: 'target', v: tgt, label: 'take-profit'}], ccy,
@@ -225,11 +251,12 @@ function buySummary(o) {
   else status = '<span class="muted">● Waiting for a live price…</span>';
   return `<div class="osum-head">${o.lead ? o.lead + ' ' : ''}${head}</div>${tiles}${lad}${ranges(o.lv, r2y, live ?? px, stop, tgt, ccy)}
     <div class="osum-line">${status}</div>
-    <div class="osum-line muted">On <b>${esc(acct.label)}</b> · ${trailLine(ts, trail, stop, buyAt, ccy)}</div>`;
+    <div class="osum-line muted">On <b>${esc(acct.label)}</b> · ${trailLine(ts, trail, stop, buyAt, ccy, tStop)}</div>`;
 }
 /* what the trailing alert does for THIS order: it starts at the purchase
    price − trail %, and only adds anything once it has risen above the stop */
-function trailLine(ts, trail, stop, buyAt, ccy) {
+function trailLine(ts, trail, stop, buyAt, ccy, isStop = false) {
+  if (isStop) return trailStopLine(ts, trail, stop, buyAt, ccy);
   if (!ts) return 'no trailing alert.';
   const base = `trailing alert <b>${fmt(trail, 1)}%</b>: starts at <b>${money(ts, ccy)}</b> and rises with the best price after you buy`;
   if (!stop) return base + '.';
@@ -244,6 +271,24 @@ function trailLine(ts, trail, stop, buyAt, ccy) {
   return base + ` — ${money(ts - stop, ccy)} above your stop-loss, so it warns you before the stop sells.`;
 }
 
+
+/* On Saxo: the trail % turns the stop-loss into a Saxo trailing
+   stop. It is sent starting at the stop-loss, trailing by (trail % × the
+   purchase price) — a fixed distance — so it sits at whichever is higher of
+   the stop-loss and (best price since you bought − that distance). */
+function trailStopLine(ts, trail, stop, buyAt, ccy) {
+  if (!trail) return 'no trailing stop — the stop-loss stays fixed.';
+  if (!stop) return `<span class="warn">a trailing stop needs a stop-loss to start from</span>.`;
+  const d = buyAt ? buyAt * trail / 100 : null;
+  const base = `<b>trailing stop ${fmt(trail, 1)}%</b> at Saxo: the stop-loss follows the best price since you buy
+    ${d ? `at <b>${money(d, ccy)}</b> below it` : ''}, never moves back, and <b>sells automatically</b> when hit`;
+  if (ts != null && ts <= stop) {
+    const rise = d ? (stop + d) / buyAt * 100 - 100 : null;
+    return base + ` — it stays at your stop-loss (${money(stop, ccy)}) until the price has risen
+      ${rise != null ? `about ${fmt(rise, 1)}%` : 'enough'}, then climbs with it. The desk's alert stays as a backup.`;
+  }
+  return base + ` — it starts at about ${money(ts, ccy)}, above your stop-loss. The desk's alert stays as a backup.`;
+}
 
 /* a SELL's summary — an exit (selling shares the desk holds) or a short
    (selling shares it does not hold). Same shape as buySummary: headline,

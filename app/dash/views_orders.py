@@ -41,6 +41,7 @@ class OrderViews:
             " o.status, o.broker_order_id, o.created_at, o.placed_at,"
             " o.expires_at, o.leg, o.parent_order_id, o.submitted_at,"
             " o.instrument_id, i.ticker, i.exchange, i.currency,"
+            " o.trail_pct order_trail_pct,"
             " (SELECT COALESCE(SUM(e.qty),0)/1e6 FROM executions e"
             "  WHERE e.order_id=o.id) filled"
             " FROM orders o JOIN instruments i ON i.id=o.instrument_id"
@@ -78,6 +79,24 @@ class OrderViews:
                           "part filled at the broker"
                           if r["status"] == "partially_filled" else
                           "working at the broker")
+            # Where Saxo holds the stop, the trail % is a real
+            # trailing stop (the entry's order row carries it, and its
+            # stop leg trails by trail % x the entry's limit)
+            r["trail_is_stop"] = False
+            if r["leg"] == "stop" and r["parent_order_id"] and \
+                    r["legs_at_broker"]:
+                from ..graph.nodes_execution import trail_distance
+                p = self.ctx.conn.execute("SELECT trail_pct, stop_loss,"
+                                 " limit_price FROM orders WHERE id=?",
+                                 (r["parent_order_id"],)).fetchone()
+                d = trail_distance(p) if p else None
+                if d:
+                    r.update(trail_pct=p["trail_pct"], trails=float(d),
+                             trail_is_stop=True)
+            elif not r["leg"] and r["order_trail_pct"] and \
+                    r["legs_at_broker"] and r["stop_loss"]:
+                r.update(trail_pct=r["order_trail_pct"],
+                         trail_is_stop=True)
         trig = price_triggers.list_triggers(
             self.ctx.conn, since=int(self.ctx.clock()) - 7 * 86400, limit=200)
         syms = sorted({r["symbol"] for r in rows} |

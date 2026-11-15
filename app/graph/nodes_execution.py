@@ -94,12 +94,27 @@ class PlacementUnknown(RuntimeError):
 
 
 def _accepts_client_id(adapter) -> bool:
+    return _accepts(adapter, "client_order_id")
+
+
+def _accepts(adapter, param, method="place_bracket") -> bool:
     import inspect
     try:
-        return "client_order_id" in inspect.signature(
-            adapter.place_bracket).parameters
-    except (TypeError, ValueError):
+        return param in inspect.signature(
+            getattr(adapter, method)).parameters
+    except (AttributeError, TypeError, ValueError):
         return False
+
+
+def trail_distance(o) -> Decimal | None:
+    """The approved trailing floor as a price distance: trail_pct of the
+    entry's limit. Saxo trails by a fixed distance, not a percentage, so it
+    is fixed at the entry — as the price rises it is a smaller share of it
+    (8% of 150 = 12, which is 4% at 300). None for an order without a
+    floor, a stop or a limit."""
+    if not (o["trail_pct"] and o["stop_loss"] and o["limit_price"]):
+        return None
+    return from_micro(o["limit_price"]) * Decimal(str(o["trail_pct"])) / 100
 
 
 def submit_order(repo, adapter, order_id, *, symbol, ts, claimed=False):
@@ -133,6 +148,12 @@ def submit_order(repo, adapter, order_id, *, symbol, ts, claimed=False):
               else None)
     if _accepts_client_id(adapter):
         kw["client_order_id"] = o["client_order_id"] or o["id"]
+    trail = trail_distance(o)
+    if trail and _accepts(adapter, "trail_distance"):
+        # Saxo holds the floor itself: the bracket's stop becomes a
+        # trailing stop at this distance (the watcher's alert stays as a
+        # backstop). Venues without venue-side stops ignore it.
+        kw["trail_distance"] = float(trail)
     live = _live_gate(repo, o, ts)               # None unless a live account
     if isinstance(live, PlacedOrder):            # refused: definitive
         repo.mark_order(order_id, "rejected", ts=ts)
@@ -296,7 +317,10 @@ def build_execute(repo, brokers: dict, market, *, account_for,
             if ref_native is not None else None,
             reserved_base=reserve, submitted_at=ts if is_open else None,
             expires_at=int(sessions.close_of(inst.exchange, now,
-                                             cal).timestamp()), ts=ts)
+                                             cal).timestamp()), ts=ts,
+            # the floor rides with the stop it trails; an exit has neither
+            trail_pct=float(ap.trail_pct) if getattr(ap, "trail_pct", None)
+            and th.stop_loss and not closing else None)
         if not is_open:
             _set_trailing_floor(repo, inst, ap, account_id, th.direction)
             return {"order_ids": [oid], **repriced}  # custodian places at next open

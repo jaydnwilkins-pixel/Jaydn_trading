@@ -299,6 +299,7 @@ def accounts(conn, env, live_armed):
     sim_on = (env.get("SAXO_SIM_EXECUTION") or "").lower() == "enabled"
     out = []
     from .accounting.repo import Repo
+    from .accounts import venue_stop_facts
     repo = Repo(conn)
     for a in conn.execute("SELECT * FROM broker_accounts ORDER BY rowid"):
         live = a["environment"] == "live"
@@ -317,7 +318,8 @@ def accounts(conn, env, live_armed):
                     "short": short, "kind": kind, "live": live,
                     "ccy": a["base_currency"],
                     "whole": live or (a["broker"] == "saxo" and sim_on),
-                    "cash": repo.available_cash(a["id"]) / 1e6})
+                    "cash": repo.available_cash(a["id"]) / 1e6,
+                    **venue_stop_facts(a, sim_on)})
     default = next((i for i, a in enumerate(out)
                     if a["broker"] == "saxo" and not a["live"] and sim_on),
                    next((i for i, a in enumerate(out) if not a["live"]), 0))
@@ -522,7 +524,8 @@ def build_message(f, opts, base_url):
                      "</code>")
         what = approved_what(f, ap)
         lines.append(f"<i>You approved:</i> {h(what)} on {h(ap.get('broker'))},"
-                     f" trailing alert {h(ap.get('trail_pct') or '—')}% ·"
+                     f" {trail_word(f, approved_account(f, ap))}"
+                     f" {h(ap.get('trail_pct') or '—')}% ·"
                      f" attempts {h(fl['attempts'])}")
         lines.append("")
 
@@ -625,11 +628,15 @@ def build_message(f, opts, base_url):
             lines.append("⚠ The desk holds none — this sell would open a SHORT."
                          " Decide that on the Approvals page.")
         if floor_applies(f):
-            lines.append(f"<i>Trailing alert {h(pct_s(chosen_floor(f, opts)))}"
-                         " — the watcher alerts you if the price falls this far"
-                         " below its best since you bought; it never sells."
-                         " Pick the shares and the alert below; you confirm"
-                         " before anything is sent.</i>")
+            fl = pct_s(chosen_floor(f, opts))
+            word = trail_word(f, acct)
+            # the body is drawn once, for the account first offered: name
+            # it, because switching account only adds a note underneath
+            lines.append(f"<i>{h(word.capitalize())} {h(fl)} on"
+                         f" {h(acct['short'])} — "
+                         f"{h(trail_means(f, acct, fl))}. Pick the shares and"
+                         f" the {'trail' if trail_is_stop(f, acct) else 'alert'}"
+                         " below; you confirm before anything is sent.</i>")
         else:
             lines.append("<i>Pick below — you confirm before anything is "
                          "sent.</i>")
@@ -823,6 +830,38 @@ def pct_s(v):
     return f"{float(v):g}%"
 
 
+def trail_is_stop(f, acct):
+    """On an account whose stops rest at Saxo, a buy's trailing
+    % is sent as a TRAILING STOP order starting at the stop-loss: it follows
+    the best price and sells by itself (nodes_execution.trail_distance).
+    Anywhere else, and on a buy with no stop-loss, it is the watcher's
+    alert, which only asks. The card has to say which — the same rule as
+    trailIsStop on the Approvals page."""
+    return bool(acct and acct.get("venue_stops")
+                and f.get("exchange") not in (acct.get("local_exchanges") or ())
+                and (f.get("thesis") or {}).get("stop_loss"))
+
+
+def trail_word(f, acct):
+    return "trailing stop" if trail_is_stop(f, acct) else "trailing alert"
+
+
+def trail_means(f, acct, pct):
+    """One sentence on what the chosen % does on this account."""
+    if trail_is_stop(f, acct):
+        return (f"at Saxo the stop-loss follows the best price since you"
+                f" bought, {pct} of the purchase price below it, and sells"
+                " by itself when hit")
+    return (f"the watcher alerts you if the price falls {pct} below its best"
+            " since you bought; it never sells")
+
+
+def approved_account(f, ap):
+    """The account a refused trade was approved on (for its retry card)."""
+    return next((a for a in f.get("accounts") or []
+                 if a["broker"] == (ap or {}).get("broker")), None)
+
+
 # ── keyboard ──────────────────────────────────────────────────────────────
 def size_arg(sh) -> str:
     """A size button's argument: the SHARES it shows ("q9", "q0.5"). It was
@@ -870,7 +909,10 @@ def build_keyboard(nid, f, opts, base_url):
     floor_row = []
     if floor_applies(f):
         cur = chosen_floor(f, opts)
-        floor_row = [{"text": ("✓ " if v == cur else "") + "alert " + pct_s(v),
+        on = (approved_account(f, (f.get("failed") or {}).get("approval"))
+              if f["phase"] == "failed" else selected_account(f, opts))
+        word = "trail " if trail_is_stop(f, on) else "alert "
+        floor_row = [{"text": ("✓ " if v == cur else "") + word + pct_s(v),
                       "callback_data": cb(nid, "tf", f"{v:g}")}
                      for v in floor_choices(f)]
     if f["phase"] == "failed":
@@ -1290,8 +1332,13 @@ def _op_account(conn, tg, n, f, opts, arg, env, clock):
     opts["acct"], opts["pending"] = i, None
     opts["sizes"] = size_choices(f, a) if f.get("side") == "buy" else []
     _save_opts(conn, n["id"], opts, clock)
-    _restore(tg, n, f, opts, env,
-             note=f"<b>Account:</b> {h(a['label'])} — {h(a['kind'])}")
+    note = f"<b>Account:</b> {h(a['label'])} — {h(a['kind'])}"
+    if floor_applies({**f, "phase": _phase(n)}):
+        # the same % is an order on one account and an alert on another
+        fl = pct_s(chosen_floor({**f, "phase": _phase(n)}, opts))
+        note += (f"\n<b>{h(trail_word(f, a).capitalize())}:</b> {h(fl)} — "
+                 f"{h(trail_means(f, a, fl))}")
+    _restore(tg, n, f, opts, env, note=note)
     return _reply(200, f"Account: {a['label']}", ok=True)
 
 
@@ -1309,10 +1356,13 @@ def _op_floor(conn, tg, n, f, opts, arg, env, clock):
         return _reply(400, "Unknown trailing alert.")
     opts["trail"], opts["pending"] = v, None
     _save_opts(conn, n["id"], opts, clock)
+    on = (approved_account(f, (f.get("failed") or {}).get("approval"))
+          if f["phase"] == "failed" else selected_account(f, opts))
+    word = trail_word(f, on).capitalize()
     _restore(tg, n, f, opts, env,
-             note=f"<b>Trailing alert:</b> {h(pct_s(v))} — alerts you when the"
-                  f" price falls {h(pct_s(v))} below its best since you bought")
-    return _reply(200, f"Trailing alert: {pct_s(v)}", ok=True)
+             note=f"<b>{h(word)}:</b> {h(pct_s(v))} — "
+                  f"{h(trail_means(f, on, pct_s(v)))}")
+    return _reply(200, f"{word}: {pct_s(v)}", ok=True)
 
 
 def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
@@ -1371,7 +1421,10 @@ def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
             return _reply(400, "Nothing to size on this trade.")
         p["text"] = (f"<b>Confirm:</b> {h(what)} on {h(acct['label'])} — "
                      f"<b>{h(acct['kind'])}</b>?"
-                     + (f" Trailing alert <b>{h(pct_s(p['trail_pct']))}</b>."
+                     + (f" {h(trail_word(f, acct).capitalize())}"
+                        f" <b>{h(pct_s(p['trail_pct']))}</b>"
+                        + (" — it sells by itself when hit."
+                           if trail_is_stop(f, acct) else ".")
                         if p["trail_pct"] else ""))
         ok_label = "✔ Place it"
     elif phase == "approval" and op == "rj":
@@ -1389,7 +1442,8 @@ def _op_choose(conn, tg, n, wi, f, opts, op, arg, env, clock):
         what = approved_what(f, ap)
         p["text"] = (f"<b>Retry</b> {h(side.upper())} {h(tk)} — the same order"
                      f" ({h(what)} on {h(ap.get('broker'))})"
-                     + (f", trailing alert <b>{h(pct_s(p['trail_pct']))}</b>"
+                     + (f", {trail_word(f, approved_account(f, ap))}"
+                        f" <b>{h(pct_s(p['trail_pct']))}</b>"
                         if fl_on else "")
                      + (" — <b>REAL MONEY</b>" if live else " — paper")
                      + "? Every check runs again.")

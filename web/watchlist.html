@@ -358,7 +358,7 @@ function buyForm(r) {
         <input id="b-stop" type="number" min="0" step="any" oninput="B_TOUCHED = true; updBuy()"> <span class="muted">${c}</span></label>
       <label for="b-tgt" title="sells all the shares at this price or better if the price RISES to it — leave blank for none">Take-profit
         <input id="b-tgt" type="number" min="0" step="any" placeholder="none" oninput="B_TOUCHED = true; updBuy()"> <span class="muted">${c} · optional</span></label>
-      <label for="b-trail" title="not an order: the watcher alerts you if the price falls this far below its best since you bought — it rises with the price">Trailing alert
+      <label for="b-trail" data-trail="b" title="not an order: the watcher alerts you if the price falls this far below its best since you bought — it rises with the price"><span class="trail-name">Trailing alert</span>
         <input id="b-trail" type="number" min="0.5" max="90" step="0.5" value="8" oninput="updBuy()"> <span class="muted">%</span></label>
       <button type="button" class="ghost" onclick="buySuggest()">suggest stop / take-profit</button>
     </div>
@@ -409,6 +409,7 @@ async function updBuy() {
   const r = rowBy(SEL), el = document.getElementById('b-sum');
   if (!r || !el) return;
   const a = acctOf(val('b-acct')), c = qccy(r), mkt = val('b-mode') === 'market';
+  syncTrail('b', a, r.exchange);         // trailing stop (Saxo) or alert
   markLive('b-acct');
   const live = (r.quote || {}).price, lim = num('b-px'), px = mkt ? (live ?? lim) : fillPrice(lim, live);
   const fx = await fxTo((r.quote || {}).currency, a.ccy);
@@ -438,7 +439,7 @@ async function updBuy() {
   el.innerHTML = '<div class="osum-title">Order summary</div>' +
     buySummary({shares: v.qty, px, fx, acct: a, ccy: c, mkt, live, lim, stop: v.stop, tgt: v.target,
                 trail: v.trail || 0, fee: feeFor(a.fee_model, amount || 0), amount, ticker: r.ticker,
-                lot, r2y: R2Y[r.symbol], lv: r.levels, drag: 'b'}) +
+                exchange: r.exchange, lot, r2y: R2Y[r.symbol], lv: r.levels, drag: 'b'}) +
     (problems.length ? sumRows(problems).replace('<div class="osum-title">Order summary</div>', '') : '');
 }
 function buyValues() {
@@ -476,7 +477,7 @@ async function buySend() {
   if (!await ask(`Send to approval: BUY ${v.qty} shares of ${v.r.ticker} ` +
       (v.mkt ? `at the current price (about ${v.entry} ${c})` : `at a purchase price of ${v.entry} ${c}`) +
       `, stop-loss ${v.stop}${v.target ? ', take-profit ' + v.target : ''}` +
-      `${v.trail ? ', trailing alert ' + v.trail + '%' : ''} on ${a.label || v.broker}?` +
+      `${v.trail ? ', ' + trailName(a, v.r.exchange) + ' ' + v.trail + '%' : ''} on ${a.label || v.broker}?` +
       '\n\nNothing is bought until you approve it on the Approvals page.')) return;
   try {
     const r = await api('/api/manual-trade', {ticker: v.r.ticker, exchange: v.r.exchange,
@@ -565,7 +566,7 @@ function triggerForm(r) {
           <input id="t-stop" type="number" min="0" step="any" oninput="T_TOUCHED = true; updTrig()"> <span class="muted">${c}</span></label>
         <label for="t-tgt">Take-profit <input id="t-tgt" type="number" min="0" step="any" placeholder="none" oninput="T_TOUCHED = true; updTrig()">
           <span class="muted">${c} · optional</span></label>
-        <label for="t-trail" id="t-traillbl" title="not an order: after the buy fills, the watcher alerts you if the price falls this far below its best since you bought">Trailing alert
+        <label for="t-trail" id="t-traillbl" data-trail="t" title="not an order: after the buy fills, the watcher alerts you if the price falls this far below its best since you bought"><span class="trail-name">Trailing alert</span>
           <input id="t-trail" type="number" min="0.5" max="90" step="0.5" value="8" oninput="updTrig()"> <span class="muted">%</span></label>
         <button type="button" class="ghost" onclick="trigSuggest()">suggest stop / take-profit</button>
       </span>
@@ -692,6 +693,7 @@ async function updTrig() {
   document.getElementById('t-stopword').textContent = kind0 === 'short' ? 'Stop-loss (above)' : 'Stop-loss';
   document.getElementById('t-limword').textContent = buy ? 'Purchase price' : 'Sale price';
   const a = acctOf(val('t-acct')), c = qccy(r);
+  syncTrail('t', a, r.exchange);         // trailing stop (Saxo) or alert
   markLive('t-acct');
   document.getElementById('t-ccy').textContent = a.ccy || '';
   /* auto placement is a paper-only privilege; the server refuses it too */
@@ -725,7 +727,7 @@ async function updTrig() {
     sum.innerHTML = '<div class="osum-title">If it triggers</div>' +
       buySummary({shares: v.shownQty, px: trigFill(v), fx, acct: a, ccy: c, mkt: false, live, lim: v.limit,
                   stop: v.stop, tgt: v.target, trail: v.trail || 0, fee: feeFor(a.fee_model, num('t-amt') || 0),
-                  amount: num('t-amt'), ticker: r.ticker, lot, r2y: R2Y[r.symbol], lv: r.levels, status: when,
+                  amount: num('t-amt'), ticker: r.ticker, exchange: r.exchange, lot, r2y: R2Y[r.symbol], lv: r.levels, status: when,
                   drag: 't'});
     if (r.held_total > 0) parts.push(`<span class="muted">The desk already holds ${fmt(r.held_total, 4)} — a fill adds to the position.</span>`);
   } else {
@@ -760,7 +762,7 @@ async function trigCreate() {
   const size = v.qty ? `${v.qty} shares` : `${v.amount} ${a.ccy || ''} worth`;
   const what = `${verb} ${size} of ${v.r.ticker} when the price is ${COND[v.condition]} ${v.trig}` +
     ` (${v.dir === 'sell' ? 'sale' : 'purchase'} price ${v.limit}${v.stop ? ', stop-loss ' + v.stop : ''}${v.target ? ', take-profit ' + v.target : ''}` +
-    `${v.trail ? ', trailing alert ' + v.trail + '%' : ''}) on ${a.label || v.broker}, for ${v.days} days.`;
+    `${v.trail ? ', ' + trailName(a, v.r.exchange) + ' ' + v.trail + '%' : ''}) on ${a.label || v.broker}, for ${v.days} days.`;
   const how = v.mode === 'auto'
     ? '\n\nAUTOMATIC: you are approving this order NOW. When the price hits, the desk ' +
       'places it without asking again (paper account).'

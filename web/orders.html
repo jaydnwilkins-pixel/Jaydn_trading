@@ -117,6 +117,13 @@ async function apiDelete(path) {
 /* ── one card per stock, its orders grouped by type ───────────────── */
 function stockKey(o) { return `${o.ticker}|${o.exchange}`; }
 function qtyS(q) { return q == null ? '—' : fmt(q, q % 1 ? 4 : 0); }
+/* A buy trigger on Saxo (not the SGX shares saxo-paper simulates)
+   gets a real trailing STOP at Saxo; elsewhere the % is the watcher's alert */
+function trigTrailName(t) {
+  const saxo = (t.broker || '').startsWith('saxo');
+  const local = t.broker === 'saxo' && t.exchange === 'SGX';
+  return saxo && !local ? 'trailing stop' : 'trailing alert';
+}
 function legPrice(o) { return o.leg === 'stop' ? (o.stop_loss ?? o.limit_price) : (o.limit_price ?? o.take_profit); }
 function legPL(o, price) {
   if (!o.entry_price || !price) return null;
@@ -154,7 +161,9 @@ function entryRows(o) {
     <td class="type">${o.side === 'buy' ? '🟢' : '🔴'} ${esc(o.side.toUpperCase())} <span class="muted small">limit</span>
       ${o.work_item_id ? `<br><a class="small" href="/trading#${esc(o.work_item_id)}" title="run ${esc(o.work_item_id)}">the run behind it →</a>` : ''}</td>
     <td class="num"><b>${qtyS(o.qty)}</b>${o.filled ? `<br><span class="small">${fmt(o.filled, 0)} filled</span>` : ''}</td>
-    <td class="num">${px(o.limit_price)}${o.trail_pct != null ? `<br><span class="small muted" title="not an order: the watcher alerts you if the price falls this far below its best since you bought">trailing alert ${fmt(o.trail_pct, 1)}%</span>` : ''}</td>
+    <td class="num">${px(o.limit_price)}${o.trail_pct != null ? (o.trail_is_stop
+      ? `<br><span class="small muted" title="an order at Saxo: the stop-loss follows the best price since you bought at this distance, never moves back, and sells automatically">trailing stop ${fmt(o.trail_pct, 1)}%</span>`
+      : `<br><span class="small muted" title="not an order: the watcher alerts you if the price falls this far below its best since you bought">trailing alert ${fmt(o.trail_pct, 1)}%</span>`) : ''}</td>
     <td class="num">${gap(o.limit_price, o.last ?? last(o.symbol))}</td>
     <td class="num">${o.limit_price ? fmt(o.qty * o.limit_price, 2) : '—'} <span class="muted small">${esc(o.currency || '')}</span></td>
     <td>${esc(o.account)}</td>
@@ -174,7 +183,8 @@ function legRow(o, parent) {
   const vs = attached && !o.entry_price ? `the ${px(parent && parent.limit_price)} limit` : `${px(o.entry_price)} paid`;
   const stop = o.leg === 'stop';
   return `<tr>
-    <td class="type">${stop ? '🛑 Stop-loss' : '🎯 Take-profit'}<br><span class="muted small">${sell ? 'sells' : 'buys back'}</span></td>
+    <td class="type">${stop ? (o.trail_is_stop ? '🛑 Trailing stop' : '🛑 Stop-loss') : '🎯 Take-profit'}<br><span class="muted small">${sell ? 'sells' : 'buys back'}${
+      stop && o.trail_is_stop && o.trails ? ` · trails ${fmt(o.trails, 2)} (${fmt(o.trail_pct, 1)}%) below the best price` : ''}</span></td>
     <td class="num">${qtyS(o.qty)}</td>
     <td class="num"><b>${px(price)}</b></td>
     <td class="num">${gap(price, o.last ?? last(o.symbol))}</td>
@@ -199,7 +209,8 @@ function plannedRows(o) {
   for (const [kind, price] of [['stop', o.stop_loss], ['target', o.take_profit]]) {
     if (price == null) continue;
     out.push(`<tr>
-      <td class="type">${kind === 'stop' ? '🛑 Stop-loss' : '🎯 Take-profit'}<br><span class="muted small">${prot}</span></td>
+      <td class="type">${kind === 'stop' ? (o.trail_is_stop ? '🛑 Trailing stop' : '🛑 Stop-loss') : '🎯 Take-profit'}<br><span class="muted small">${prot}${
+        kind === 'stop' && o.trail_is_stop ? ` · starts here, then trails ${fmt(o.trail_pct, 1)}% of the purchase price below the best price` : ''}</span></td>
       <td class="num">${qtyS(o.qty)}</td><td class="num"><b>${px(price)}</b></td>
       <td class="num">${gap(price, o.last ?? last(o.symbol))}</td>
       <td class="num">${o.limit_price ? signed((price - o.limit_price) * o.qty * (o.side === 'buy' ? 1 : -1))
@@ -215,7 +226,7 @@ function triggerRow(t) {
     <td class="num">${esc(COND[t.condition] || '')} ${px(t.trigger_price)}</td>
     <td class="num">${gap(t.trigger_price, last(t.symbol))}</td>
     <td class="small">${esc(t.rule)}${t.stop_loss != null ? `<br><span class="muted">stop-loss ${px(t.stop_loss)}${
-      t.take_profit != null ? ' · take-profit ' + px(t.take_profit) : ''}${t.trail_pct != null ? ' · trailing alert ' + esc(t.trail_pct) + '%' : ''}</span>` : ''}${
+      t.take_profit != null ? ' · take-profit ' + px(t.take_profit) : ''}${t.trail_pct != null ? ' · ' + trigTrailName(t) + ' ' + esc(t.trail_pct) + '%' : ''}</span>` : ''}${
       t.note ? `<br>📝 ${esc(t.note)}` : ''}</td>
     <td>${esc(t.account)}</td>
     <td>${t.mode === 'auto' ? '<b class="warn">⚡ places automatically</b>' : 'asks you'}
@@ -320,7 +331,9 @@ function editOrder(id) {
         <input id="e-stop" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.stop_loss ?? '')}"></label>
       <label for="e-target" title="${buy ? 'sells if the price RISES to this' : 'buys back if the price FALLS to this'} — leave blank for none">Take-profit
         <input id="e-target" type="number" min="0" step="0.01" style="width:100px" value="${esc(o.take_profit ?? '')}"></label>
-      ${buy ? `<label for="e-trail" title="not an order: the watcher alerts you (and starts a sell review) if the price falls this far below its best since you bought — it rises with the price, never falls">Trailing alert
+      ${buy ? `<label for="e-trail" title="${o.legs_at_broker
+          ? 'an order at Saxo: it replaces the stop-loss, follows the best price since you bought at this distance, never moves back, and sells automatically when hit'
+          : 'not an order: the watcher alerts you (and starts a sell review) if the price falls this far below its best since you bought — it rises with the price, never falls'}">${o.legs_at_broker ? 'Trailing stop' : 'Trailing alert'}
         <input id="e-trail" type="number" min="0.5" max="90" step="0.5" style="width:70px" value="${esc(o.trail_pct ?? '')}"> %</label>` : ''}
     </div>
     <div id="e-val" class="small" style="margin:.4rem 0;line-height:1.5"></div>
@@ -356,7 +369,7 @@ function editProblems(o, v) {
       if (x && Math.abs(x - fill) / fill > 0.25) out.push(`Saxo refuses a ${nm} more than 25% from the price.`);
   if (live && Math.abs(v.entry / live - 1) > 0.25)
     out.push(`The ${buy ? 'purchase' : 'sale'} price is more than 25% from the current price (${money(live, '')}) — the desk will refuse it.`);
-  if (v.trail_pct != null && (v.trail_pct < 0.5 || v.trail_pct > 90)) out.push('The trailing alert must be between 0.5% and 90%.');
+  if (v.trail_pct != null && (v.trail_pct < 0.5 || v.trail_pct > 90)) out.push('The trailing %% must be between 0.5% and 90%.'.replace('%%', o.legs_at_broker ? 'stop' : 'alert'));
   return out;
 }
 function editSummary(o) {
@@ -370,7 +383,7 @@ function editSummary(o) {
     : `${buy ? 'up to' : 'no less than'} <b>${money(v.entry, ccy)}</b>${live ? ` — now ${money(live, ccy)}` : ''}`} ≈ <b>${money(v.qty * fill, ccy)}</b>`);
   if (v.qty && fill && v.stop) rows.push(`Most you can lose: <b class="bad">−${money(Math.abs(fill - v.stop) * v.qty, ccy)}</b> (${fmt(Math.abs(fill - v.stop) / fill * 100, 1)}%)` +
     (v.target ? ` · you could make <b class="ok">+${money(Math.abs(v.target - fill) * v.qty, ccy)}</b> (${fmt(Math.abs(v.target - fill) / fill * 100, 1)}%)` : ''));
-  if (buy) rows.push(trailLine(trailStart(fill, v.trail_pct), v.trail_pct, v.stop, fill, ccy).replace(/^t/, 'T'));
+  if (buy) rows.push(trailLine(trailStart(fill, v.trail_pct), v.trail_pct, v.stop, fill, ccy, !!o.legs_at_broker).replace(/^t/, 'T'));
   editProblems(o, v).forEach(m => rows.push(`<b class="bad">${m}</b>`));
   el.innerHTML = rows.join('<br>');
 }
@@ -422,7 +435,7 @@ function editTrigger(id) {
         : `<label for="g-qty">shares <input id="g-qty" type="number" min="0" step="any" style="width:80px" value="${esc(t.qty)}"></label>`}
       ${exit ? '' : `<label for="g-stop">Stop-loss <input id="g-stop" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.stop_loss ?? '')}"></label>
         <label for="g-tgt">Take-profit <input id="g-tgt" type="number" min="0" step="0.01" style="width:95px" value="${esc(t.take_profit ?? '')}"></label>
-        ${t.direction === 'buy' ? `<label for="g-trail" title="not an order: once it has bought, the watcher alerts you if the price falls this far below its best since you bought">Trailing alert
+        ${t.direction === 'buy' ? `<label for="g-trail" title="${trigTrailName(t) === 'trailing stop' ? 'an order at Saxo: once it has bought, the stop-loss follows the best price at this distance and sells automatically when hit' : 'not an order: once it has bought, the watcher alerts you if the price falls this far below its best since you bought'}">${trigTrailName(t) === 'trailing stop' ? 'Trailing stop' : 'Trailing alert'}
           <input id="g-trail" type="number" min="0.5" max="90" step="0.5" style="width:65px" value="${esc(t.trail_pct ?? '')}"> %</label>` : ''}`}
     </div>
     <div class="row" style="gap:.5rem;flex-wrap:wrap;margin-top:.4rem">
@@ -459,7 +472,7 @@ async function saveTrigger(id) {
   if (trailEl) body.trail_pct = n('trail');
   else if (t.trail_pct != null) body.trail_pct = t.trail_pct;
   if (body.trail_pct != null && (body.trail_pct < 0.5 || body.trail_pct > 90)) {
-    msg.innerHTML = '<b class="bad">the trailing alert must be between 0.5% and 90%</b>'; return; }
+    msg.innerHTML = `<b class="bad">the ${trigTrailName(t)} must be between 0.5% and 90%</b>`; return; }
   for (const k of Object.keys(body)) if (body[k] == null) delete body[k];
   if (body.mode === 'auto' && !await ask('AUTOMATIC: you approve this order now. When the price hits, ' +
       'the desk places it without asking again (paper account). Continue?')) return;

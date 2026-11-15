@@ -174,6 +174,13 @@ MIGRATIONS = [
     # B8: a chat thread is a resumed SDK session; remembering its id here
     # means a restart does not cost each thread a recap turn
     "ALTER TABLE chat_threads ADD COLUMN sdk_session TEXT",
+    # the trailing floor % approved with an entry: a venue that holds stops
+    # (Saxo) gets the bracket's stop as a TRAILING stop at that distance.
+    # On the row, not looked up at send time, so an order queued while the
+    # market is shut carries it to the custodian that places it.
+    # (Claire has this one earlier in its list; here it is appended, because
+    # this desk's database has already counted the ones above.)
+    "ALTER TABLE orders ADD COLUMN trail_pct REAL",
 ]
 
 

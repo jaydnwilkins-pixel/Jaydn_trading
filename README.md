@@ -90,14 +90,18 @@ Both files are re-read every pass — no restart needed after editing them.
 From the bot (owner only, private chat) you can also **start** trades:
 `/analyze TICKER [EXCHANGE]`, `/buy TICKER [EXCHANGE] [SIZE]`,
 `/sell TICKER [all|half|QTY]`, `/positions`, `/orders`, `/floor [TICKER] [PCT]`
-(`app/telegram_commands.py`). `/buy … trail=10` sets the trailing alert; the
-Telegram card has alert buttons (5/8/12/15% + the suggestion), retries too.
+(`app/telegram_commands.py`). `/buy … trail=10` sets the trailing %; the
+Telegram card has buttons for it (5/8/12/15% + the suggestion), retries too.
+On an account whose stops rest at Saxo that % is a **trailing stop** that
+sells by itself, and the card says so; elsewhere it is the watcher's
+**trailing alert**, which only asks.
 The card offers share counts (sized at the price the order really fills at)
 and approves exactly those shares, as the dashboard card does.
 Every one ends at the approval gate — the card still needs ✔ (and LIVE for
 real money); `/sell` never shorts; an `/orders` cancel takes two taps.
 `/floor` changes a held position's trailing alert — an alert that starts a
-sell review, never a sale (Portfolio → Trailing alert → Edit does the same).
+sell review, never a sale (Portfolio → Trailing alert → Edit does the same);
+it never changes a trailing stop already at Saxo.
 
 Resetting the book (`bin/ronathan-reset`) is a separate, deliberately harder
 to reach command — not part of the daily-use script.

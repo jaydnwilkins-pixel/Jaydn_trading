@@ -145,16 +145,20 @@ def edit(repo, desk, brokers, wi, *, entry, stop=None, target=None,
                                         "larger order")
         else:
             new_res = reserved
+        # The order row's trail_pct is what Saxo receives as the
+        # trailing stop when the custodian sends this order at the open
+        new_trail = float(trail_pct) if trail_pct and o["side"] == "buy" \
+            and stop else (o["trail_pct"] if stop else None)
         # the order row, the plan shown on the card and the trailing alert
         # change together or not at all
         with tx(conn):
             cur = conn.execute(
                 "UPDATE orders SET limit_price=?, stop_loss=?, take_profit=?,"
-                " qty=?, reserved_base=?, updated_at=? WHERE id=?"
+                " qty=?, reserved_base=?, trail_pct=?, updated_at=? WHERE id=?"
                 " AND status='pending_session' AND submitted_at IS NULL",
                 (to_micro(entry), to_micro(stop) if stop else None,
-                 to_micro(target) if target else None, new_qty, new_res, ts,
-                 o["id"]))
+                 to_micro(target) if target else None, new_qty, new_res,
+                 new_trail, ts, o["id"]))
             if cur.rowcount != 1:
                 raise OrderControlError(409, "the order is being sent to the "
                                         "broker right now — edit it there")

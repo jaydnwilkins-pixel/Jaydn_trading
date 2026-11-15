@@ -193,7 +193,9 @@ async function checkTrade(id) {
     out.innerHTML = r.ok === null ? `<span class="muted">${esc(r.note)}</span>`
       : r.ok ? `<b class="ok">✔ Saxo would accept this:</b> ${esc(r.amount)} shares
           @ ${esc(r.price)}${(r.legs || []).map(l => ` · ${l.type === 'StopIfTraded'
-            ? 'stop-loss' : 'take-profit'} ${esc(l.price)}`).join('')} · est. cash
+            ? 'stop-loss' : l.type === 'TrailingStopIfTraded'
+            ? `trailing stop ${esc(l.price)}, trails ${esc(l.trail)}` : 'take-profit'}${
+            l.type === 'TrailingStopIfTraded' ? '' : ' ' + esc(l.price)}`).join('')} · est. cash
           ${fmt(r.estimated_cash, 2)} ${esc(r.currency || '')}`
       : `<b class="bad">✖ Saxo would refuse:</b> ${esc(r.error)}`;
   } catch (e) { out.innerHTML = `<b class="bad">${esc(e.message)}</b>`; }
@@ -207,7 +209,7 @@ async function retryTrade(id) {
   const what = `${(t.direction || '').toUpperCase()} ${v.qty} shares of ${a.ticker}, ` +
     (v.order_type === 'market' ? 'at the current price' : `${t.direction === 'sell' ? 'sale' : 'purchase'} price ${v.entry} ${t.currency || ''}`) +
     `${v.stop != null ? ', stop-loss ' + v.stop : ''}${v.target != null ? ', take-profit ' + v.target : ''}` +
-    `${v.trail_pct ? ', trailing alert ' + v.trail_pct + '%' : ''}\non ${acct.label || v.broker}`;
+    `${v.trail_pct ? ', ' + trailName(acct, a.exchange) + ' ' + v.trail_pct + '%' : ''}\non ${acct.label || v.broker}`;
   if (acct.environment === 'live') {
     const typed = await ask(what, {title: 'Retry with real money?', live: true,
       type: 'LIVE', ok: 'Place the order', cancel: 'Do not send'});
@@ -406,7 +408,7 @@ function overrideForm(r) {
           oninput="OV[${J}].touched = true; updOverride(${J})"> <span class="muted">${ccy}</span></label>
         <label for="ovtarget-${id}">Take-profit <input id="ovtarget-${id}" type="number" step="any" min="0" placeholder="none"
           oninput="OV[${J}].touched = true; updOverride(${J})"> <span class="muted">${ccy} · optional</span></label>
-        <label for="ovtrail-${id}" title="not an order: the watcher alerts you if the price falls this far below its best since you bought">Trailing alert
+        <label for="ovtrail-${id}" data-trail="ov:${id}" title="not an order: the watcher alerts you if the price falls this far below its best since you bought"><span class="trail-name">Trailing alert</span>
           <input id="ovtrail-${id}" type="number" step="0.5" min="0.5" max="90" value="8"
           oninput="updOverride(${J})"> <span class="muted">%</span></label>
         <button type="button" class="ghost" onclick="ovSuggest(${J})">suggest stop / take-profit</button>
@@ -518,6 +520,7 @@ function updOverride(id) {
   document.getElementById('ovarrow-' + id).style.display = buy ? '' : 'none';
   const acct = (DATA.accounts || []).find(x => x.broker === (document.getElementById('ovacct-' + id) || {}).value) || {};
   document.getElementById('ovccy-' + id).textContent = acct.ccy || '';
+  syncTrail('ov:' + id, acct, c.exchange);
   const ccy = esc(((c.quote || {}).currency) || c.currency || '');
   const live = ovLive(id), v = ovValues(id);
   const px = v.mkt ? (live ?? v.entry) : fillPrice(v.entry, live, mode(id) === 'buy');
@@ -545,6 +548,7 @@ function updOverride(id) {
       buySummary({shares: w.qty, px, fx, acct, ccy, mkt: w.mkt, live, lim: w.entry, stop: w.stop, tgt: w.target,
                   trail: w.trail || 0, fee: feeFor(acct.fee_model, w.amount || 0), amount: w.amount,
                   ticker: r.ticker || c.ticker, lot, r2y: c.range2y, lv: c.levels,
+                  exchange: c.exchange,
                   lead: '<span class="pill warn">override</span>', drag: 'ov:' + id}) +
       (problems.length ? sumRows(problems).replace('<div class="osum-title">Order summary</div>', '') : '');
   } else {
@@ -574,7 +578,8 @@ async function override(id) {
   const what = m === 'exit' ? `an EXIT of ${v.qty} shares (sell what the desk holds) at ${v.mkt ? 'the current price' : entry}`
     : `a ${m === 'short' ? 'SHORT' : 'BUY'} of ${v.qty} shares ${v.mkt ? 'at the current price' : 'at ' + entry}, stop-loss ${v.stop}` +
       ` (${(Math.abs(entry - v.stop) / entry * 100).toFixed(1)}% away)` +
-      (v.target ? `, take-profit ${v.target}` : '') + (v.trail ? `, trailing alert ${v.trail}%` : '');
+      (v.target ? `, take-profit ${v.target}` : '') +
+      (v.trail ? `, ${trailName(acct, (CTX[id] || {}).exchange)} ${v.trail}%` : '');
   if (!await ask(`Overrule the desk on ${r.ticker}?\n\nThe desk's verdict was ` +
     `PASS (no trade), with ${convictionText(r.conviction)}. You are sending it to the ` +
     `approval gate as ${what}, on ${acct.label || v.broker}.\n\nNothing trades until you approve it there.`)) return;
@@ -802,7 +807,7 @@ function orderSection(a) {
       <label for="lvtgt-${id}" title="${sell ? 'buys back if the price FALLS to this' : 'sells all the shares at this price or better if the price RISES to it'} — leave blank for none">Take-profit
         <input id="lvtgt-${id}" type="number" step="any" min="0" value="${esc(t.take_profit ?? '')}"
           placeholder="none" oninput="updEst(${J})"> <span class="muted">${ccy} · optional</span></label>
-      <label for="trail-${id}" title="not an order: the watcher alerts you (and starts a sell review) if the price falls this far below its best since you bought — it rises with the price, never falls">Trailing alert
+      <label for="trail-${id}" data-trail="${id}" title="not an order: the watcher alerts you (and starts a sell review) if the price falls this far below its best since you bought — it rises with the price, never falls"><span class="trail-name">Trailing alert</span>
         <input id="trail-${id}" type="number" step="0.5" min="0.5" max="90"
           value="${esc(sg.trail_pct ?? 8)}" oninput="updEst(${J})"> <span class="muted">%</span></label>`}
     </div>
@@ -960,6 +965,7 @@ async function updEst(id) {
   if (!a || !est) return;
   const t = a.thesis || {}, acct = acctFor(id);
   if (!acct.broker) return;
+  syncTrail(id, acct, a.exchange);       // trailing stop (Saxo) or alert
   const ccy = esc(t.currency || ''), sell = t.direction === 'sell';
   const szc = document.getElementById('szccy-' + id);
   if (szc) szc.textContent = acct.ccy || '';
@@ -1015,7 +1021,7 @@ async function updEst(id) {
     bad(`The purchase price is more than 25% from the current price (${money(live, ccy)}) — the desk will refuse it.`);
   est.innerHTML = `<div class="osum-title">Order summary</div>` +
     buySummary({shares, px, fx, acct, ccy, mkt, live, lim, stop, tgt, trail, fee, amount,
-                ticker: a.ticker, lot, r2y: (CTX[id] || {}).range2y,
+                ticker: a.ticker, exchange: a.exchange, lot, r2y: (CTX[id] || {}).range2y,
                 lv: (CTX[id] || {}).levels, drag: id}) +
     (rows.length ? sumRows(rows).replace('<div class="osum-title">Order summary</div>', '') : '');
 }
@@ -1079,7 +1085,7 @@ async function act(id, action, token, sell) {
     const msg = `${(t.direction || '').toUpperCase()} ${what} of ${a.ticker}, ${lim}` +
       (body.levels && body.levels.stop_loss != null ? `, stop-loss ${body.levels.stop_loss}` : '') +
       (body.levels && body.levels.take_profit != null ? `, take-profit ${body.levels.take_profit}` : '') +
-      (body.trail_pct ? `, trailing alert ${body.trail_pct}%` : '') + `\non ${acct.label}`;
+      (body.trail_pct ? `, ${trailName(acct, a.exchange)} ${body.trail_pct}%` : '') + `\non ${acct.label}`;
     if (acct.environment === 'live') {
       // real money (DESIGN.md §22): the server refuses without this word
       const typed = await ask(msg, {title: 'Place this order with real money?',

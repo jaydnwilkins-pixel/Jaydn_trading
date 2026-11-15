@@ -73,13 +73,15 @@ HELP = (
     " here if the desk recommends a trade\n"
     "/buy <code>TICKER [EXCHANGE] [SIZE] [trail=PCT]</code> — buy at the"
     " current price (stop-loss and take-profit suggested; size in the"
-    " account currency; trail = trailing alert, default 8%, also on the"
-    " card)\n"
+    " account currency; trail = the trailing %, default 8%, also on the"
+    " card — on a Saxo account it is a trailing stop that sells by itself,"
+    " elsewhere an alert)\n"
     "/sell <code>TICKER [all|half|QTY]</code> — sell shares the desk holds\n"
     "/positions — what the desk holds, with Sell buttons\n"
     "/orders — working entry orders, with Cancel buttons\n"
     "/floor <code>[TICKER] [PCT]</code> — see or change the trailing alert"
-    " of a position you hold (it alerts you, never sells)\n"
+    " of a position you hold (it alerts you, never sells; a trailing stop"
+    " already at Saxo keeps its own distance)\n"
     "/id — your Telegram user id\n\n"
     f"Exchanges: {', '.join(CCY)} (default {DEFAULT_EXCHANGE}, or the one the"
     " desk already knows the ticker on).")
@@ -369,9 +371,11 @@ class Commands:
                  f" {h(CCY[exchange])}. Suggested stop-loss {num(stop)}, take-profit "
                  f"{num(target)} ({how}, 2:1)"
                  + (f", size {num(size, 0)}" if size else "")
-                 + f", trailing alert {trail or telegram_approvals.DEFAULT_TRAIL_PCT:g}%"
+                 + f", trail {trail or telegram_approvals.DEFAULT_TRAIL_PCT:g}%"
                  + ("" if trail else " (default — change it on the card)")
-                 + ". The card follows in a few seconds — nothing trades "
+                 + ". On a Saxo account the trail is a trailing stop that "
+                 "sells by itself; elsewhere it is an alert — the card says "
+                 "which. It follows in a few seconds — nothing trades "
                  "until you tap ✔.", None)]
 
     # ── /sell and /positions ─────────────────────────────────────────────
@@ -518,6 +522,18 @@ class Commands:
             return self._floor_ask(held[0], pct)
         return self._floor_pick(held[0])
 
+    SAXO_TRAILS = (" <i>Saxo holds a trailing stop on this position: this "
+                   "changes only the desk's backup alert — the stop at Saxo "
+                   "keeps its distance.</i>")
+
+    def _saxo_note(self, p):
+        """A buy on a Saxo account may have left a trailing
+        STOP there (portfolio.legs_for marks it `trails`). /floor does not
+        touch that order — same warning as Portfolio's Edit."""
+        legs = portfolio.legs_for(self.conn, p["account_id"],
+                                  p["instrument_id"])
+        return self.SAXO_TRAILS if any(l.get("trails") for l in legs) else ""
+
     def _floor_pick(self, p):
         cur, peak = watcher.position_floor(self.conn, p["instrument_id"],
                                            p["account_id"])
@@ -529,8 +545,8 @@ class Commands:
                  f"alert <b>{cur:g}%</b> — the watcher alerts you (and starts"
                  " a sell review) if the price falls this far below its best "
                  "since you bought; it never sells. Pick a new %, or type "
-                 f"<code>/floor {h(p['ticker'])} 10</code> for any value.",
-                 kb)]
+                 f"<code>/floor {h(p['ticker'])} 10</code> for any value."
+                 + self._saxo_note(p), kb)]
 
     def _floor_ask(self, p, pct):
         cur, _ = watcher.position_floor(self.conn, p["instrument_id"],
@@ -542,8 +558,8 @@ class Commands:
                self.button("✖ Keep it", {"op": "noop",
                                          "say": "Kept — nothing changed."})]]
         return [(f"Change <b>{h(p['ticker'])}</b>'s trailing alert on "
-                 f"{h(p['account_id'])} from {cur:g}% to <b>{pct:g}%</b>?",
-                 kb)]
+                 f"{h(p['account_id'])} from {cur:g}% to <b>{pct:g}%</b>?"
+                 + self._saxo_note(p), kb)]
 
     def _floor_set(self, p, pct):
         try:
@@ -555,7 +571,8 @@ class Commands:
                  p["ticker"], p["account_id"], before, pct)
         return [(f"✔ <b>{h(p['ticker'])}</b> trailing alert on "
                  f"{h(p['account_id'])}: {before:g}% → <b>{pct:g}%</b>. It "
-                 "still trails from the best price since you bought.", None)]
+                 "still trails from the best price since you bought."
+                 + self._saxo_note(p), None)]
 
     # ── /orders ──────────────────────────────────────────────────────────
     def _open_orders(self):

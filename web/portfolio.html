@@ -172,7 +172,8 @@ function floorPreview(p, ed) {
     lv.alert_ref != null ? 'the best price since you bought' : 'what you paid'} (${fmt(ref)})` +
     (cur != null ? `, ${fmt(Math.abs(at - cur) / cur * 100, 1)}% ${at < cur ? 'below' : 'above'} now.` : '.') +
     (fires ? ` <b class="bad">The price is already past it — it alerts (and starts a sell review) at once.</b>` : '') +
-    ' <span class="muted">It rises with the price, never falls. Nothing is sold without your approval.</span>';
+    ' <span class="muted">It rises with the price, never falls. Nothing is sold without your approval.</span>' +
+    ((p.legs || []).some(l => l.trails) ? ' <span class="warn">This changes only the desk\'s backup alert — the trailing stop at Saxo keeps its distance.</span>' : '');
 }
 function floorPos(k) { return Object.values((DATA || {}).exchanges || {}).flat().find(p => floorKey(p) === k); }
 function floorOpen(k) {

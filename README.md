@@ -49,7 +49,7 @@ Chat seam (voice/assistants integrate here):
 ## Tests
 
 ```sh
-tests/run.sh          # about 800 offline tests, ~90 s: accounting (exact
+tests/run.sh          # about 1,150 offline tests, ~50 s: accounting (exact
                       # micro-unit money), graph structure + interrupt/
                       # resume, authorization (403/409/410), providers,
                       # sessions, executor/custodian/watcher, protective
@@ -105,6 +105,27 @@ it never changes a trailing stop already at Saxo.
 
 Resetting the book (`bin/ronathan-reset`) is a separate, deliberately harder
 to reach command — not part of the daily-use script.
+
+### A second desk on the same machine, and what a desk is called
+
+Four settings in `etc/ronathan.env` (all optional; `etc/ronathan.env.example`
+documents them):
+
+| Setting | Default | What it is |
+|---|---|---|
+| `RONATHAN_API_PORT` | 7798 | ronathan-api's port (always loopback) |
+| `RONATHAN_DASHBOARD_PORT` | 7797 | the dashboards' port |
+| `RONATHAN_ASSISTANT_NAME` | Ronathan | the LLM that runs the desk: "Ask Ronathan", "Ronathan asks you before selling", how the chat introduces itself |
+| `RONATHAN_DESK_NAME` | the assistant's name | the desk itself: page titles, the title on Telegram alerts and notifications |
+
+To run a second desk: clone the repository into another folder, give its
+`etc/ronathan.env` two other ports (say 7818 and 7817) and its own names, and
+start it with that folder's `bin/ronathan`. Each desk has its own `var/`
+(database, logs, sign-ins) and `bin/ronathan` only ever touches the processes
+started from its own folder. The two ports must differ; a bad value stops
+the start with a message. Only what is displayed changes with the names —
+commands, settings (`RONATHAN_*`) and file names keep "ronathan". Two desks
+must not share a Telegram bot token (one bot, one reader).
 
 ### Changing a stop-loss, take-profit or trailing alert after the buy
 

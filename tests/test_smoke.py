@@ -3,8 +3,6 @@ tests/test_smoke.py`. These talk to the RUNNING desk (one of them sends
 Ronathan a real chat turn), so the default suite leaves them out; they used to
 run whenever the services happened to be up (REVIEW-2026-11-11 §3.7)."""
 import os
-import re
-from pathlib import Path
 
 import httpx
 import pytest
@@ -12,20 +10,27 @@ import pytest
 OPTED_IN = bool(os.environ.get("RONATHAN_SMOKE"))
 
 
-def _dash_base():
-    """Where the running dashboards answer: RONATHAN_DASHBOARD_BIND from
-    etc/ronathan.env (loopback by default, as bin/ronathan does)."""
-    env = Path(__file__).resolve().parents[1] / "etc" / "ronathan.env"
-    host = ""
-    if env.exists():
-        m = re.findall(r"(?m)^RONATHAN_DASHBOARD_BIND=(.*)$", env.read_text())
-        host = m[-1].strip().strip("'\"") if m else ""
-    if host in ("", "0.0.0.0", "::", "localhost"):
-        host = "127.0.0.1"
-    return f"http://{host}:7797"
+def _desk_urls():
+    """The running desk's two addresses: its ports are settings
+    (app/ports.py), and the dashboards answer on RONATHAN_DASHBOARD_BIND
+    (loopback by default) — read from etc/ronathan.env the way the services
+    and bin/ronathan do."""
+    from app import ports
+    from app.api.server import ROOT
+    env = dict(os.environ)
+    try:
+        for line in (ROOT / "etc" / "ronathan.env").read_text().splitlines():
+            k, sep, v = line.strip().partition("=")
+            if sep and k in ("RONATHAN_API_PORT", "RONATHAN_DASHBOARD_PORT",
+                             "RONATHAN_DASHBOARD_BIND"):
+                env.setdefault(k, v.strip().strip("'\""))
+    except OSError:
+        pass
+    return ports.api_base(env), ports.dashboard_base(env)
 
 
-DASH = _dash_base()
+API, DASH = _desk_urls() if OPTED_IN else ("http://127.0.0.1:7798",
+                                           "http://127.0.0.1:7797")
 
 
 def _up(url):
@@ -37,21 +42,21 @@ def _up(url):
         return False
 
 
-needs_api = pytest.mark.skipif(not _up("http://127.0.0.1:7798/status"),
+needs_api = pytest.mark.skipif(not _up(API + "/status"),
                                reason="set RONATHAN_SMOKE=1 and start ronathan-api")
-needs_dash = pytest.mark.skipif(not _up(f"{DASH}/api/overview"),
+needs_dash = pytest.mark.skipif(not _up(DASH + "/api/overview"),
                                 reason="set RONATHAN_SMOKE=1 and start the dashboards")
 
 
 @needs_api
 def test_api_status():
-    body = httpx.get("http://127.0.0.1:7798/status", timeout=5).json()
+    body = httpx.get(API + "/status", timeout=5).json()
     assert body["ok"] is True
 
 
 @needs_api
 def test_ask_streams_ndjson():
-    with httpx.stream("POST", "http://127.0.0.1:7798/ask",
+    with httpx.stream("POST", API + "/ask",
                       json={"text": "status?"}, timeout=60) as r:
         lines = [line for line in r.iter_lines() if line]
     assert lines, "no NDJSON lines from /ask"
@@ -70,7 +75,7 @@ def test_every_page_serves():
 
 @needs_dash
 def test_live_quote_plausible():
-    r = httpx.get(f"{DASH}/api/quote?symbols=NVDA",
+    r = httpx.get(DASH + "/api/quote?symbols=NVDA",
                   timeout=30).json()
     if "error" in r and "429" in r["error"]:
         pytest.skip("Yahoo rate-limited right now")

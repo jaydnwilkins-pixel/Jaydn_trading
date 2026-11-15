@@ -33,13 +33,26 @@ DRAIN_STATE="$ROOT/var/.drain-schedules.json"
 STOPPED_MARK="$ROOT/var/.stopped-on-purpose"
 API_PAT='-m app\.api\.server( |$)'
 DASH_PAT='-m app\.dashboards( |$)'
-API_URL='http://127.0.0.1:7798'
+# The two ports are settings (RONATHAN_API_PORT / RONATHAN_DASHBOARD_PORT in
+# etc/ronathan.env, app/ports.py), so a second desk on this machine can use
+# others. Read here the same way the services read them: the environment
+# first, then the file, then the defaults.
+port_setting() {
+  local v="${!1:-}"
+  if [ -z "$v" ] && [ -f "$ENV_FILE" ]; then
+    v="$(grep -E "^$1=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | tr -d "\"' \r" || true)"
+  fi
+  case "$v" in ''|*[!0-9]*) printf '%s' "$2" ;; *) printf '%s' "$v" ;; esac
+}
+API_PORT="$(port_setting RONATHAN_API_PORT 7798)"
+DASH_PORT="$(port_setting RONATHAN_DASHBOARD_PORT 7797)"
+API_URL="http://127.0.0.1:$API_PORT"
 # the dashboards answer on RONATHAN_DASHBOARD_BIND (loopback by default); a
 # wildcard bind still answers on loopback
 DASH_HOST=""
 [ -f "$ENV_FILE" ] && DASH_HOST="$(sed -n 's/^RONATHAN_DASHBOARD_BIND=//p' "$ENV_FILE" | tail -1 | tr -d "\"' ")"
 case "$DASH_HOST" in ''|0.0.0.0|::|localhost) DASH_HOST=127.0.0.1 ;; esac
-DASH_URL="http://$DASH_HOST:7797"
+DASH_URL="http://$DASH_HOST:$DASH_PORT"
 DRAIN_TIMEOUT="${RONATHAN_DRAIN_TIMEOUT:-300}"
 
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_dim=$'\033[2m'
@@ -234,7 +247,7 @@ cmd_status() {
     elif grep -qs '^RONATHAN_DASHBOARD_BIND=0\.0\.0\.0' "$ENV_FILE"; then
       local lan; lan="$(hostname -I 2>/dev/null | awk '{print $1}')"
       if [ -n "$lan" ]; then
-        dim "    from another device: http://$lan:7797"
+        dim "    from another device: http://$lan:$DASH_PORT"
       fi
     fi
   else say "  ronathan-dashboards ${c_dim}stopped${c_off}"; fi
@@ -389,7 +402,7 @@ case "${1:-}" in
   *) cat <<EOF
 Ronathan desk control
 
-  ronathan start                 start ronathan-api (:7798) + dashboards (:7797)
+  ronathan start                 start ronathan-api (:$API_PORT) + dashboards (:$DASH_PORT)
   ronathan stop [--graceful]     pause schedules, let work in flight finish,
                                then stop  (default; RONATHAN_DRAIN_TIMEOUT=${DRAIN_TIMEOUT}s)
   ronathan stop --kill           stop now, abandoning anything in flight

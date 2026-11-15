@@ -184,16 +184,19 @@ class Maintainer:
     def _check_services(self, now):
         out = []
         if self.probe is not None:
-            host = (os.environ.get("RONATHAN_DASHBOARD_BIND") or "").strip()
-            if host in ("", "0.0.0.0", "::", "localhost"):
-                host = "127.0.0.1"          # a wildcard bind answers here too
-            up = self.probe(f"http://{host}:7797/")
-            out.append(_check("dashboards", "Dashboards (:7797)",
+            # the dashboards answer on RONATHAN_DASHBOARD_BIND and
+            # RONATHAN_DASHBOARD_PORT (app/ports.py)
+            from . import ports
+            up = self.probe(ports.dashboard_base() + "/")
+            out.append(_check("dashboards",
+                              f"Dashboards (:{ports.dashboard_port()})",
                               "ok" if up else "bad",
                               "answering" if up else "NOT answering",
                               "" if up else "the pages and approvals are down"))
         # this code runs inside ronathan-api, so reaching here proves it is up
-        out.append(_check("ronathan_api", "ronathan-api (:7798)", "ok", "running"))
+        from . import ports
+        out.append(_check("ronathan_api", f"ronathan-api (:{ports.api_port()})",
+                          "ok", "running"))
         return out
 
     def _check_calendars(self, now):

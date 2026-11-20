@@ -323,6 +323,7 @@ class RunViews:
         origin, reason = {
             run_origin.OVERRIDE: ("override", None),
             run_origin.EXIT_REVIEW: ("price_alert", detail),
+            run_origin.HOLDING_REVIEW: ("holding_review", None),
             run_origin.VOLUME_SCAN: ("volume_scan", detail),
             run_origin.DAILY_FALLBACK: (
                 "daily_screen", "near the top of the most-active list (the "

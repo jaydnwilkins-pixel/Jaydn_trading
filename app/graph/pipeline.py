@@ -16,6 +16,7 @@ from typing import Callable
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from ..shorts import NO_SHORTS
 from .state import Approval, PipelineState, Thesis
 
 ANALYSTS = ("fundamental", "technical", "news")
@@ -39,6 +40,12 @@ class Deps:
     # thesis price-band check. None (or a failing lookup) skips the check
     # here; execute re-checks against the live quote and fails closed.
     last_price: Callable | None = None
+    # Long-only (app/shorts.py): fn(instrument) -> net shares the desk holds
+    # across accounts. With allow_shorts False, a 'sell' of a name the desk
+    # does not hold is a short and is downgraded to a pass. Tests default to
+    # the old behaviour; production wiring reads RONATHAN_ALLOW_SHORTS.
+    held: Callable | None = None
+    allow_shorts: bool = True
 
 
 def _norm_ticker(t: str) -> str:
@@ -52,7 +59,8 @@ def _norm_ticker(t: str) -> str:
     return t
 
 
-def vet_thesis(state, th: Thesis, last_price=None) -> Thesis:
+def vet_thesis(state, th: Thesis, last_price=None, *, held=None,
+               allow_shorts=True) -> Thesis:
     """Pin the arbiter's verdict to the run's instrument (H5).
 
     The approval card shows the thesis while execute trades the run's
@@ -90,6 +98,14 @@ def vet_thesis(state, th: Thesis, last_price=None) -> Thesis:
                     problems.append(
                         f"{name} {v} is {off * 100:.0f}% from the last price "
                         f"{ref} (band ±{PRICE_BAND * 100:.0f}%)")
+    if not allow_shorts and th.direction == "sell" and held is not None:
+        try:
+            have = Decimal(str(held(inst)))
+        except Exception:                           # noqa: BLE001 — execute
+            have = None                             # re-checks, fail-closed
+        if have is not None and have <= 0:
+            problems.append(f"the desk holds no {inst.ticker}, so this sell "
+                            f"would be a short — {NO_SHORTS}")
     pinned = th.model_dump()
     pinned.update(ticker=inst.ticker, currency=inst.currency)
     if problems and th.direction in ("buy", "sell"):
@@ -101,7 +117,8 @@ def vet_thesis(state, th: Thesis, last_price=None) -> Thesis:
 
 def _arbiter(deps):
     def arbitrate(state):
-        return vet_thesis(state, deps.arbiter(state), deps.last_price)
+        return vet_thesis(state, deps.arbiter(state), deps.last_price,
+                          held=deps.held, allow_shorts=deps.allow_shorts)
     return arbitrate
 
 

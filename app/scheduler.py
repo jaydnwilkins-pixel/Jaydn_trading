@@ -58,6 +58,13 @@ DEFAULTS = [
      "(no LLM; wakes the pipeline only on a real move)", "ronathan-api",
      {"type": "interval", "minutes": 60, "require_open": True,
       "threshold": 3.0, "max_runs": 1}),
+    # the daily review of stocks the desk holds (app/holding_review.py):
+    # hourly tick, but each holding is reviewed once a day while its market
+    # is open. A sell becomes an approval card; HOLD ends the run.
+    ("holding_review", "Daily exit review of each stock the desk holds "
+     "(news + arbiter; a sell needs your approval)", "ronathan-api",
+     {"type": "interval", "minutes": 60, "require_open": True,
+      "max_runs": 5}),
     # price triggers (DESIGN.md §15a): one-shot "buy/sell when price ≤/≥ X"
     # rules from the Watchlist page. Deterministic; evaluated only while
     # each rule's market is open, so an overnight quote never fires one.
@@ -84,6 +91,8 @@ JOB_INVOKES = {
     "reconcile": {"agent": None, "then": None},
     "watcher": {"agent": None, "then": "sell_review pipeline on breach"},
     "event_scan": {"agent": None, "then": "full pipeline on a volume spike"},
+    "holding_review": {"agent": "news",
+                       "then": "sell_review pipeline once a day per holding"},
     "maintenance": {"agent": "maintainer",
                     "then": "status note only — plain code does the cleanup"},
     "price_triggers": {"agent": None,

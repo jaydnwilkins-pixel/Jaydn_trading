@@ -1011,6 +1011,29 @@ Fire-and-forget HTTP from the watcher uses a **short timeout** (~10 s): a
 long-timeout call from an alert loop piles up blocked threads when several
 alerts land together.
 
+### 15.1 The daily review of what the desk holds
+
+The watcher only asks "should we sell?" after a trailing alert fires, so a
+holding that drifted, or whose story changed without an 8% fall, was never
+looked at again. The `holding_review` job (`app/holding_review.py`) ticks
+hourly and gives each stock the desk holds one exit review a day, in an hour
+its own market is open. It is the same `sell_review` pipeline the watcher
+starts (news, then the arbiter against the entry analysis); a review from
+either source counts as that day's, and none is started while another for
+the same stock is still in flight. HOLD ends the run; a sell is an approval
+card like any other trade. On the screens it reads "Daily review of a stock
+the desk holds", not a price alert.
+
+### 15.2 Long-only by default
+
+`RONATHAN_ALLOW_SHORTS` (empty by default) decides whether the paper desk
+may short. Off, a sell of a stock the desk does not hold is refused at every
+door: the arbiter's thesis is downgraded to a pass whose conditions say why
+(`vet_thesis`), override and manual-trade cards refuse it, a short Watchlist
+trigger is refused, and execute refuses it once more against the account's
+own book. The hourly volume scan and the screener still look only at names
+the desk does not hold, so with shorts off they can only lead to buys.
+
 ---
 
 ## 15a. Watchlist & price triggers

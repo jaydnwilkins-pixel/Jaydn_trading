@@ -69,7 +69,7 @@ def usage_source(agent_id, kind=None, trigger=None, exchange=None,
     code, _ = origin.classify(kind, trigger)
     if code == origin.OVERRIDE:
         return "override"
-    if code == origin.EXIT_REVIEW:
+    if code in (origin.EXIT_REVIEW, origin.HOLDING_REVIEW):
         return "exit_review"
     if code == origin.VOLUME_SCAN:
         return "volume_scan"

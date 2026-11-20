@@ -271,6 +271,28 @@ def start_scheduler(conn, repo, desk, market, custodian, maintainer=None):
                 "skipped_invalid": rejected,
                 "picker": "event scan (unusual volume)"}
 
+    def run_holding_review(spec):
+        """Once a day per stock the desk holds, in an hour its market is
+        open: the same exit review the price watcher starts on a breach."""
+        from .. import holding_review
+        from ..graph.state import Instrument
+        cal = sessions.load(conn) or None
+        now = datetime.now(timezone.utc)
+
+        def is_open(ex):
+            return (not spec.get("require_open", True)
+                    or sessions.is_open(ex, now, cal))
+
+        def start(row, trigger):
+            inst = Instrument(id=row["instrument_id"], ticker=row["ticker"],
+                              exchange=row["exchange"],
+                              currency=row["currency"],
+                              lot_size=board_lot(row["exchange"]))
+            return desk.start_run(inst, kind="sell_review", trigger=trigger)
+
+        return holding_review.run_once(conn, start, is_open,
+                                       max_runs=spec.get("max_runs"))
+
     def run_price_triggers(spec):
         """Watchlist price triggers (DESIGN.md §15a). Runs here because
         ronathan-api owns the desk: a hit becomes desk.manual_trade, and a
@@ -293,6 +315,7 @@ def start_scheduler(conn, repo, desk, market, custodian, maintainer=None):
         "analysis_eu": run_analysis,
         "analysis_us": run_analysis,
         "event_scan": run_event_scan,
+        "holding_review": run_holding_review,
         "price_triggers": run_price_triggers,
         **({"maintenance": lambda spec: _brief(
             maintainer.run(trigger="schedule"))} if maintainer else {}),

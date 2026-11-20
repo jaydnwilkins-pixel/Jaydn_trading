@@ -169,6 +169,8 @@ def origin(kind, trigger):
         return "Your override of a PASS" + (f" ({detail})" if detail else "")
     if code == run_origin.EXIT_REVIEW:
         return "Exit review (price watcher)" + more
+    if code == run_origin.HOLDING_REVIEW:
+        return "Daily review of a stock the desk holds"
     if code == run_origin.VOLUME_SCAN:
         return "Volume scan" + more
     if code == run_origin.DAILY_FALLBACK:

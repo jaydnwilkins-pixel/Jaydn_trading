@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timezone
 from decimal import ROUND_CEILING, Decimal
 
-from . import sessions
+from . import sessions, shorts
 from .accounting.money import from_micro, to_micro
 import logging
 from .logsetup import swallowed
@@ -245,6 +245,11 @@ def create(conn, body: dict, *, created_by: str, env=None, clock=time.time):
             if acct["environment"] == "live" or acct["broker"] == "saxo_live":
                 raise TriggerError("no shorting on the real-money account "
                                    "(DESIGN.md §22.2)")
+            # env None = a caller that passed no settings (the tests); the
+            # dashboard always passes its own, and execute checks again
+            if env is not None and not shorts.allowed(env):
+                raise TriggerError(f"the desk holds no {ticker}, so this sell "
+                                   f"would be a short — {shorts.NO_SHORTS}")
             if stop is None:
                 raise TriggerError(f"the desk holds no {ticker}, so this sell "
                                    "is a SHORT — it needs a stop ABOVE the "

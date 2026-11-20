@@ -5,6 +5,9 @@ this; they inject fakes straight into Deps.
 import os
 import time
 
+from . import shorts
+from .accounting import holdings
+
 from .graph.nodes_analysis import (default_structured_factory, make_analyst,
                                    make_debater)
 from .graph.nodes_execution import build_execute, build_record
@@ -136,11 +139,14 @@ def build_deps(conn, repo, narratives, market, *, brokers=None,
                              structured_factory=structured),
         execute=build_execute(repo, brokers, market,
                               account_for=account_for_broker(conn),
-                              clock=clock, cal=cal),
+                              clock=clock, cal=cal,
+                              allow_shorts=shorts.allowed(env)),
         record=build_record(repo, narratives, clock=clock,
                             prose_fn=_recorder_prose(conn, env)),
         prepare=prepare,
         last_price=_last_price(market),
+        held=lambda inst: holdings.net(conn, instrument_id=inst.id),
+        allow_shorts=shorts.allowed(env),
     )
 
 

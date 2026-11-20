@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .. import sessions
+from ..shorts import NO_SHORTS
 from ..accounting.money import from_micro, mul_micro, to_micro
 from ..accounting.repo import InsufficientCash
 from ..tools.brokers import PlacedOrder
@@ -243,8 +244,10 @@ def _live_gate(repo, o, ts):
 
 
 def build_execute(repo, brokers: dict, market, *, account_for,
-                  clock=time.time, cal=None):
-    """`brokers`: name -> adapter. `account_for(broker_name)` -> account_id."""
+                  clock=time.time, cal=None, allow_shorts=True):
+    """`brokers`: name -> adapter. `account_for(broker_name)` -> account_id.
+    `allow_shorts` False (app/shorts.py) refuses a sell of shares the
+    account does not hold — the last check every order passes."""
 
     def execute(state):
         ap, th, inst = state.approval, state.thesis, state.instrument
@@ -300,6 +303,9 @@ def build_execute(repo, brokers: dict, market, *, account_for,
         held_now, _, _ = repo.position(account_id, inst.id)
         closing = (th.direction == "sell" and held_now > 0) or \
             (th.direction == "buy" and held_now < 0)
+        if th.direction == "sell" and held_now <= 0 and not allow_shorts:
+            raise ValueError(f"{account_id} holds no {inst.ticker}, so this "
+                             f"sell would be a short — {NO_SHORTS}")
         repo.create_order(
             id=oid, account_id=account_id, instrument_id=inst.id,
             side=th.direction, qty=to_micro(qty),

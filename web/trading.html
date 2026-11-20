@@ -194,6 +194,8 @@ function origin(r) {
     case 'volume_scan': return `Started by the hourly volume scan${d}.`;
     case 'price_alert':
       return `Exit review: a trailing alert fired on a position you hold${d}.`;
+    case 'holding_review':
+      return 'Daily review of a stock the desk holds: is the reason to own it still intact?';
     case 'override': return `Your override of ${
       s.override_of ? runLink(s.override_of, 'the earlier run') : 'a run'}.`;
     case 'other': return `Started by: ${esc(s.origin_detail)}.`;

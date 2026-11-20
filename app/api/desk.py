@@ -19,6 +19,7 @@ from ..graph.pipeline import (build_override_pipeline, build_pipeline,
                               build_sell_review_pipeline)
 from ..graph.state import Instrument, PipelineState, Thesis
 from ..accounting import holdings
+from ..shorts import NO_SHORTS
 
 # The ticker is baked into the work-item id, and that id is rendered into
 # pages, handler attributes and narrative paths. Every run starter (the HTTP
@@ -97,6 +98,8 @@ class Desk:
         self.sell_pipeline = build_sell_review_pipeline(deps, checkpointer)
         self.clock = clock
         self.cal = session_cal          # None → sessions.DEFAULTS
+        # long-only (app/shorts.py): the same switch the arbiter and execute use
+        self.allow_shorts = getattr(deps, "allow_shorts", True)
 
     def cfg(self, wi):
         return {"configurable": {"thread_id": wi}}
@@ -234,6 +237,10 @@ class Desk:
 
         if direction == "buy" and not stop:
             raise ValueError("a buy needs a stop below the entry")
+        if direction == "sell" and not self.allow_shorts and \
+                self.desk_held(origin["ticker"]) <= 0:
+            raise ValueError(f"the desk holds no {origin['ticker']}, so this "
+                             f"sell would be a short — {NO_SHORTS}")
         if direction == "sell" and not stop:
             # no stop is only coherent for an EXIT: selling shares already
             # held. Selling what is not held is a short, whose loss has no
@@ -345,6 +352,9 @@ class Desk:
         held = self._held_instrument(inst_row["id"]) if inst_row else 0.0
         if direction == "buy" and not stop:
             raise ValueError("a buy needs a stop below the entry")
+        if direction == "sell" and held <= 0 and not self.allow_shorts:
+            raise ValueError(f"the desk holds no {ticker}, so this sell "
+                             f"would be a short — {NO_SHORTS}")
         if direction == "sell" and not stop and held <= 0:
             raise ValueError(f"the desk holds no shares of {ticker}, so this "
                              "sell is a SHORT — it needs a stop ABOVE the "

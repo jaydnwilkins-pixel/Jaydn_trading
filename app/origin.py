@@ -12,6 +12,7 @@ three keeps only its own wording.
 # every code classify() can return
 OVERRIDE = "override"               # you overrode a PASS
 EXIT_REVIEW = "exit_review"         # the price watcher started a sell review
+HOLDING_REVIEW = "holding_review"   # the daily review of a stock the desk holds
 VOLUME_SCAN = "volume_scan"         # the hourly unusual-volume sweep
 DAILY_SCREEN = "daily_screen"       # picked by the screener agent
 DAILY_FALLBACK = "daily_fallback"   # ...or by the top-of-book fallback
@@ -36,6 +37,8 @@ def classify(kind, trigger, *, override_of=None) -> tuple:
     if kind == "override" or override_of or tl.startswith("human override"):
         return OVERRIDE, (t[len("human override of "):]
                           if tl.startswith("human override of ") else None)
+    if tl.startswith("daily review"):
+        return HOLDING_REVIEW, after
     if kind == "sell_review" or tl.startswith("watcher:"):
         return EXIT_REVIEW, after or (t or None)
     if tl.startswith("event scan"):

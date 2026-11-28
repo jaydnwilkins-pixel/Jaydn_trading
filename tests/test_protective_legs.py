@@ -839,6 +839,12 @@ def test_place_oco_sends_a_standalone_gtc_pair():
     assert p.status == "accepted" and p.broker_order_id == "7001"
     body = seen["body"]
     assert seen["rid"] == "ord_x-rp" and "Uic" not in body   # no parent
+    # Saxo's shape: only "Orders" at the top (anything else there makes
+    # Saxo read the wrapper as an order and refuse the pair); each order
+    # carries its own account and ManualOrder
+    assert set(body) == {"Orders"}
+    assert all(o["ManualOrder"] is False and o["AccountKey"]
+               for o in body["Orders"])
     stop, target = body["Orders"]
     assert (stop["OrderType"], stop["OrderPrice"], stop["BuySell"],
             stop["Amount"]) == ("StopIfTraded", 96.97, "Sell", 4)

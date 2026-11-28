@@ -377,9 +377,14 @@ class SaxoBroker:
                                 qty=int(amount), stop_loss=stop_loss,
                                 take_profit=take_profit,
                                 trail_distance=trail_distance)
-        # one leg is a plain order; two are an OCO pair
-        body = legs[0] if len(legs) == 1 else {"AccountKey": self.account_key,
-                                               "Orders": legs}
+        # one leg is a plain order; two are an OCO pair, sent as Saxo's own
+        # sample sends it: ONLY the "Orders" array at the top, each order
+        # carrying its own AccountKey and ManualOrder. An AccountKey on the
+        # wrapper made Saxo read the wrapper as an order of its own and
+        # refuse the pair (HTTP 400: "requires ManualOrder to be specified
+        # ... IsOcoOrder = True", then "Uic ... not specified"), which left
+        # a position whose legs were cancelled for a sell with no stop.
+        body = legs[0] if len(legs) == 1 else {"Orders": legs}
         try:
             resp = self._req("POST", "/trade/v2/orders", body=body,
                              request_id=client_order_id or uuid.uuid4().hex)
